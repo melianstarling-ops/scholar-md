@@ -1,0 +1,12 @@
+# scholar-md — patents 管线依赖
+#
+# 核心:专利几何解析只依赖 PyMuPDF(提供 `fitz`)。
+# 可选:Tier1 云端 AI 审查(ai_review.py)按需安装对应 SDK,无 API key 时不需要。
+
+# --- 核心(必需) ---
+PyMuPDF==1.24.10
+
+# --- 可选:Tier1 AI 审查(按你用的模型供应商选装) ---
+# anthropic==0.46.0
+# openai==1.109.1
+# google-genai==1.74.0

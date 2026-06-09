@@ -1,0 +1,31 @@
+# ============================================================================
+# scholar-md .gitignore
+#
+# 公开(进 git → GitHub):scripts/ 工具代码 + 开源标配
+#   (README / LICENSE / DISCLAIMER / requirements.txt / .gitignore)。
+# 私有(不公开,留本地/网盘):
+#   - 01_System/   规程与 SOP
+#   - AGENTS.md    agent 行为宪法
+#   - 02_Source/   输入 PDF        03_Output/  转换产物        04_Docs/  本地笔记
+# 数据通过 OneDrive/坚果云等网盘在多台设备间同步;公开仓库只含工具与开源标配。
+# ============================================================================
+
+# --- Python 环境与缓存 ---
+.venv/
+__pycache__/
+*.pyc
+*.pyo
+
+# --- IDE / 本地设置 ---
+.claude/
+.vscode/
+
+# --- 私有:规程与 agent 规则(不公开) ---
+01_System/
+AGENTS.md
+TODO.md
+
+# --- 私有:输入 / 产物 / 笔记数据(走网盘,不公开) ---
+02_Source/
+03_Output/
+04_Docs/
