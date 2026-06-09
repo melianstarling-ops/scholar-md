@@ -10,6 +10,7 @@
 """
 from __future__ import annotations
 
+import re
 import statistics
 from dataclasses import dataclass
 
@@ -152,10 +153,16 @@ def strip_bands(words: list[Word], page_height: float, profile: LayoutProfile) -
     return kept, removed
 
 
+# 纯栏号/页码行：单个整数，或左右两栏并排的两个整数（美国专利每栏顶部印栏号，
+# 紧贴运行页眉下方，可带尾点如 "1."）。左右栏号同 y 会被 group_lines 并成一行，
+# 故单纯 isdigit 判不出（"1. 2" / "11 12" 含空格/点），用此正则整行匹配。
+_NUMBER_ROW_RE = re.compile(r"^\d{1,4}\.?(?:\s+\d{1,4}\.?)?$")
+
+
 def _is_footer_noise(text: str) -> bool:
-    """纯页码 / 页眉残片。"""
+    """纯页码 / 栏号行（单个，或左右两栏并排的整数，允许尾点）。"""
     t = text.strip()
-    return bool(t) and (t.isdigit() and len(t) <= 4)
+    return bool(t) and bool(_NUMBER_ROW_RE.match(t))
 
 
 def strip_line_numbers(words: list[Word], gutter_x: float, profile: LayoutProfile) -> tuple[list[Word], list[Word]]:
