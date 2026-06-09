@@ -30,6 +30,15 @@ def find_claims_split(full_text: str, profile: LayoutProfile) -> tuple[str, str 
     return head, tail.strip()
 
 
+# 子项内部"引出更深一层子列表"的过渡词冒号（英文专利惯例）。命中则在冒号后再断一次，
+# 使嵌套首项独立成行 —— 修复 "the lead comprising: at least one filer…" 被并进同一子项。
+# 注:仅英文过渡词;多语言(中/日)需在对应 profile 扩词或改走几何缩进(见 TODO)。
+_SUBLIST_COLON_RE = re.compile(
+    r"^(.*?\b(?:comprising|comprises|consisting(?:\s+essentially)?\s+of|including|includes)\s*:)\s*(.+)$",
+    re.IGNORECASE,
+)
+
+
 def _format_claim(num: str, body: str) -> str:
     body = re.sub(r"\s+", " ", body).strip()
     # 依赖关系提示已天然包含在 "of claim N" 文字中，无需额外标注
@@ -39,7 +48,12 @@ def _format_claim(num: str, body: str) -> str:
         clauses = [c.strip() for c in re.split(r";", rest) if c.strip()]
         lines = [f"{num}. {head.strip()}:"]
         for c in clauses:
-            lines.append(f"   - {c}")
+            m = _SUBLIST_COLON_RE.match(c)
+            if m:
+                lines.append(f"   - {m.group(1).strip()}")
+                lines.append(f"   - {m.group(2).strip()}")
+            else:
+                lines.append(f"   - {c}")
         return "\n".join(lines)
     return f"{num}. {body}"
 
