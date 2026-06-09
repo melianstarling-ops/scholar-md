@@ -212,9 +212,13 @@ def convert(pdf_path: Path, out_dir: Path, profile: LayoutProfile | None = None)
     elif full_spec:
         parts.append("> [转换提示] 未检测到标准 claims 标记，权利要求可能并入说明书。\n")
     if figure_pages:
-        parts.append("## Drawings\n")
+        # 一张 PNG = 一整张图纸（常含多个 FIG，且 FIG 号多画在图里、不在文字层），
+        # 故按"图纸"诚实编号，不伪造单 FIG 号；文字层偶检到的 FIG 号附在括号里。
+        parts.append("## Figures\n")
         for seq, fp in enumerate(figure_pages, 1):
-            cap = ", ".join(fp.fig_labels) if fp.fig_labels else f"Drawing sheet {seq}"
+            cap = f"Drawing Sheet {seq}"
+            if fp.fig_labels:
+                cap += f" ({', '.join(fp.fig_labels)})"
             parts.append(f"![{cap}]({fp.image_rel})\n\n*{cap}*\n")
     if front_md.strip():
         parts.append("## References Cited & Classifications\n")
