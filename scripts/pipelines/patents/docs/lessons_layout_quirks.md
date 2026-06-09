@@ -108,3 +108,30 @@
 
 ### 关联代码
 - 修复点：`convert_patent.py`（`_mark_headings` / `_strip_leading_title_block` / `_INLINE_HEAD_RE`）
+
+---
+
+## L4 — 行号剔除带过宽，误删栏内参考标号（静默丢内容 + Tier0 盲区）
+
+### 现象
+正文里的参考标号被悄悄删掉：`FIGS. 7 and 8`→`FIGS. 7 and`、`distal end 76 is
+broader`→`distal end is broader`、`lead 46`、`104`/`111` 等。
+
+### 根因
+`strip_line_numbers` 把**任何**距 gutter ±`line_number_band_halfwidth`(原 16pt)内的纯
+整数都当行号删，没区分"行号 vs 栏内标号"。实测：**真行号在缝隙正中(距 gutter≈0)**，
+**栏内标号(落在栏边缘)距 gutter 12–16pt**。半宽 16 把后者也圈了进去。注意"只删 5 的
+倍数"救不了——标号里也有 `40`/`130` 等 5 的倍数。
+
+### 对策
+半宽 16→**8**(`profiles.line_number_band_halfwidth`)。行号(距 0)全删、标号(距≥12)
+全留，且不依赖编号方式(每行/每5行都成立)。实测标号全部恢复、行号仍剔除、Tier0 零丢失。
+
+### 连带发现：Tier0 有盲区
+Tier0 覆盖校验的"期望集"是**保留词**(strip 后)，被 strip 掉的词(行号/页眉/页码)**不在
+校验范围**。所以 `strip_line_numbers` 误删真内容时，被删词落进"已删除"桶，Tier0 看不见
+→ 报 0 丢失却实际丢了。**改进方向**(见 TODO)：校验"已删除词"须匹配已知噪声模式
+(行号=近正中、页眉=匹配正则…)，不匹配即告警；或 Tier0 直接对源 PDF 全词集校验。
+
+### 关联代码
+- 修复点：`profiles.py:line_number_band_halfwidth`（16→8）

@@ -44,8 +44,10 @@ class LayoutProfile:
     )
 
     # --- 行号剔除 ---
-    # 纯整数 token，且 x-center 距 gutter 在此半宽内 → 行号
-    line_number_band_halfwidth: float = 16.0
+    # 纯整数 token，且 x-center 距 gutter 在此半宽内 → 行号。
+    # 实测：真行号在缝隙正中(距 gutter≈0)，栏内参考标号(如 "lead 76"、"FIGS. 7 and 8")
+    # 距 gutter≥12pt。半宽取 8 可干净区分(原 16 会误删落在栏边缘的标号 → 静默丢内容)。
+    line_number_band_halfwidth: float = 8.0
 
     # --- 分栏 ---
     # gutter 优先由行号阶梯实测；无阶梯时回退到页宽中点
