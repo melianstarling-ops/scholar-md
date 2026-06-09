@@ -74,3 +74,37 @@
 
 ### 关联代码
 - 修复点：`reading_order.py:_column_paragraphs`（`indent_thr` 改 em 基）
+
+---
+
+## L3 — 标题识别：宽松全大写前缀正则会误判，须用"已知关键词 + 独立全大写"
+
+### 现象
+① `A DBS system comprises…` 被误标成 `## A Dbs`（冠词 A + 缩写 DBS + 小写词）。
+② L2 缩进修复把章节标题拆成独立全大写段后，`FIELD OF THE INVENTION` 等真标题
+**反而全部漏标**（不再是 `##`）。③ `CROSS REFERENCES TO RELATED APPLICATIONS`
+跨两行的居中标题，首行被"重复标题剥离器"吞掉、次行降级。
+
+### 根因
+- 旧 `_mark_headings` 用宽松正则 `^([A-Z][A-Z0-9&/\- ]{4,}?)\s+(?=[A-Z][a-z]|[a-z])`
+  抓"任意全大写前缀 + 小写/Title 词" → `A DBS` 命中；又**跳过整段全大写**
+  （本想"留待后续"却无后续）→ 独立成段的真标题漏标。
+- 旧 `_strip_leading_title_block` "见前导全大写就删" → 连累真章节标题首行。
+
+### 对策
+1. **`_mark_headings` 双判据**（弃用宽松前缀正则）：(a) 整段全大写→先合并紧邻全大写段
+   （跨行居中标题重组）再判够格（匹配 `profile.section_keywords` **或** ≥3 个全大写词且
+   够长——`≥3 词` 排除 "A DBS"）；(b) 行内仅当段首全大写串**匹配已知章节关键词**、
+   且后接 Title-case 正文才拆标题。
+2. **`_strip_leading_title_block(text, title)`**：只剥与封面 `meta['title']` 词集重合的
+   全大写段，遇到不属于标题的全大写段（真章节标题）即停。
+- 实测：10 个 `##` 标题全部正确（含重组的 `## Cross References To Related Applicatons`）、
+  `A DBS` 误判消除、Tier0 `missing_chars=0`。
+
+### 教训
+版面"是不是标题"不要用纯形态正则去猜——专利章节标题词表是**有限固定**的，用
+关键词字典 + "独立全大写多词"双重确认，远比"全大写前缀"鲁棒。与 L2 联动：缩进修复
+改变了分段形态，标题识别须随之从"行内前缀"转向"独立段落"。
+
+### 关联代码
+- 修复点：`convert_patent.py`（`_mark_headings` / `_strip_leading_title_block` / `_INLINE_HEAD_RE`）

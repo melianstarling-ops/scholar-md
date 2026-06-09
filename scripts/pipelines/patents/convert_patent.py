@@ -19,9 +19,10 @@ from page_classify import PageKind, classify_document
 from profiles import LayoutProfile, get_profile
 from reading_order import reconstruct, reconstruct_linear
 
-# 段首"全大写短语 + Title/小写词" → 章节标题（不含 '.'，避免误吃 "U.S."）
-_HEADING_RE = re.compile(r"^([A-Z][A-Z0-9&/\- ]{4,}?)\s+(?=[A-Z][a-z]|[a-z])")
 _ALLCAPS_RE = re.compile(r"^[^a-z]*$")
+# 段首"全大写连续词串 + 紧跟 Title-case 词" —— 用于行内标题(标题与正文未分段时)。
+# 要求正文以 Title-case 起（[A-Z][a-z]），从而排除 "A DBS system…"(冠词+缩写+小写)误判。
+_INLINE_HEAD_RE = re.compile(r"^((?:[A-Z][A-Z0-9&/.\-]*\s+)+)(?=[A-Z][a-z])")
 
 
 @dataclass
@@ -42,30 +43,69 @@ def _topic_tag(stem: str) -> str:
     return ""
 
 
-def _mark_headings(text: str) -> str:
-    """把段落内的全大写小标题转成 '## '。"""
-    out_paras = []
-    for para in text.split("\n\n"):
-        p = para.strip()
-        if not p:
+def _is_allcaps(p: str) -> bool:
+    return bool(_ALLCAPS_RE.match(p)) and any(c.isalpha() for c in p)
+
+
+def _looks_like_heading(p: str, keywords: tuple[str, ...]) -> bool:
+    """全大写段够格当章节标题吗：匹配已知章节关键词，或 ≥3 个全大写词且够长。
+    （≥3 词排除 "A DBS" 这类 冠词+缩写 的孤立全大写串被误判。）"""
+    norm = re.sub(r"[-\s]+", " ", p.upper()).strip()
+    if any(norm == k or norm.startswith(k + " ") for k in keywords):
+        return True
+    return len(p.split()) >= 3 and len(p) >= 12
+
+
+def _mark_headings(text: str, profile: LayoutProfile) -> str:
+    """章节标题转 '## '。两条判据(不再用宽松全大写前缀正则)：
+    (a) 整段全大写 → 先合并紧邻的全大写段(跨行居中标题，如 CROSS REFERENCES TO
+        RELATED / APPLICATIONS)，再判是否够格(关键词或 ≥3 词)；
+    (b) 行内：段首全大写串匹配已知章节关键词、且后接 Title-case 正文 → 拆标题+正文。"""
+    keywords = tuple(re.sub(r"[-\s]+", " ", k.upper()).strip() for k in profile.section_keywords)
+    paras = [p.strip() for p in text.split("\n\n") if p.strip()]
+    out: list[str] = []
+    i = 0
+    while i < len(paras):
+        p = paras[i]
+        if _is_allcaps(p):
+            block = [p]
+            while i + 1 < len(paras) and _is_allcaps(paras[i + 1]):
+                i += 1
+                block.append(paras[i])
+            joined = " ".join(block)
+            out.append(f"## {joined.title()}" if _looks_like_heading(joined, keywords) else joined)
+            i += 1
             continue
-        m = _HEADING_RE.match(p)
-        if m and not _ALLCAPS_RE.match(p):  # 整段全大写(标题块)留待后续处理
-            head = m.group(1).strip().rstrip(":")
-            rest = p[m.end():].strip()
-            out_paras.append(f"## {head.title()}")
-            if rest:
-                out_paras.append(rest)
-        else:
-            out_paras.append(p)
-    return "\n\n".join(out_paras)
+        m = _INLINE_HEAD_RE.match(p)
+        if m:
+            run = m.group(1).strip()
+            norm = re.sub(r"[-\s]+", " ", run.upper()).strip()
+            if any(norm == k or norm.startswith(k + " ") for k in keywords):
+                out.append(f"## {run.title()}")
+                rest = p[m.end():].strip()
+                if rest:
+                    out.append(rest)
+                i += 1
+                continue
+        out.append(p)
+        i += 1
+    return "\n\n".join(out)
 
 
-def _strip_leading_title_block(text: str) -> str:
-    """去掉正文开头重复的全大写发明标题段。"""
+def _strip_leading_title_block(text: str, title: str = "") -> str:
+    """去掉正文开头重复的全大写发明标题段。只剥与封面标题词集重合的全大写段，
+    遇到不属于标题的全大写段(真章节标题，如 CROSS REFERENCES)即停，避免连累。
+    无封面标题可比时退回旧行为(剥所有前导全大写)。"""
+    title_words = set(re.findall(r"[A-Za-z]+", title.upper()))
     paras = text.split("\n\n")
     i = 0
-    while i < len(paras) and (_ALLCAPS_RE.match(paras[i].strip()) and len(paras[i].strip()) > 3):
+    while i < len(paras):
+        p = paras[i].strip()
+        if not (_ALLCAPS_RE.match(p) and len(p) > 3 and any(c.isalpha() for c in p)):
+            break
+        pwords = set(re.findall(r"[A-Za-z]+", p.upper()))
+        if title_words and pwords and not pwords <= title_words:
+            break
         i += 1
     return "\n\n".join(paras[i:]).strip()
 
@@ -132,10 +172,10 @@ def convert(pdf_path: Path, out_dir: Path, profile: LayoutProfile | None = None)
         body_text_parts.append(txt)
         expected_words += [w.text for w in kept]
     full_spec = "\n\n".join(p for p in body_text_parts if p.strip())
-    full_spec = _strip_leading_title_block(full_spec)
+    full_spec = _strip_leading_title_block(full_spec, meta.get("title", ""))
 
     desc_text, claims_text = find_claims_split(full_spec, profile)
-    desc_md = _mark_headings(desc_text)
+    desc_md = _mark_headings(desc_text, profile)
     claims_md = structure_claims(claims_text) if claims_text else ""
 
     # --- 附图 ---
