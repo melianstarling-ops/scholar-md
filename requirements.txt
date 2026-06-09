@@ -4,9 +4,13 @@
 # 可选:Tier1 云端 AI 审查(ai_review.py)按需安装对应 SDK,无 API key 时不需要。
 
 # --- 核心(必需) ---
-# 1.24 系列末版:与原 1.24.10 同系、API 零漂移，且带 Python 3.13 wheel
-# （1.24.10 在 3.13 上无 wheel、需编译 VS）。实测全流程 Tier0 0 丢失、各修复一致。
-PyMuPDF==1.24.14
+# 升到 1.27.2.3：为将来评估迁移到 PyMuPDF4LLM 铺路(两者版本锁步)。Python 3.10–3.14
+# 均有 wheel；本仓用 Python 3.13。实测全流程 Tier0 0 丢失、各修复与 1.24.x 一致
+# (核心 get_text/get_pixmap API 在 1.24↔1.27 间未变)。
+PyMuPDF==1.27.2.3
+
+# --- 评估用(PyMuPDF4LLM 迁移评估;当前几何管线未使用，留作未来对比) ---
+pymupdf4llm==1.27.2.3
 
 # --- 可选:Tier1 AI 审查(按你用的模型供应商选装) ---
 # anthropic==0.46.0
