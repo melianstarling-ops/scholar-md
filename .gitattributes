@@ -1,0 +1,7 @@
+# 统一换行为 LF（跨平台一致，消除 Windows autocrlf 的 LF→CRLF 警告）
+* text=auto eol=lf
+
+# 二进制文件不做换行转换
+*.png binary
+*.pdf binary
+*.ico binary
