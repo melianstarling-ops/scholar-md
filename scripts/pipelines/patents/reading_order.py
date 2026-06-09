@@ -190,8 +190,11 @@ def _column_paragraphs(words: list[Word], threshold: float, y_tol: float, line_h
         return []
     x0s = sorted(min(w.x0 for w in ln) for ln in lines)
     margin = x0s[max(0, len(x0s) // 10)]   # 10 分位作左边距，抗噪
-    indent_thr = 1.2 * line_h              # 缩进阈值
-    gap_thr = 1.7 * line_h                 # 段间行距阈值
+    # 首行缩进是【水平】排版量(≈1em)，与【垂直】行高无关；旧的 1.2*line_h 量纲错且虚高
+    # (实测 18.5pt 远高于真实缩进 9pt → 缩进段落全判不出)。改按字宽(em 代理)自适应：
+    # 首行缩进≈2 字宽、续行抖动≈0.1 字宽，取 1 字宽作阈值，跨字号/文档稳健。
+    indent_thr = max(2.5, 1.0 * median_char_width(words))
+    gap_thr = 1.7 * line_h                  # 段间行距是【垂直】量，仍按行高
 
     paras: list[str] = []
     cur: str | None = None
