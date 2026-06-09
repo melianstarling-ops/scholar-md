@@ -27,6 +27,9 @@ class LayoutProfile:
     )
     # 正文页：中央带内"5 的倍数"行号的最少个数
     ladder_min_count: int = 6
+    # 弱判据：claims 续页等行号稀疏，但仍是双栏正文 —— 行号 ≥ 此数 + 两栏均有足量词即判正文
+    ladder_min_count_weak: int = 2
+    body_column_min_words: int = 80       # 双栏正文每栏最少词数(区分续页 vs 附图/附录)
     ladder_band_halfwidth: float = 35.0   # 距页面中心的横向半宽
     ladder_value_max: int = 70
     # 附图页：词数上限（且通常含整页图像）

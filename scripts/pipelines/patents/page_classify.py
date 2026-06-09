@@ -65,14 +65,24 @@ def classify_page(index: int, page: "fitz.Page", profile: LayoutProfile) -> Page
 
     header_str = " ".join(w.text for w in words[:15])
     ladder = _ladder_xcenters(words, center_x, profile)
+    gutter = statistics.median(ladder) if ladder else center_x
+    # 双栏正文弱判据：gutter 两侧各有足量词。claims 续页行号稀疏(不够 ladder_min_count)
+    # 但仍是双栏正文，靠"两栏均有 ≥body_column_min_words 词"识别，避免误判为 FRONT_MATTER。
+    left_words = sum(1 for w in words if w.xc < gutter - 20)
+    right_words = sum(1 for w in words if w.xc > gutter + 20)
+    two_col_body = (
+        len(ladder) >= profile.ladder_min_count_weak
+        and left_words >= profile.body_column_min_words
+        and right_words >= profile.body_column_min_words
+    )
 
     if index == profile.cover_page_index:
         info.kind = PageKind.COVER
     elif profile.frontmatter_header_re.search(header_str):
         info.kind = PageKind.FRONT_MATTER
-    elif len(ladder) >= profile.ladder_min_count:
+    elif len(ladder) >= profile.ladder_min_count or two_col_body:
         info.kind = PageKind.SPEC_BODY
-        info.gutter_x = statistics.median(ladder)
+        info.gutter_x = gutter
         info.ladder = ladder
     elif len(words) < profile.figure_word_max:
         info.kind = PageKind.FIGURE
