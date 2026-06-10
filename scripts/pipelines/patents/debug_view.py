@@ -20,11 +20,13 @@
     标记框 ↔ 右栏"本页标记"行互相联动（hover 高亮、点击定位）。
   * 标记（M 进入标记模式）：
       - 点击词框 / 拖拽画区域框 → 弹出色点气泡直接选语义（误删红/漏删橙/
-        转换错蓝/漏识别主题色），不再循环切换；点已有标记框可重选/删除；
+        转换错蓝/漏识别主题色），选定即自动收起；点已有标记框可重选/删除；
+      - 区域框按住左键可整框拖动微调位置；
       - 右栏标记行内嵌色点，可直接改语义；Delete 键删除选中标记；
-      - localStorage 实时自动保存；点一次「自动保存」选定落盘文件后，
-        后续每次改动静默写入 <名>_annotations.json（File System Access API，
-        外部 Chromium 浏览器可用；不支持的环境退回「导出标记」按钮）。
+      - localStorage 实时自动保存；「导出标记」下载 <名>_annotations.json
+        （浏览器限制只能落"下载"目录）+ 复制剪贴板；随后跑
+        `debug_view.py --collect` 把下载目录的标记文件归位到
+        03_Output/patents/<名>/ 供 agent 读取。
   * 主题：默认暗色（对齐 .vscode/md-theme.css 的 claude-dark 配色），☀/☾ 可切换。
 
 不进主管线、不改产物；判定数据与主转换同源（同一批函数现算），所见即引擎所判。
@@ -32,6 +34,7 @@
 用法（H.5 自适应 I/O）:
     python scripts/pipelines/patents/debug_view.py                 # 默认源目录全量
     python scripts/pipelines/patents/debug_view.py --src <pdf|dir> [--zoom 2.0]
+    python scripts/pipelines/patents/debug_view.py --collect       # 归位下载目录的标记文件
 输出: 本脚本同目录 <stem>_debug.html（所有者指定；已全局 gitignore，不入公开仓）
 """
 from __future__ import annotations
@@ -215,7 +218,8 @@ _TEMPLATE = r"""<!DOCTYPE html>
   #stage img{display:block;width:100%;pointer-events:none;user-select:none}
   [data-theme="dark"] #stage.inv img{filter:invert(.93) hue-rotate(180deg)}
   #overlay{position:absolute;inset:0}
-  .box{position:absolute;border-radius:2px}
+  .box{position:absolute;border-radius:2px;opacity:.8}
+  .box:hover{opacity:1}
   .box.kept{border:1px solid color-mix(in srgb,var(--kept) 50%,transparent);background:color-mix(in srgb,var(--kept) 9%,transparent);
             z-index:2;cursor:pointer}
   .box.line_number{border:1.5px solid var(--ln);background:color-mix(in srgb,var(--ln) 24%,transparent);z-index:3;cursor:pointer}
@@ -224,7 +228,10 @@ _TEMPLATE = r"""<!DOCTYPE html>
   .box.para{border:1px dashed color-mix(in srgb,var(--para) 60%,transparent);border-left:3px solid var(--para);
             background:transparent;z-index:1;cursor:pointer}
   .box.para.hot{background:color-mix(in srgb,var(--para) 15%,transparent);border-color:var(--para)}
-  .annbox{position:absolute;z-index:6;cursor:pointer;border-radius:3px}
+  .annbox{position:absolute;z-index:6;cursor:pointer;border-radius:3px;opacity:.8}
+  .annbox:hover,.annbox.sel,.annbox.moving{opacity:1}
+  .annbox.region{cursor:grab}
+  .annbox.moving{cursor:grabbing}
   .annbox.wrong_del{border:2.5px double var(--bad);box-shadow:0 0 0 2px color-mix(in srgb,var(--bad) 35%,transparent)}
   .annbox.missed_del{border:2.5px double var(--ln);box-shadow:0 0 0 2px color-mix(in srgb,var(--ln) 35%,transparent)}
   .annbox.conv_err{border:2.5px double var(--kept);box-shadow:0 0 0 2px color-mix(in srgb,var(--kept) 40%,transparent)}
@@ -252,8 +259,9 @@ _TEMPLATE = r"""<!DOCTYPE html>
   #film{position:absolute;left:0;right:0;bottom:0;z-index:20;padding:10px 16px;overflow-x:auto;
         scroll-snap-type:x proximity;scrollbar-width:thin;border-top:1px solid var(--line);
         background:color-mix(in srgb,var(--panel) 88%,transparent);backdrop-filter:blur(10px);
-        transform:translateY(calc(100% - 7px));transition:transform .26s ease}
-  #film.show{transform:translateY(0)}
+        transform:translateY(calc(100% - 7px));opacity:.6;
+        transition:transform .5s cubic-bezier(.22,1,.36,1),opacity .4s ease}
+  #film.show{transform:translateY(0);opacity:1}
   #filmtrack{display:flex;gap:10px;width:max-content;padding:2px}
   .thumb{flex:0 0 auto;height:104px;border-radius:8px;overflow:hidden;position:relative;cursor:pointer;
          border:2px solid var(--line);transform:scale(.93);transition:transform .22s,border-color .18s;
@@ -326,8 +334,7 @@ _TEMPLATE = r"""<!DOCTYPE html>
     <span class="sep"></span>
     <div class="grp">
       <button class="btn" id="annBtn" title="标记模式 (M)：点词框/拖拽画框 → 气泡选语义">✎ 标记</button>
-      <button class="btn" id="fsBtn" title="选定落盘文件后,标记每次改动自动写入(需浏览器支持;VS Code 内嵌预览不支持时用导出)">💾 自动保存</button>
-      <button class="btn" id="expBtn" title="复制并下载 *_annotations.json">导出</button>
+      <button class="btn" id="expBtn" title="下载+复制 *_annotations.json;之后跑 debug_view.py --collect 归位到 md 产物文件夹">导出标记</button>
       <button class="btn" id="themeBtn" title="亮/暗切换">☀</button>
     </div>
   </div>
@@ -440,8 +447,13 @@ function syncFilm(){
   const a=track.querySelector(".thumb.active");
   if(a&&film.classList.contains("show"))a.scrollIntoView({inline:"center",block:"nearest",behavior:"smooth"});
 }
-$("filmzone").addEventListener("mouseenter",()=>{film.classList.add("show");syncFilm();});
-film.addEventListener("mouseleave",()=>film.classList.remove("show"));
+let filmT=null;   // hover 意图延迟,避免鼠标路过底缘时惊跳
+$("filmzone").addEventListener("mouseenter",()=>{
+  clearTimeout(filmT);
+  filmT=setTimeout(()=>{film.classList.add("show");syncFilm();},160);
+});
+$("filmzone").addEventListener("mouseleave",()=>clearTimeout(filmT));
+film.addEventListener("mouseleave",()=>{clearTimeout(filmT);film.classList.remove("show");});
 film.addEventListener("wheel",e=>{           // 竖滚轮 → 横滑(相册式)
   if(e.ctrlKey)return;
   if(Math.abs(e.deltaY)>Math.abs(e.deltaX)){e.preventDefault();film.scrollLeft+=e.deltaY;}
@@ -455,33 +467,16 @@ function exportJson(){
     legend:{wrong_del:"误删(内容被错误剔除)",missed_del:"漏删(噪声未被剔除)",conv_err:"转换错误(空格/段落/标题等)",missed_rec:"漏识别(引擎完全没框到的区域)"},
     annotations:arr},null,2);
 }
-/* 自动落盘:File System Access API,一次选文件,之后每次改动静默写入(防抖)。
-   VS Code 内嵌预览等不支持的环境退回「导出」按钮。 */
-let fsHandle=null, fsTimer=null;
-async function fsPick(){
-  if(!window.showSaveFilePicker){toast("此环境不支持自动落盘,请用「导出」按钮");return;}
-  try{
-    fsHandle=await showSaveFilePicker({suggestedName:TITLE+"_annotations.json",
-      types:[{description:"JSON",accept:{"application/json":[".json"]}}]});
-    $("fsBtn").classList.add("on");toast("自动保存已开启:每次改动静默写入");fsWrite();
-  }catch(e){/* 用户取消 */}
-}
-function fsWrite(){
-  if(!fsHandle)return;
-  clearTimeout(fsTimer);
-  fsTimer=setTimeout(async()=>{
-    try{const w=await fsHandle.createWritable();await w.write(exportJson());await w.close();}
-    catch(e){fsHandle=null;$("fsBtn").classList.remove("on");toast("自动保存失败,已退回手动导出");}
-  },500);
-}
-$("fsBtn").onclick=fsPick;
-function saveAnn(){localStorage.setItem(ANN_KEY,JSON.stringify(Object.fromEntries(ann)));fsWrite();}
+function saveAnn(){localStorage.setItem(ANN_KEY,JSON.stringify(Object.fromEntries(ann)));}
+/* 导出:浏览器只能落"下载"目录(无法直写工作区路径)。归位到 md 产物文件夹用
+   `debug_view.py --collect`(把下载目录的 *_annotations.json 移到 03_Output/patents/<名>/)。 */
 $("expBtn").onclick=()=>{
   const json=exportJson();
-  navigator.clipboard&&navigator.clipboard.writeText(json).then(()=>toast(`已复制 ${ann.size} 条标记 JSON 到剪贴板`),()=>{});
+  navigator.clipboard&&navigator.clipboard.writeText(json).then(()=>{},()=>{});
   const a=document.createElement("a");
   a.href=URL.createObjectURL(new Blob([json],{type:"application/json"}));
   a.download=TITLE+"_annotations.json";a.click();URL.revokeObjectURL(a.href);
+  toast(`已导出 ${ann.size} 条(下载目录+剪贴板);跑 --collect 归位到 md 文件夹`);
 };
 
 /* ---- 标记绘制 ---- */
@@ -503,9 +498,10 @@ function drawAnn(){
 function delAnn(k){ann.delete(k);if(selKey===k)selKey=null;saveAnn();drawAnn();toast("已删除标记");}
 
 /* ---- 语义气泡:点中标记/词框 → 色点直选 ---- */
-const pop={el:$("pop"),key:null,pending:null};
+const pop={el:$("pop"),key:null,pending:null,justOpened:false};
 function openPop(x,y,opts){
   pop.key=opts.key||null; pop.pending=opts.pending||null;
+  pop.justOpened=true; setTimeout(()=>pop.justOpened=false,50);
   const kind=pop.key?(ann.get(pop.key).kind||"word"):pop.pending.kind;
   const cats=kind==="region"?REGION_CATS:WORD_CATS;
   const curCat=pop.key?ann.get(pop.key).cat:null;
@@ -521,22 +517,60 @@ function openPop(x,y,opts){
   if(del)del.onclick=ev=>{ev.stopPropagation();delAnn(pop.key);closePop();};
 }
 function applyCat(c){
-  if(pop.key){const v=ann.get(pop.key);v.cat=c;ann.set(pop.key,v);toast("标记: "+ANN_NAMES[c]);}
-  else if(pop.pending){
-    const p=pop.pending, k=annKey(p.page,p.bbox.join(","));
-    ann.set(k,{page:p.page,text:p.text,bbox:p.bbox,cat:c,kind:p.kind});
-    selKey=k;toast("标记: "+ANN_NAMES[c]+(p.text?" — "+p.text:""));
+  const key=pop.key, pending=pop.pending;
+  closePop();                                       // 选定即关,再落数据
+  if(key){const v=ann.get(key);if(v){v.cat=c;ann.set(key,v);toast("标记: "+ANN_NAMES[c]);}}
+  else if(pending){
+    const k=annKey(pending.page,pending.bbox.join(","));
+    ann.set(k,{page:pending.page,text:pending.text,bbox:pending.bbox,cat:c,kind:pending.kind});
+    selKey=k;toast("标记: "+ANN_NAMES[c]+(pending.text?" — "+pending.text:""));
   }
-  saveAnn();drawAnn();closePop();
+  saveAnn();drawAnn();
 }
 function closePop(){pop.el.hidden=true;pop.key=null;pop.pending=null;}
-document.addEventListener("click",e=>{if(!pop.el.hidden&&!pop.el.contains(e.target))closePop();});
+document.addEventListener("click",e=>{
+  if(!pop.el.hidden&&!pop.justOpened&&!pop.el.contains(e.target))closePop();
+});
+
+/* ---- 区域框拖动微调：按住左键拖整框,松手提交;未动则照常弹气泡 ---- */
+let moveSt=null;
+st.addEventListener("pointerdown",e=>{
+  const ab=e.target.closest(".annbox.region");
+  if(!ab||e.button!==0)return;
+  const v=ann.get(ab.dataset.k);
+  if(!v)return;
+  moveSt={k:ab.dataset.k,el:ab,x0:e.clientX,y0:e.clientY,bbox:[...v.bbox],moved:false};
+});
+document.addEventListener("pointermove",e=>{
+  if(!moveSt)return;
+  if(!moveSt.moved&&Math.hypot(e.clientX-moveSt.x0,e.clientY-moveSt.y0)<4)return;
+  moveSt.moved=true;
+  moveSt.el.classList.add("moving");
+  const d=DATA[cur], r=st.getBoundingClientRect();
+  const dx=(e.clientX-moveSt.x0)*d.w/r.width, dy=(e.clientY-moveSt.y0)*d.h/r.height;
+  const [x0,y0,x1,y1]=moveSt.bbox, w=x1-x0, h=y1-y0;
+  const nx=Math.min(Math.max(0,x0+dx),d.w-w), ny=Math.min(Math.max(0,y0+dy),d.h-h);
+  moveSt.nb=[nx,ny,nx+w,ny+h].map(v=>Math.round(v*10)/10);
+  moveSt.el.style.left=pct(nx,d.w);moveSt.el.style.top=pct(ny,d.h);
+});
+document.addEventListener("pointerup",()=>{
+  if(!moveSt)return;
+  if(moveSt.moved&&moveSt.nb){
+    suppressClick=true;
+    const v=ann.get(moveSt.k);
+    ann.delete(moveSt.k);                            // key 含坐标,移动后重建
+    const d=DATA[cur], k=annKey(d.page,moveSt.nb.join(","));
+    ann.set(k,{...v,bbox:moveSt.nb});
+    selKey=k;saveAnn();drawAnn();
+  }
+  moveSt=null;
+});
 
 /* ---- 标记模式：空白处拖拽画区域框 ---- */
 let drawing=null;
 st.addEventListener("pointerdown",e=>{
   if(!annMode||e.button!==0)return;
-  if(e.target.closest(".annbox"))return;            // 点已有标记 → 走 click 气泡
+  if(e.target.closest(".annbox"))return;            // 点已有标记 → 移动/气泡,不画新框
   drawing={x0:e.clientX,y0:e.clientY,moved:false,el:null};
 });
 st.addEventListener("pointermove",e=>{
@@ -726,6 +760,30 @@ def collect_pdfs(srcs: list[str]) -> list[Path]:
     return list(seen)
 
 
+def collect_annotations(pdfs: list[Path], md_root: Path) -> int:
+    """把浏览器下载目录里导出的 <stem>_annotations*.json 归位到 md 产物文件夹。
+    同一 stem 多份(浏览器重名加 (1) 等)取最新,旧副本留在原处不动。"""
+    downloads = Path.home() / "Downloads"
+    moved = 0
+    for pdf in pdfs:
+        cands = sorted(downloads.glob(f"{pdf.stem}_annotations*.json"),
+                       key=lambda p: p.stat().st_mtime)
+        if not cands:
+            continue
+        newest = cands[-1]
+        target_dir = md_root / pdf.stem
+        target_dir.mkdir(parents=True, exist_ok=True)
+        target = target_dir / f"{pdf.stem}_annotations.json"
+        target.write_bytes(newest.read_bytes())
+        newest.unlink()
+        moved += 1
+        print(f"  [MOVE] {newest.name} → {target}"
+              + (f"（另有 {len(cands) - 1} 份旧副本留在下载目录）" if len(cands) > 1 else ""))
+    if not moved:
+        print(f"  下载目录({downloads})未找到匹配的 *_annotations.json")
+    return moved
+
+
 def _load_unexplained(md_root: Path, stem: str, n_pages: int) -> list[list[dict]]:
     """读 crosscheck 报告（如有），取每页未解释词。"""
     per_page: list[list[dict]] = [[] for _ in range(n_pages)]
@@ -749,6 +807,8 @@ def main() -> int:
     ap.add_argument("--out", default=str(DEFAULT_HTML_DIR),
                     help="HTML 输出目录（默认本脚本同目录；已 gitignore）")
     ap.add_argument("--zoom", type=float, default=2.0, help="页面渲染倍率（默认 2.0）")
+    ap.add_argument("--collect", action="store_true",
+                    help="把浏览器下载目录的 *_annotations.json 归位到 md 产物文件夹后退出")
     args = ap.parse_args()
 
     pdfs = collect_pdfs(args.src)
@@ -756,6 +816,8 @@ def main() -> int:
         print("未找到 PDF。")
         return 1
     md_root = Path(args.md_root)
+    if args.collect:
+        return 0 if collect_annotations(pdfs, md_root) >= 0 else 1
     profile = get_profile()
 
     print(f"[{datetime.now():%H:%M:%S}] 生成调试视图 {len(pdfs)} 份（zoom={args.zoom}）\n")
