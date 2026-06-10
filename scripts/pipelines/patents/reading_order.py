@@ -183,8 +183,10 @@ def split_columns(words: list[Word], gutter_x: float) -> tuple[list[Word], list[
     return left, right
 
 
-def _column_paragraphs(words: list[Word], threshold: float, y_tol: float, line_h: float) -> list[str]:
-    """单栏 → 段落列表。首行缩进或大行距 → 新段；含软连字符续接。"""
+def _column_paragraph_infos(words: list[Word], threshold: float, y_tol: float, line_h: float) -> list[dict]:
+    """单栏 → 段落信息列表（调试/可视化用富结构）。每段：
+    {"text": 段文本, "lines": [行词列表...], "new_by": "indent"|"gap"|"first"}。
+    首行缩进或大行距 → 新段；含软连字符续接。_column_paragraphs 的唯一实现。"""
     lines = group_lines(words, y_tol)
     if not lines:
         return []
@@ -196,32 +198,37 @@ def _column_paragraphs(words: list[Word], threshold: float, y_tol: float, line_h
     indent_thr = max(2.5, 1.0 * median_char_width(words))
     gap_thr = 1.7 * line_h                  # 段间行距是【垂直】量，仍按行高
 
-    paras: list[str] = []
-    cur: str | None = None
+    paras: list[dict] = []
+    cur: dict | None = None
     prev_y: float | None = None
     for ln in lines:
         first_x0 = min(w.x0 for w in ln)
         ln_y = statistics.median([w.yc for w in ln])
         text = join_line(ln, threshold)
-        is_new = (
-            cur is None
-            or first_x0 > margin + indent_thr
-            or (prev_y is not None and ln_y - prev_y > gap_thr)
-        )
-        if is_new:
+        by_indent = first_x0 > margin + indent_thr
+        by_gap = prev_y is not None and ln_y - prev_y > gap_thr
+        if cur is None or by_indent or by_gap:
             if cur is not None:
                 paras.append(cur)
-            cur = text
+            cur = {"text": text, "lines": [ln],
+                   "new_by": "indent" if by_indent else ("gap" if by_gap else "first")}
         else:
             # 软连字符续接：上一段以字母+'-'结尾，且本行小写起 → 拼接去连字符
-            if cur.endswith("-") and len(cur) >= 2 and cur[-2].isalpha() and text[:1].islower():
-                cur = cur[:-1] + text
+            t = cur["text"]
+            if t.endswith("-") and len(t) >= 2 and t[-2].isalpha() and text[:1].islower():
+                cur["text"] = t[:-1] + text
             else:
-                cur = cur + " " + text
+                cur["text"] = t + " " + text
+            cur["lines"].append(ln)
         prev_y = ln_y
     if cur is not None:
         paras.append(cur)
     return paras
+
+
+def _column_paragraphs(words: list[Word], threshold: float, y_tol: float, line_h: float) -> list[str]:
+    """单栏 → 段落文本列表（主管线接口，行为不变）。"""
+    return [p["text"] for p in _column_paragraph_infos(words, threshold, y_tol, line_h)]
 
 
 def reconstruct(
