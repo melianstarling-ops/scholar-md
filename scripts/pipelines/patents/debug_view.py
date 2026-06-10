@@ -257,7 +257,7 @@ _TEMPLATE = r"""<!DOCTYPE html>
 
   /* ---- 底部缩略图条：Dock 式自动隐藏 ---- */
   #filmzone{position:absolute;left:0;right:0;bottom:0;height:16px;z-index:19}
-  #film{position:absolute;left:12px;right:12px;bottom:24px;z-index:20;padding:10px 14px;overflow-x:auto;
+  #film{position:absolute;left:12px;right:12px;bottom:-10px;z-index:20;padding:10px 14px;overflow-x:auto;
         scroll-snap-type:x proximity;scrollbar-width:thin;border:1px solid var(--line);border-radius:14px;
         background:color-mix(in srgb,var(--panel) 88%,transparent);backdrop-filter:blur(10px);
         box-shadow:0 8px 28px var(--shadow);
