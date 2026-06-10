@@ -23,19 +23,21 @@
         转换错蓝/漏识别主题色），选定即自动收起；点已有标记框可重选/删除；
       - 区域框按住左键可整框拖动微调位置；
       - 右栏标记行内嵌色点，可直接改语义；Delete 键删除选中标记；
-      - localStorage 实时自动保存；「导出标记」下载 <名>_annotations.json
-        （浏览器限制只能落"下载"目录）+ 复制剪贴板；随后跑
-        `debug_view.py --collect` 把下载目录的标记文件归位到
-        03_Output/patents/<名>/ 供 agent 读取。
+      - localStorage 实时自动保存；导出有两条路：
+        · 服务模式（`--serve`，推荐）：「导出标记」直接 POST 回写
+          03_Output/patents/<名>/<名>_annotations.json，无弹窗、无 Downloads、无 --collect；
+        · 静态模式：「导出标记」下载到 Downloads + 复制剪贴板，随后跑
+          `debug_view.py --collect` 归位。POST 失败自动退回下载。
   * 主题：默认暗色（对齐 .vscode/md-theme.css 的 claude-dark 配色），☀/☾ 可切换。
 
 不进主管线、不改产物；判定数据与主转换同源（同一批函数现算），所见即引擎所判。
 
 用法（H.5 自适应 I/O）:
-    python scripts/pipelines/patents/debug_view.py                 # 默认源目录全量
+    python scripts/pipelines/patents/debug_view.py                 # 静态:生成 <stem>_debug.html
     python scripts/pipelines/patents/debug_view.py --src <pdf|dir> [--zoom 2.0]
-    python scripts/pipelines/patents/debug_view.py --collect       # 归位下载目录的标记文件
-输出: 本脚本同目录 <stem>_debug.html（所有者指定；已全局 gitignore，不入公开仓）
+    python scripts/pipelines/patents/debug_view.py --serve         # 服务模式:导出直写工作区(推荐)
+    python scripts/pipelines/patents/debug_view.py --collect       # 归位下载目录的标记文件(静态模式善后)
+输出: 静态模式落本脚本同目录 <stem>_debug.html（已全局 gitignore）；服务模式不落静态文件。
 """
 from __future__ import annotations
 
@@ -156,12 +158,14 @@ def page_payload(doc: "fitz.Document", info, profile: LayoutProfile,
     return payload
 
 
-def build_html(name: str, pages: list[dict], resolved: list[dict]) -> str:
+def build_html(name: str, pages: list[dict], resolved: list[dict], serve: bool = False) -> str:
     data = json.dumps(pages, ensure_ascii=False, separators=(",", ":")).replace("</", "<\\/")
     res = json.dumps(resolved, ensure_ascii=False, separators=(",", ":")).replace("</", "<\\/")
+    save_url = f"/save/{name}" if serve else ""   # 服务模式:导出 POST 回写工作区;静态:空→走下载
     return (
         _TEMPLATE.replace("__TITLE__", name)
         .replace("__STAMP__", f"{datetime.now():%Y-%m-%d %H:%M}")
+        .replace("__SAVE_URL__", save_url)
         .replace("__RESOLVED__", res)
         .replace("__DATA__", data)
     )
@@ -364,7 +368,7 @@ _TEMPLATE = r"""<!DOCTYPE html>
     <span class="sep"></span>
     <div class="grp">
       <button class="btn" id="annBtn" title="标记模式 (M)：点词框/拖拽画框 → 气泡选语义">✎ 标记</button>
-      <button class="btn" id="expBtn" title="下载+复制 *_annotations.json;之后跑 debug_view.py --collect 归位到 md 产物文件夹">导出标记</button>
+      <button class="btn" id="expBtn" title="导出标记:服务模式直写 03_Output/;静态模式下载到 Downloads 后跑 --collect 归位">导出标记</button>
       <button class="btn" id="themeBtn" title="亮/暗切换">☀</button>
     </div>
   </div>
@@ -391,6 +395,7 @@ _TEMPLATE = r"""<!DOCTYPE html>
 <script>
 const DATA = __DATA__;
 const RESOLVED = __RESOLVED__;   // agent 归档件中已处理标记的 (page,bbox) 键集(生成时嵌入,SOP-07 §3)
+const SAVE_URL = "__SAVE_URL__"; // 非空=服务模式:导出直接 POST 回写 03_Output;空=静态:走浏览器下载
 const TITLE = document.title.replace(" · debug","");
 const LAYERS = [
   ["line_number","行号(剔)","var(--ln)",true],
@@ -511,14 +516,27 @@ function exportJson(){
 function saveAnn(){localStorage.setItem(ANN_KEY,JSON.stringify(Object.fromEntries(ann)));updateDirty();}
 /* 导出:浏览器只能落"下载"目录(无法直写工作区路径)。归位到 md 产物文件夹用
    `debug_view.py --collect`(把下载目录的 *_annotations.json 移到 03_Output/patents/<名>/)。 */
-$("expBtn").onclick=()=>{
-  const json=exportJson();
+function markExported(){localStorage.setItem(EXP_KEY,annSerial());updateDirty();}
+function downloadJson(json){
   navigator.clipboard&&navigator.clipboard.writeText(json).then(()=>{},()=>{});
   const a=document.createElement("a");
   a.href=URL.createObjectURL(new Blob([json],{type:"application/json"}));
   a.download=TITLE+"_annotations.json";a.click();URL.revokeObjectURL(a.href);
-  localStorage.setItem(EXP_KEY,annSerial());updateDirty();
+  markExported();
   toast(`已导出 ${ann.size} 条(下载目录+剪贴板);跑 --collect 归位到 md 文件夹`);
+}
+$("expBtn").onclick=async()=>{
+  const json=exportJson();
+  if(SAVE_URL){   // 服务模式:直写工作区,失败再退回下载
+    try{
+      const r=await fetch(SAVE_URL,{method:"POST",headers:{"Content-Type":"application/json"},body:json});
+      if(!r.ok)throw new Error(r.status);
+      markExported();
+      toast(`已写入工作区 ${ann.size} 条 → 03_Output/（无需 --collect）`);
+      return;
+    }catch(e){toast("回写失败,改用下载…");}
+  }
+  downloadJson(json);
 };
 
 /* ---- 标记绘制 ---- */
@@ -876,6 +894,91 @@ def _load_unexplained(md_root: Path, stem: str, n_pages: int) -> list[list[dict]
     return per_page
 
 
+def render_doc(pdf: Path, md_root: Path, profile: LayoutProfile, zoom: float, serve: bool) -> tuple[str, int]:
+    """单篇 → (html, 页数)。静态/服务两模式共用，仅 SAVE_URL 注入不同。"""
+    doc = fitz.open(str(pdf))
+    infos = classify_document(doc, profile)
+    unexpl = _load_unexplained(md_root, pdf.stem, doc.page_count)
+    pages = [page_payload(doc, info, profile, unexpl[info.index], zoom) for info in infos]
+    doc.close()
+    return build_html(pdf.stem, pages, _load_resolved(md_root, pdf.stem), serve), len(pages)
+
+
+def serve_docs(docs: dict[str, str], md_root: Path, port: int) -> int:
+    """本地服务模式：GET 返回页面，POST /save/<stem> 直接回写
+    03_Output/<stem>/<stem>_annotations.json（无需 --collect）。仅绑 127.0.0.1。"""
+    import urllib.parse
+    from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+
+    stems = set(docs)
+
+    def index_html() -> str:
+        links = "".join(f'<li><a href="/{s}">{s}</a></li>' for s in sorted(docs))
+        return f"<!doctype html><meta charset=utf-8><title>debug_view</title><h2>调试视图</h2><ul>{links}</ul>"
+
+    class Handler(BaseHTTPRequestHandler):
+        def log_message(self, *a):  # 静默默认日志
+            pass
+
+        def _html(self, html: str, code: int = 200):
+            body = html.encode("utf-8")
+            self.send_response(code)
+            self.send_header("Content-Type", "text/html; charset=utf-8")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+        def do_GET(self):
+            key = urllib.parse.unquote(self.path.split("?")[0]).strip("/")
+            if key == "":
+                self._html(next(iter(docs.values())) if len(docs) == 1 else index_html())
+            elif key in docs:
+                self._html(docs[key])
+            else:
+                self.send_error(404)
+
+        def do_POST(self):
+            path = urllib.parse.unquote(self.path)
+            if not path.startswith("/save/"):
+                self.send_error(404)
+                return
+            stem = path[len("/save/"):]
+            if stem not in stems:   # 只接受已知文档,只写固定文件名
+                self.send_error(403, "unknown doc")
+                return
+            body = self.rfile.read(int(self.headers.get("Content-Length", 0)))
+            try:
+                json.loads(body)
+            except (json.JSONDecodeError, ValueError):
+                self.send_error(400, "bad json")
+                return
+            target = md_root / stem / f"{stem}_annotations.json"
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_bytes(body)
+            print(f"  [SAVE] {stem} → {target}")
+            self.send_response(200)
+            self.send_header("Content-Length", "2")
+            self.end_headers()
+            self.wfile.write(b"ok")
+
+    srv = ThreadingHTTPServer(("127.0.0.1", port), Handler)
+    base = f"http://127.0.0.1:{port}"
+    print(f"\n服务已启动 → 在 VS Code Simple Browser 或浏览器打开：")
+    if len(docs) == 1:
+        print(f"  {base}/")
+    else:
+        for s in sorted(docs):
+            print(f"  {base}/{s}")
+    print("  导出标记将直接回写 03_Output/<专利>/（无需 --collect）。Ctrl+C 停止。\n")
+    try:
+        srv.serve_forever()
+    except KeyboardInterrupt:
+        print("\n服务已停止。")
+    finally:
+        srv.server_close()
+    return 0
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--src", nargs="*", default=[str(SOURCE_ROOT)],
@@ -887,6 +990,9 @@ def main() -> int:
     ap.add_argument("--zoom", type=float, default=2.0, help="页面渲染倍率（默认 2.0）")
     ap.add_argument("--collect", action="store_true",
                     help="把浏览器下载目录的 *_annotations.json 归位到 md 产物文件夹后退出")
+    ap.add_argument("--serve", action="store_true",
+                    help="本地服务模式：导出标记直接回写 03_Output/（无需 --collect），经 localhost 打开页面")
+    ap.add_argument("--port", type=int, default=8077, help="服务端口（默认 8077）")
     args = ap.parse_args()
 
     pdfs = collect_pdfs(args.src)
@@ -898,22 +1004,31 @@ def main() -> int:
         return 0 if collect_annotations(pdfs, md_root) >= 0 else 1
     profile = get_profile()
 
+    if args.serve:   # 内存生成 + 本地服务，不落静态文件
+        print(f"[{datetime.now():%H:%M:%S}] 服务模式生成 {len(pdfs)} 份（zoom={args.zoom}）\n")
+        docs: dict[str, str] = {}
+        for pdf in pdfs:
+            try:
+                html, n = render_doc(pdf, md_root, profile, args.zoom, serve=True)
+                docs[pdf.stem] = html
+                print(f"  [READY] {pdf.stem} — {n} 页")
+            except Exception as e:  # noqa: BLE001
+                print(f"  [ERROR] {pdf.stem}: {e}")
+        if not docs:
+            return 1
+        return serve_docs(docs, md_root, args.port)
+
     print(f"[{datetime.now():%H:%M:%S}] 生成调试视图 {len(pdfs)} 份（zoom={args.zoom}）\n")
     failed = 0
     for pdf in pdfs:
         try:
-            doc = fitz.open(str(pdf))
-            infos = classify_document(doc, profile)
-            unexpl = _load_unexplained(md_root, pdf.stem, doc.page_count)
-            pages = [page_payload(doc, info, profile, unexpl[info.index], args.zoom) for info in infos]
-            doc.close()
-            html = build_html(pdf.stem, pages, _load_resolved(md_root, pdf.stem))
+            html, n = render_doc(pdf, md_root, profile, args.zoom, serve=False)
             out_dir = Path(args.out)
             out_dir.mkdir(parents=True, exist_ok=True)
             out_html = out_dir / f"{pdf.stem}_debug.html"
             out_html.write_text(html, encoding="utf-8")
             mb = out_html.stat().st_size / 1e6
-            print(f"  [OK] {pdf.stem} — {len(pages)} 页, {mb:.1f} MB → {out_html}")
+            print(f"  [OK] {pdf.stem} — {n} 页, {mb:.1f} MB → {out_html}")
         except Exception as e:  # noqa: BLE001
             failed += 1
             print(f"  [ERROR] {pdf.stem}: {e}")
