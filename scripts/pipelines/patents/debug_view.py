@@ -248,6 +248,7 @@ _TEMPLATE = r"""<!DOCTYPE html>
   /* ---- 语义气泡 ---- */
   #pop{position:fixed;display:flex;align-items:center;gap:9px;background:var(--card);border:1px solid var(--line);
        border-radius:999px;padding:7px 12px;z-index:60;box-shadow:0 6px 22px var(--shadow)}
+  #pop[hidden]{display:none}   /* 显式覆盖:#pop 的 display:flex 优先级高于 UA 的 [hidden] */
   #pop .pdot{width:17px;height:17px;border-radius:50%;cursor:pointer;border:2.5px solid transparent;transition:transform .12s}
   #pop .pdot:hover{transform:scale(1.18)}
   #pop .pdot.on{border-color:var(--ink)}
@@ -255,12 +256,13 @@ _TEMPLATE = r"""<!DOCTYPE html>
   #pop .pdel:hover{color:var(--bad)}
 
   /* ---- 底部缩略图条：Dock 式自动隐藏 ---- */
-  #filmzone{position:absolute;left:0;right:0;bottom:0;height:14px;z-index:19}
-  #film{position:absolute;left:0;right:0;bottom:0;z-index:20;padding:10px 16px;overflow-x:auto;
-        scroll-snap-type:x proximity;scrollbar-width:thin;border-top:1px solid var(--line);
+  #filmzone{position:absolute;left:0;right:0;bottom:0;height:16px;z-index:19}
+  #film{position:absolute;left:12px;right:12px;bottom:10px;z-index:20;padding:10px 14px;overflow-x:auto;
+        scroll-snap-type:x proximity;scrollbar-width:thin;border:1px solid var(--line);border-radius:14px;
         background:color-mix(in srgb,var(--panel) 88%,transparent);backdrop-filter:blur(10px);
-        transform:translateY(calc(100% - 7px));opacity:.6;
-        transition:transform .5s cubic-bezier(.22,1,.36,1),opacity .4s ease}
+        box-shadow:0 8px 28px var(--shadow);
+        transform:translateY(calc(100% + 22px));opacity:.4;
+        transition:transform .7s cubic-bezier(.22,1,.36,1),opacity .55s ease}
   #film.show{transform:translateY(0);opacity:1}
   #filmtrack{display:flex;gap:10px;width:max-content;padding:2px}
   .thumb{flex:0 0 auto;height:104px;border-radius:8px;overflow:hidden;position:relative;cursor:pointer;
