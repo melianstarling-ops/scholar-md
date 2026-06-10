@@ -9,7 +9,8 @@
 # (核心 get_text/get_pixmap API 在 1.24↔1.27 间未变)。
 PyMuPDF==1.27.2.3
 
-# --- 评估用(PyMuPDF4LLM 迁移评估;当前几何管线未使用，留作未来对比) ---
+# --- 交叉校验(crosscheck_words.py:extract_words 第二取词器,离线审计) ---
+# 迁移评估结论(04_Docs/pymupdf4llm-迁移评估.md):规则不迁移,仅用作独立校验源。
 pymupdf4llm==1.27.2.3
 
 # --- 可选:Tier1 AI 审查(按你用的模型供应商选装) ---
