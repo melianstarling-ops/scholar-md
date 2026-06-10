@@ -1,23 +1,31 @@
 #!/usr/bin/env python3
-"""debug_view.py — 可视化调试工具（自包含单 HTML，浏览器打开即用）。
+"""debug_view.py — 可视化调试工具（自包含单 HTML，VS Code 内置预览/浏览器均可）。
 
 仿 MinerU 左右对照：
-  左 = PDF 页渲染图 + 引擎判定叠加层（HTML 绝对定位，可逐层显隐、hover 看词），
-  右 = 该页 reading_order 的中间产物（段落卡片、剔除词清单、页统计）。
+  左 = PDF 页渲染图 + 引擎判定叠加层（HTML 绝对定位，可逐层显隐、可缩放），
+  右 = 该页 reading_order 的中间产物（段落卡片、剔除词清单、页统计、标记清单）。
 
 叠加层颜色：
   橙 = 剔除的中央行号        紫 = 剔除的页眉/页脚/栏号
-  蓝 = 保留词（默认隐藏）    绿 = 段落区域（右栏 hover 联动高亮）
+  蓝 = 保留词（默认隐藏）    绿 = 段落区域
   红 = crosscheck 未解释删除（若产物目录有 *_crosscheck.json 则自动叠加）
   竖虚线 = 实测 gutter
 
-不进主管线、不改产物；所有判定数据与主转换同源（同一批函数现算），
-所见即引擎所判。键盘 ←/→ 翻页。
+交互：
+  * 缩放：适宽 / − / + 按钮，或 Ctrl+滚轮。
+  * 双向联动：右栏段落卡 hover → 左侧高亮；左侧点击词框/段落框 → 右栏定位
+    到对应段落卡 / 剔除词 chip / 告警 chip（看出"保留/删除/转错"去向）。
+  * 标记模式（按钮或 M 键）：点击词框循环打标 误删(红)→漏删(橙)→转换错(蓝)→取消；
+    自动存 localStorage，"导出标记"复制/下载 <名>_annotations.json 供 agent 修引擎。
+  * 主题：默认暗色（对齐 .vscode/md-theme.css 的 claude-dark 配色），☀/☾ 可切换。
+
+不进主管线、不改产物；判定数据与主转换同源（同一批函数现算），所见即引擎所判。
+键盘 ←/→ 翻页。
 
 用法（H.5 自适应 I/O）:
     python scripts/pipelines/patents/debug_view.py                 # 默认源目录全量
     python scripts/pipelines/patents/debug_view.py --src <pdf|dir> [--zoom 2.0]
-输出: <md-root>/<stem>/<stem>_debug.html（目录不存在则建）
+输出: 本脚本同目录 <stem>_debug.html（所有者指定；已全局 gitignore，不入公开仓）
 """
 from __future__ import annotations
 
@@ -51,6 +59,7 @@ SOURCE_ROOT = Path(
     os.environ.get("SCHOLARMD_PATENTS_SRC", str(PROJECT_ROOT / "02_Source" / "patents"))
 )
 OUTPUT_ROOT = PROJECT_ROOT / "03_Output" / "patents"
+DEFAULT_HTML_DIR = Path(__file__).resolve().parent   # 所有者指定:HTML 落脚本同目录
 
 _KIND_NOTE = {
     "COVER": "封面页：由 bib_parse 解析 → YAML 元数据 + Abstract（不走几何重排）",
@@ -60,10 +69,9 @@ _KIND_NOTE = {
 }
 
 
-def _box(w: Word, cls: str, wid: str = "") -> dict:
+def _box(w: Word, cls: str, **extra) -> dict:
     d = {"c": cls, "b": [round(w.x0, 1), round(w.y0, 1), round(w.x1, 1), round(w.y1, 1)], "t": w.text}
-    if wid:
-        d["id"] = wid
+    d.update(extra)
     return d
 
 
@@ -94,16 +102,16 @@ def page_payload(doc: "fitz.Document", info, profile: LayoutProfile,
 
     if info.kind in (PageKind.SPEC_BODY, PageKind.FRONT_MATTER):
         body, rm_bands = strip_bands(info.words, info.height, profile)
-        boxes += [_box(w, "header_footer") for w in rm_bands]
+        boxes += [_box(w, "header_footer", i=i) for i, w in enumerate(rm_bands)]
         payload["removed"]["header_footer"] = [w.text for w in rm_bands]
 
         if info.kind == PageKind.SPEC_BODY:
             body, rm_nums = strip_line_numbers(body, info.gutter_x, profile)
-            boxes += [_box(w, "line_number") for w in rm_nums]
+            boxes += [_box(w, "line_number", i=i) for i, w in enumerate(rm_nums)]
             payload["removed"]["line_number"] = [w.text for w in rm_nums]
 
-        boxes += [_box(w, "kept") for w in body]
         payload["n_kept"] = len(body)
+        word_para: dict[int, str] = {}   # id(Word) -> 段落 id（保留词点击联动用）
 
         if body:
             punct_thr = max(profile.space_gap_abs, profile.space_gap_ratio * median_char_width(body))
@@ -117,6 +125,8 @@ def page_payload(doc: "fitz.Document", info, profile: LayoutProfile,
                         n += 1
                         pid = f"{col}{n}"
                         all_w = [w for ln in p["lines"] for w in ln]
+                        for w in all_w:
+                            word_para[id(w)] = pid
                         boxes.append({"c": "para", "b": _union(all_w), "id": pid})
                         payload["paras"].append(
                             {"id": pid, "text": p["text"], "new_by": p["new_by"], "n_lines": len(p["lines"])}
@@ -126,9 +136,13 @@ def page_payload(doc: "fitz.Document", info, profile: LayoutProfile,
                 txt = "\n".join(join_line(ln, punct_thr) for ln in lines)
                 boxes.append({"c": "para", "b": _union(body), "id": "F1"})
                 payload["paras"].append({"id": "F1", "text": txt, "new_by": "linear", "n_lines": len(lines)})
+                for w in body:
+                    word_para[id(w)] = "F1"
 
-    for u in unexplained:
-        boxes.append({"c": "unexplained", "b": u["bbox"], "t": u["text"]})
+        boxes += [_box(w, "kept", p=word_para.get(id(w), "")) for w in body]
+
+    for i, u in enumerate(unexplained):
+        boxes.append({"c": "unexplained", "b": u["bbox"], "t": u["text"], "i": i})
     return payload
 
 
@@ -147,76 +161,105 @@ _TEMPLATE = r"""<!DOCTYPE html>
 <meta charset="utf-8">
 <title>__TITLE__ · debug</title>
 <style>
+  /* 主题：默认暗色,palette 对齐 .vscode/md-theme.css(claude-dark) */
   :root{
+    --ln:#f59e0b; --hf:#a78bfa; --kept:#6a9bcc; --para:#5fb87a; --bad:#ef4444;
+    --bg:#191A1B; --panel:#1F1F1E; --card:#262625; --ink:#F9F9F7; --sub:#9c9b94;
+    --line:rgba(222,220,209,.18); --accent:#D97757; --shadow:rgba(0,0,0,.45);
+  }
+  [data-theme="light"]{
     --ln:#f59e0b; --hf:#8b5cf6; --kept:#3b82f6; --para:#10b981; --bad:#ef4444;
-    --ink:#1d1d1f; --sub:#86868b; --line:#e8e8ed; --bg:#f5f5f7;
+    --bg:#f5f5f7; --panel:#ffffff; --card:#ffffff; --ink:#1d1d1f; --sub:#86868b;
+    --line:#e8e8ed; --accent:#D97757; --shadow:rgba(0,0,0,.10);
   }
   *{box-sizing:border-box;margin:0}
-  body{font-family:-apple-system,"SF Pro Text","Segoe UI","Microsoft YaHei",sans-serif;
+  body{font-family:"Inter",-apple-system,BlinkMacSystemFont,"Segoe UI","Noto Sans SC","Microsoft YaHei",sans-serif;
        background:var(--bg);color:var(--ink);height:100vh;display:flex;flex-direction:column;overflow:hidden}
-  header{display:flex;align-items:center;gap:14px;padding:10px 18px;background:#fff;
+  header{display:flex;align-items:center;gap:12px;padding:9px 16px;background:var(--panel);
          border-bottom:1px solid var(--line);flex-wrap:wrap}
-  header h1{font-size:14px;font-weight:600;letter-spacing:-.01em}
-  .pgnav{display:flex;align-items:center;gap:8px;font-size:13px;color:var(--sub)}
-  .pgnav button{border:1px solid var(--line);background:#fff;border-radius:8px;width:28px;height:28px;
-                cursor:pointer;font-size:14px;color:var(--ink)}
-  .pgnav button:hover{background:var(--bg)}
+  header h1{font-size:13.5px;font-weight:600;letter-spacing:-.01em}
+  .grp{display:flex;align-items:center;gap:6px;font-size:12.5px;color:var(--sub)}
+  .grp button,.btn{border:1px solid var(--line);background:var(--panel);border-radius:8px;min-width:28px;height:28px;
+                cursor:pointer;font-size:13px;color:var(--ink);padding:0 9px;font-family:inherit}
+  .grp button:hover,.btn:hover{background:var(--card);border-color:var(--accent)}
+  .btn.on{background:var(--accent);border-color:var(--accent);color:#fff}
   #kind{font-size:11px;font-weight:600;padding:3px 10px;border-radius:999px;color:#fff}
   .k-SPEC_BODY{background:#0a84ff}.k-COVER{background:#5e5ce6}.k-FIGURE{background:#98989d}.k-FRONT_MATTER{background:#ac8e68}
   .toggles{display:flex;gap:6px;margin-left:auto;flex-wrap:wrap}
   .tg{display:flex;align-items:center;gap:6px;font-size:12px;color:var(--ink);border:1px solid var(--line);
-      border-radius:999px;padding:4px 10px;cursor:pointer;background:#fff;user-select:none}
+      border-radius:999px;padding:4px 10px;cursor:pointer;background:var(--panel);user-select:none}
   .tg input{display:none}
   .tg .dot{width:9px;height:9px;border-radius:50%}
   .tg.off{color:var(--sub);background:var(--bg)}
   .tg.off .dot{opacity:.25}
   main{flex:1;display:flex;min-height:0}
-  #leftpane{flex:11;overflow:auto;padding:16px;display:flex;justify-content:center;align-items:flex-start}
-  #stage{position:relative;width:min(100%,860px);box-shadow:0 2px 14px rgba(0,0,0,.10);border-radius:6px;overflow:hidden;background:#fff}
+  #leftpane{flex:11;overflow:auto;padding:16px;min-width:0}
+  #stage{position:relative;width:min(100%,860px);margin:0 auto;box-shadow:0 2px 14px var(--shadow);
+         border-radius:6px;overflow:hidden;background:#fff}
   #stage img{display:block;width:100%}
   #overlay{position:absolute;inset:0}
   .box{position:absolute;border-radius:2px}
-  .box.kept{border:1px solid color-mix(in srgb,var(--kept) 45%,transparent);background:color-mix(in srgb,var(--kept) 7%,transparent)}
-  .box.line_number{border:1.5px solid var(--ln);background:color-mix(in srgb,var(--ln) 22%,transparent)}
-  .box.header_footer{border:1.5px solid var(--hf);background:color-mix(in srgb,var(--hf) 18%,transparent)}
-  .box.unexplained{border:2.5px solid var(--bad);background:color-mix(in srgb,var(--bad) 18%,transparent);z-index:5}
-  .box.para{border:1px dashed color-mix(in srgb,var(--para) 55%,transparent);border-left:3px solid var(--para);
-            background:transparent;pointer-events:none}
-  .box.para.hot{background:color-mix(in srgb,var(--para) 13%,transparent);border-color:var(--para)}
+  .box.kept{border:1px solid color-mix(in srgb,var(--kept) 50%,transparent);background:color-mix(in srgb,var(--kept) 9%,transparent);
+            z-index:2;cursor:pointer}
+  .box.line_number{border:1.5px solid var(--ln);background:color-mix(in srgb,var(--ln) 24%,transparent);z-index:3;cursor:pointer}
+  .box.header_footer{border:1.5px solid var(--hf);background:color-mix(in srgb,var(--hf) 20%,transparent);z-index:3;cursor:pointer}
+  .box.unexplained{border:2.5px solid var(--bad);background:color-mix(in srgb,var(--bad) 20%,transparent);z-index:5;cursor:pointer}
+  .box.para{border:1px dashed color-mix(in srgb,var(--para) 60%,transparent);border-left:3px solid var(--para);
+            background:transparent;z-index:1;cursor:pointer}
+  .box.para.hot{background:color-mix(in srgb,var(--para) 15%,transparent);border-color:var(--para)}
+  .annbox{position:absolute;z-index:6;pointer-events:none;border-radius:3px}
+  .annbox.wrong_del{border:2.5px double var(--bad);box-shadow:0 0 0 2px color-mix(in srgb,var(--bad) 35%,transparent)}
+  .annbox.missed_del{border:2.5px double var(--ln);box-shadow:0 0 0 2px color-mix(in srgb,var(--ln) 35%,transparent)}
+  .annbox.conv_err{border:2.5px double var(--kept);box-shadow:0 0 0 2px color-mix(in srgb,var(--kept) 40%,transparent)}
   #gutter{position:absolute;top:0;bottom:0;width:0;border-left:2px dashed rgba(255,69,58,.55);z-index:4}
   .hide-kept .box.kept,.hide-line_number .box.line_number,.hide-header_footer .box.header_footer,
-  .hide-para .box.para,.hide-unexplained .box.unexplained,.hide-gutter #gutter{display:none}
-  #rightpane{flex:9;overflow:auto;padding:16px 18px;border-left:1px solid var(--line);background:#fff}
+  .hide-para .box.para,.hide-unexplained .box.unexplained,.hide-gutter #gutter,.hide-ann .annbox{display:none}
+  .annmode .box{cursor:crosshair}
+  #rightpane{flex:9;overflow:auto;padding:16px 18px;border-left:1px solid var(--line);background:var(--panel)}
   .sec{margin-bottom:18px}
   .sec h2{font-size:11px;font-weight:600;color:var(--sub);text-transform:uppercase;letter-spacing:.06em;margin-bottom:8px}
   #stats{display:flex;gap:14px;flex-wrap:wrap;font-size:12px;color:var(--sub)}
   #stats b{color:var(--ink);font-weight:600}
-  .pcard{border:1px solid var(--line);border-left:3px solid var(--para);border-radius:10px;
-         padding:9px 12px;margin-bottom:8px;font-size:12.5px;line-height:1.55;cursor:default;background:#fff}
-  .pcard:hover{background:color-mix(in srgb,var(--para) 6%,#fff);border-color:var(--para)}
+  .pcard{border:1px solid var(--line);border-left:3px solid var(--para);border-radius:10px;background:var(--card);
+         padding:9px 12px;margin-bottom:8px;font-size:12.5px;line-height:1.55;cursor:default}
+  .pcard:hover{border-color:var(--para)}
   .pcard .meta{font-size:10.5px;color:var(--sub);margin-bottom:3px;display:flex;gap:8px}
   .pcard .meta .pid{font-weight:700;color:var(--para)}
   .pcard.linear{white-space:pre-wrap}
   .chips{display:flex;flex-wrap:wrap;gap:5px}
-  .chip{font-size:11px;padding:2px 8px;border-radius:6px;font-variant-numeric:tabular-nums}
-  .chip.ln{background:color-mix(in srgb,var(--ln) 16%,#fff);color:#92600a;border:1px solid color-mix(in srgb,var(--ln) 40%,#fff)}
-  .chip.hf{background:color-mix(in srgb,var(--hf) 12%,#fff);color:#5b3fb8;border:1px solid color-mix(in srgb,var(--hf) 35%,#fff)}
-  .chip.bad{background:color-mix(in srgb,var(--bad) 12%,#fff);color:#b32018;border:1px solid color-mix(in srgb,var(--bad) 40%,#fff);font-weight:600}
+  .chip{font-size:11px;padding:2px 8px;border-radius:6px;font-variant-numeric:tabular-nums;border:1px solid transparent}
+  .chip.ln{background:color-mix(in srgb,var(--ln) 16%,var(--card));color:var(--ln);border-color:color-mix(in srgb,var(--ln) 40%,transparent)}
+  .chip.hf{background:color-mix(in srgb,var(--hf) 14%,var(--card));color:var(--hf);border-color:color-mix(in srgb,var(--hf) 38%,transparent)}
+  .chip.bad{background:color-mix(in srgb,var(--bad) 14%,var(--card));color:var(--bad);border-color:color-mix(in srgb,var(--bad) 40%,transparent);font-weight:600}
+  .flash{animation:flash 1.2s ease-out}
+  @keyframes flash{0%,55%{outline:2px solid var(--accent);outline-offset:2px;background:color-mix(in srgb,var(--accent) 14%,transparent)}100%{outline:0 solid transparent}}
+  .annrow{display:flex;align-items:center;gap:8px;font-size:12px;border:1px solid var(--line);background:var(--card);
+          border-radius:8px;padding:6px 10px;margin-bottom:6px}
+  .annrow .cat{font-size:10.5px;font-weight:700;padding:1px 7px;border-radius:999px;color:#fff}
+  .cat.wrong_del{background:var(--bad)}.cat.missed_del{background:var(--ln)}.cat.conv_err{background:var(--kept)}
+  .annrow .del{margin-left:auto;cursor:pointer;color:var(--sub);border:0;background:none;font-size:13px}
+  .annrow .del:hover{color:var(--bad)}
   .note{font-size:12.5px;color:var(--sub);background:var(--bg);border-radius:10px;padding:10px 12px;line-height:1.6}
   .empty{font-size:12px;color:var(--sub)}
-  footer{padding:6px 18px;font-size:11px;color:var(--sub);background:#fff;border-top:1px solid var(--line)}
+  footer{padding:6px 16px;font-size:11px;color:var(--sub);background:var(--panel);border-top:1px solid var(--line)}
   kbd{border:1px solid var(--line);border-radius:4px;padding:0 4px;background:var(--bg);font-family:inherit}
+  #toast{position:fixed;left:50%;bottom:42px;transform:translateX(-50%);background:var(--ink);color:var(--bg);
+         font-size:12.5px;padding:8px 16px;border-radius:999px;opacity:0;transition:opacity .25s;pointer-events:none;z-index:99}
 </style>
 </head>
-<body>
+<body data-theme="dark">
 <header>
   <h1>__TITLE__</h1>
   <span id="kind"></span>
-  <div class="pgnav">
-    <button id="prev" title="上一页 (←)">‹</button>
-    <span id="pg"></span>
-    <button id="next" title="下一页 (→)">›</button>
+  <div class="grp">
+    <button id="prev" title="上一页 (←)">‹</button><span id="pg"></span><button id="next" title="下一页 (→)">›</button>
   </div>
+  <div class="grp">
+    <button id="zfit" title="适应宽度">适宽</button><button id="zout">−</button><span id="zl">适宽</span><button id="zin">+</button>
+  </div>
+  <button class="btn" id="annBtn" title="标记模式 (M)：点击词框循环 误删→漏删→转换错→取消">✎ 标记</button>
+  <button class="btn" id="expBtn" title="复制并下载 *_annotations.json">导出标记</button>
+  <button class="btn" id="themeBtn" title="亮/暗切换">☀</button>
   <div class="toggles" id="toggles"></div>
 </header>
 <main>
@@ -224,26 +267,35 @@ _TEMPLATE = r"""<!DOCTYPE html>
   <section id="rightpane">
     <div class="sec"><h2>页统计</h2><div id="stats"></div></div>
     <div class="sec" id="noteSec" hidden><h2>说明</h2><div class="note" id="note"></div></div>
+    <div class="sec" id="annSec" hidden><h2 style="color:var(--accent)">本页标记</h2><div id="annList"></div></div>
     <div class="sec" id="badSec" hidden><h2 style="color:var(--bad)">crosscheck 未解释删除</h2><div class="chips" id="bad"></div></div>
     <div class="sec"><h2>重排段落（中间产物）</h2><div id="paras"></div></div>
     <div class="sec"><h2>剔除词</h2><div id="removed"></div></div>
   </section>
 </main>
-<footer><kbd>←</kbd> <kbd>→</kbd> 翻页 · 顶部圆点开关叠加层 · hover 词框/段落卡可联动 · 生成于 __STAMP__</footer>
+<footer><kbd>←</kbd><kbd>→</kbd> 翻页 · <kbd>M</kbd> 标记模式 · <kbd>Ctrl</kbd>+滚轮缩放 · 左击词框/段落框 → 右栏定位 · 生成于 __STAMP__</footer>
+<div id="toast"></div>
 <script>
 const DATA = __DATA__;
+const TITLE = document.title.replace(" · debug","");
 const LAYERS = [
   ["line_number","行号(剔)","var(--ln)",true],
   ["header_footer","页眉/页脚(剔)","var(--hf)",true],
   ["kept","保留词","var(--kept)",false],
   ["para","段落","var(--para)",true],
   ["unexplained","未解释","var(--bad)",true],
+  ["ann","标记","var(--accent)",true],
   ["gutter","gutter","rgba(255,69,58,.8)",true],
 ];
+const ANN_CATS = ["wrong_del","missed_del","conv_err"];
+const ANN_NAMES = {wrong_del:"误删", missed_del:"漏删", conv_err:"转换错"};
 const $=id=>document.getElementById(id);
-const ov=$("overlay"), st=$("stage");
-let cur=0;
+const ov=$("overlay"), st=$("stage"), lp=$("leftpane");
+let cur=0, zoom=0, annMode=false;          // zoom 0 = 适宽
+const BASE=860, ANN_KEY="dbgann:"+TITLE;
+let ann = new Map(Object.entries(JSON.parse(localStorage.getItem(ANN_KEY)||"{}")));
 
+/* ---- 图层开关 ---- */
 const tgBox=$("toggles");
 for(const [key,label,color,on] of LAYERS){
   const lab=document.createElement("label");
@@ -257,7 +309,88 @@ for(const [key,label,color,on] of LAYERS){
   tgBox.appendChild(lab);
 }
 
+/* ---- 工具 ---- */
 const pct=(v,t)=>(v/t*100).toFixed(3)+"%";
+const esc=s=>s.replace(/[&<>"]/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[c]));
+function toast(msg){const t=$("toast");t.textContent=msg;t.style.opacity=1;clearTimeout(t._h);t._h=setTimeout(()=>t.style.opacity=0,2200);}
+function flashEl(el){if(!el)return;el.scrollIntoView({block:"center",behavior:"smooth"});el.classList.remove("flash");void el.offsetWidth;el.classList.add("flash");}
+
+/* ---- 缩放 ---- */
+function applyZoom(){
+  st.style.width = zoom===0 ? "min(100%,860px)" : Math.round(BASE*zoom)+"px";
+  $("zl").textContent = zoom===0 ? "适宽" : Math.round(zoom*100)+"%";
+}
+$("zin").onclick=()=>{zoom=Math.min((zoom||1)*1.25,5);applyZoom();};
+$("zout").onclick=()=>{zoom=Math.max((zoom||1)/1.25,.4);applyZoom();};
+$("zfit").onclick=()=>{zoom=0;applyZoom();};
+lp.addEventListener("wheel",e=>{
+  if(!e.ctrlKey)return;
+  e.preventDefault();
+  zoom = e.deltaY<0 ? Math.min((zoom||1)*1.12,5) : Math.max((zoom||1)/1.12,.4);
+  applyZoom();
+},{passive:false});
+
+/* ---- 标记 ---- */
+const annKey=(page,b)=>page+"|"+b;
+function saveAnn(){localStorage.setItem(ANN_KEY,JSON.stringify(Object.fromEntries(ann)));}
+function drawAnn(){
+  ov.querySelectorAll(".annbox").forEach(e=>e.remove());
+  const d=DATA[cur];
+  for(const [k,v] of ann){
+    if(v.page!==d.page)continue;
+    const el=document.createElement("div");
+    el.className="annbox "+v.cat;
+    el.style.left=pct(v.bbox[0],d.w);el.style.top=pct(v.bbox[1],d.h);
+    el.style.width=pct(v.bbox[2]-v.bbox[0],d.w);el.style.height=pct(v.bbox[3]-v.bbox[1],d.h);
+    ov.appendChild(el);
+  }
+  renderAnnList();
+}
+function renderAnnList(){
+  const d=DATA[cur];
+  const rows=[...ann.entries()].filter(([,v])=>v.page===d.page);
+  $("annSec").hidden=!rows.length;
+  $("annList").innerHTML=rows.map(([k,v])=>
+    `<div class="annrow"><span class="cat ${v.cat}">${ANN_NAMES[v.cat]}</span><span>${esc(v.text)}</span>
+     <button class="del" data-k="${esc(k)}" title="删除标记">✕</button></div>`).join("");
+  $("annList").querySelectorAll(".del").forEach(b=>b.onclick=()=>{ann.delete(b.dataset.k);saveAnn();drawAnn();});
+}
+$("annBtn").onclick=()=>{annMode=!annMode;$("annBtn").classList.toggle("on",annMode);st.classList.toggle("annmode",annMode);
+  toast(annMode?"标记模式开：点击词框打标（需要先开对应图层）":"标记模式关");};
+$("expBtn").onclick=()=>{
+  const arr=[...ann.values()].sort((a,b)=>a.page-b.page);
+  const json=JSON.stringify({doc:TITLE,exported:new Date().toISOString(),n:arr.length,annotations:arr},null,2);
+  navigator.clipboard&&navigator.clipboard.writeText(json).then(()=>toast(`已复制 ${arr.length} 条标记 JSON 到剪贴板`),()=>{});
+  const a=document.createElement("a");
+  a.href=URL.createObjectURL(new Blob([json],{type:"application/json"}));
+  a.download=TITLE+"_annotations.json";a.click();URL.revokeObjectURL(a.href);
+};
+
+/* ---- 左侧点击：标记 / 联动 ---- */
+ov.addEventListener("click",e=>{
+  const el=e.target.closest(".box");
+  if(!el)return;
+  const d=DATA[cur];
+  if(annMode){
+    if(!el.dataset.t)return;                       // 词级框才可标
+    const b=el.dataset.b.split(",").map(Number), k=annKey(d.page,el.dataset.b);
+    const curCat=ann.get(k)?.cat, idx=curCat?ANN_CATS.indexOf(curCat)+1:0;
+    if(idx>=ANN_CATS.length){ann.delete(k);toast("已取消标记");}
+    else{ann.set(k,{page:d.page,text:el.dataset.t,bbox:b,cat:ANN_CATS[idx]});toast("标记: "+ANN_NAMES[ANN_CATS[idx]]+" — "+el.dataset.t);}
+    saveAnn();drawAnn();return;
+  }
+  if(el.dataset.p)      flashEl($("card-"+el.dataset.p));                       // 保留词 → 段落卡
+  else if(el.dataset.id) flashEl($("card-"+el.dataset.id));                     // 段落框 → 段落卡
+  else if(el.dataset.r)  flashEl($("chip-"+el.dataset.r+"-"+el.dataset.i));     // 剔除词 → chip
+  else if(el.classList.contains("unexplained")) flashEl($("badchip-"+el.dataset.i));
+});
+
+/* ---- 主题 ---- */
+function applyTheme(t){document.body.dataset.theme=t;$("themeBtn").textContent=t==="dark"?"☀":"☾";localStorage.setItem("dbgtheme",t);}
+$("themeBtn").onclick=()=>applyTheme(document.body.dataset.theme==="dark"?"light":"dark");
+applyTheme(localStorage.getItem("dbgtheme")||"dark");
+
+/* ---- 渲染页 ---- */
 function render(i){
   cur=i; const d=DATA[i];
   $("img").src="data:image/png;base64,"+d.img;
@@ -272,12 +405,16 @@ function render(i){
   for(const b of d.boxes){
     const el=document.createElement("div");
     el.className="box "+b.c;
-    if(b.id) el.dataset.id=b.id;
     el.style.left=pct(b.b[0],d.w); el.style.top=pct(b.b[1],d.h);
     el.style.width=pct(b.b[2]-b.b[0],d.w); el.style.height=pct(b.b[3]-b.b[1],d.h);
-    if(b.t) el.title=b.t+"  ["+b.b.map(Math.round)+"]";
+    if(b.id){el.dataset.id=b.id;}
+    if(b.t!==undefined){el.title=b.t+"  ["+b.b.map(Math.round)+"]";el.dataset.t=b.t;el.dataset.b=b.b.join(",");}
+    if(b.p!==undefined&&b.p)el.dataset.p=b.p;
+    if(b.i!==undefined&&(b.c==="line_number"||b.c==="header_footer")){el.dataset.r=b.c;el.dataset.i=b.i;}
+    if(b.i!==undefined&&b.c==="unexplained")el.dataset.i=b.i;
     ov.appendChild(el);
   }
+  drawAnn();
 
   const kept=("n_kept" in d)?` · 保留 <b>${d.n_kept}</b>`:"";
   const rm=d.removed, nrm=(rm.line_number.length+rm.header_footer.length);
@@ -289,11 +426,11 @@ function render(i){
   $("noteSec").hidden=!d.note; $("note").textContent=d.note;
 
   $("badSec").hidden=!d.unexplained.length;
-  $("bad").innerHTML=d.unexplained.map(u=>`<span class="chip bad" title="[${u.bbox}]">${esc(u.text)}</span>`).join("");
+  $("bad").innerHTML=d.unexplained.map((u,j)=>`<span class="chip bad" id="badchip-${j}" title="[${u.bbox}]">${esc(u.text)}</span>`).join("");
 
   const NEWBY={indent:"缩进起段",gap:"行距起段",first:"栏首",linear:"线性"};
   $("paras").innerHTML=d.paras.length?d.paras.map(p=>
-    `<div class="pcard${p.new_by==="linear"?" linear":""}" data-for="${p.id}">
+    `<div class="pcard${p.new_by==="linear"?" linear":""}" id="card-${p.id}" data-for="${p.id}">
        <div class="meta"><span class="pid">${p.id}</span><span>${NEWBY[p.new_by]} · ${p.n_lines} 行</span></div>${esc(p.text)}</div>`
   ).join(""):`<div class="empty">本页无重排段落</div>`;
   for(const card of $("paras").querySelectorAll(".pcard")){
@@ -301,18 +438,19 @@ function render(i){
     card.addEventListener("mouseleave",()=>hot(card.dataset.for,false));
   }
 
-  const sec=(cls,name,arr)=>arr.length?`<h2 style="margin:8px 0 6px;font-size:10.5px;color:var(--sub)">${name} × ${arr.length}</h2>
-     <div class="chips">${arr.map(t=>`<span class="chip ${cls}">${esc(t)}</span>`).join("")}</div>`:"";
-  const html=sec("ln","中央行号",rm.line_number)+sec("hf","页眉/页脚/栏号",rm.header_footer);
+  const sec=(cls,key,name,arr)=>arr.length?`<h2 style="margin:8px 0 6px;font-size:10.5px;color:var(--sub)">${name} × ${arr.length}</h2>
+     <div class="chips">${arr.map((t,j)=>`<span class="chip ${cls}" id="chip-${key}-${j}">${esc(t)}</span>`).join("")}</div>`:"";
+  const html=sec("ln","line_number","中央行号",rm.line_number)+sec("hf","header_footer","页眉/页脚/栏号",rm.header_footer);
   $("removed").innerHTML=html||`<div class="empty">本页无剔除</div>`;
 }
 function hot(id,on){const el=ov.querySelector(`[data-id="${id}"]`); if(el) el.classList.toggle("hot",on);}
-function esc(s){return s.replace(/[&<>"]/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[c]));}
 $("prev").onclick=()=>cur>0&&render(cur-1);
 $("next").onclick=()=>cur<DATA.length-1&&render(cur+1);
 document.addEventListener("keydown",e=>{
+  if(e.target.tagName==="INPUT")return;
   if(e.key==="ArrowRight"&&cur<DATA.length-1)render(cur+1);
   if(e.key==="ArrowLeft"&&cur>0)render(cur-1);
+  if(e.key==="m"||e.key==="M")$("annBtn").click();
 });
 render(0);
 </script>
@@ -356,8 +494,9 @@ def main() -> int:
     ap.add_argument("--src", nargs="*", default=[str(SOURCE_ROOT)],
                     help="PDF 文件或目录，可多个（默认 SCHOLARMD_PATENTS_SRC / 02_Source/patents）")
     ap.add_argument("--md-root", default=str(OUTPUT_ROOT),
-                    help="产物根目录（找 crosscheck 报告 + 默认输出位置，默认 03_Output/patents）")
-    ap.add_argument("--out", default=None, help="HTML 输出目录（默认 <md-root>/<stem>/）")
+                    help="产物根目录（找 crosscheck 报告，默认 03_Output/patents）")
+    ap.add_argument("--out", default=str(DEFAULT_HTML_DIR),
+                    help="HTML 输出目录（默认本脚本同目录；已 gitignore）")
     ap.add_argument("--zoom", type=float, default=2.0, help="页面渲染倍率（默认 2.0）")
     args = ap.parse_args()
 
@@ -378,7 +517,7 @@ def main() -> int:
             pages = [page_payload(doc, info, profile, unexpl[info.index], args.zoom) for info in infos]
             doc.close()
             html = build_html(pdf.stem, pages)
-            out_dir = Path(args.out) if args.out else md_root / pdf.stem
+            out_dir = Path(args.out)
             out_dir.mkdir(parents=True, exist_ok=True)
             out_html = out_dir / f"{pdf.stem}_debug.html"
             out_html.write_text(html, encoding="utf-8")
