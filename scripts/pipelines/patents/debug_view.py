@@ -156,13 +156,29 @@ def page_payload(doc: "fitz.Document", info, profile: LayoutProfile,
     return payload
 
 
-def build_html(name: str, pages: list[dict]) -> str:
+def build_html(name: str, pages: list[dict], resolved: list[dict]) -> str:
     data = json.dumps(pages, ensure_ascii=False, separators=(",", ":")).replace("</", "<\\/")
+    res = json.dumps(resolved, ensure_ascii=False, separators=(",", ":")).replace("</", "<\\/")
     return (
         _TEMPLATE.replace("__TITLE__", name)
         .replace("__STAMP__", f"{datetime.now():%Y-%m-%d %H:%M}")
+        .replace("__RESOLVED__", res)
         .replace("__DATA__", data)
     )
+
+
+def _load_resolved(md_root: Path, stem: str) -> list[dict]:
+    """扫产物目录全部归档件,取已处理标记的 (page,bbox) 键集 → 嵌入 HTML 供多轮调和(SOP-07 §3)。"""
+    out: list[dict] = []
+    for f in sorted((md_root / stem).glob(f"{stem}_annotations_resolved*.json")):
+        try:
+            rep = json.loads(f.read_text(encoding="utf-8"))
+            for a in rep.get("annotations", []):
+                if "page" in a and "bbox" in a:
+                    out.append({"page": a["page"], "bbox": a["bbox"]})
+        except (json.JSONDecodeError, OSError) as e:  # 坏档不挡生成
+            print(f"  [WARN] 跳过损坏归档 {f.name}: {e}")
+    return out
 
 
 _TEMPLATE = r"""<!DOCTYPE html>
@@ -196,7 +212,10 @@ _TEMPLATE = r"""<!DOCTYPE html>
   .grp button,.btn{border:1px solid var(--line);background:var(--panel);border-radius:8px;min-width:28px;height:28px;
                 cursor:pointer;font-size:13px;color:var(--ink);padding:0 9px;font-family:inherit}
   .grp button:hover,.btn:hover{background:var(--card);border-color:var(--accent)}
+  .btn{position:relative}
   .btn.on{background:var(--accent);border-color:var(--accent);color:#fff}
+  .btn.dirty::after{content:"";position:absolute;top:-3px;right:-3px;width:8px;height:8px;
+                    border-radius:50%;background:var(--accent);border:1.5px solid var(--panel)}
   #pgin{width:3.2em;height:28px;border:1px solid var(--line);border-radius:8px;background:var(--bg);color:var(--ink);
         text-align:center;font-size:12.5px;font-family:inherit;appearance:textfield;-moz-appearance:textfield}
   #pgin::-webkit-outer-spin-button,#pgin::-webkit-inner-spin-button{-webkit-appearance:none;margin:0}
@@ -237,6 +256,7 @@ _TEMPLATE = r"""<!DOCTYPE html>
   .annbox.missed_rec{border:2.5px double var(--accent);box-shadow:0 0 0 2px color-mix(in srgb,var(--accent) 35%,transparent)}
   .annbox.sel{outline:2.5px solid var(--ink);outline-offset:3px}
   .annbox.hot{filter:saturate(1.5) brightness(1.3)}
+  .annbox.resolved{opacity:.3;border-style:dashed;box-shadow:none}
   .drawrect{position:absolute;z-index:7;border:1.5px dashed var(--accent);background:color-mix(in srgb,var(--accent) 12%,transparent);
             pointer-events:none;border-radius:3px}
   #gutter{position:absolute;top:0;bottom:0;width:0;border-left:2px dashed rgba(255,69,58,.55);z-index:4}
@@ -293,9 +313,10 @@ _TEMPLATE = r"""<!DOCTYPE html>
   .chip.bad{background:color-mix(in srgb,var(--bad) 14%,var(--card));color:var(--bad);border-color:color-mix(in srgb,var(--bad) 40%,transparent);font-weight:600}
   .flash{animation:flash 1.2s ease-out}
   @keyframes flash{0%,55%{outline:2px solid var(--accent);outline-offset:2px;background:color-mix(in srgb,var(--accent) 14%,transparent)}100%{outline:0 solid transparent}}
-  .annrow{display:flex;align-items:center;gap:8px;font-size:12px;border:1px solid var(--line);background:var(--card);
-          border-radius:8px;padding:6px 10px;margin-bottom:6px;cursor:default}
-  .annrow:hover{border-color:var(--accent)}
+  .annitem{border:1px solid var(--line);background:var(--card);border-radius:8px;margin-bottom:6px}
+  .annitem:hover{border-color:var(--accent)}
+  .annitem.res{opacity:.45}
+  .annrow{display:flex;align-items:center;gap:8px;font-size:12px;padding:6px 10px;cursor:default}
   .annrow .cat{font-size:10.5px;font-weight:700;padding:1px 7px;border-radius:999px;color:#fff;flex:0 0 auto}
   .cat.wrong_del{background:var(--bad)}.cat.missed_del{background:var(--ln)}.cat.conv_err{background:var(--kept)}.cat.missed_rec{background:var(--accent)}
   .annrow .atext{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
@@ -303,8 +324,17 @@ _TEMPLATE = r"""<!DOCTYPE html>
   .annrow .setcat{width:13px;height:13px;border-radius:50%;cursor:pointer;border:2px solid transparent;opacity:.5}
   .annrow .setcat:hover{opacity:1}
   .annrow .setcat.on{opacity:1;border-color:var(--ink)}
-  .annrow .del{flex:0 0 auto;cursor:pointer;color:var(--sub);border:0;background:none;font-size:13px}
+  .annrow .del,.annrow .nbtn{flex:0 0 auto;cursor:pointer;color:var(--sub);border:0;background:none;font-size:13px}
   .annrow .del:hover{color:var(--bad)}
+  .annrow .nbtn:hover,.annrow .nbtn.has{color:var(--accent)}
+  .annnote{display:block;width:calc(100% - 16px);margin:0 8px 8px;border:1px solid var(--line);border-radius:6px;
+           background:var(--bg);color:var(--ink);font-family:inherit;font-size:12px;line-height:1.5;
+           padding:6px 8px;resize:vertical;min-height:46px}
+  .annnote:focus{outline:none;border-color:var(--accent)}
+  .nsnip{font-size:10.5px;color:var(--sub);padding:0 10px 6px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+  .mini{border:1px solid var(--line);background:var(--panel);color:var(--sub);border-radius:999px;
+        font-size:10.5px;padding:2px 9px;cursor:pointer;font-family:inherit;margin-left:8px;vertical-align:1px}
+  .mini:hover{color:var(--accent);border-color:var(--accent)}
   .note{font-size:12.5px;color:var(--sub);background:var(--bg);border-radius:10px;padding:10px 12px;line-height:1.6}
   .empty{font-size:12px;color:var(--sub)}
   footer{padding:6px 16px;font-size:11px;color:var(--sub);background:var(--panel);border-top:1px solid var(--line)}
@@ -350,7 +380,7 @@ _TEMPLATE = r"""<!DOCTYPE html>
   <section id="rightpane">
     <div class="sec"><h2>页统计</h2><div id="stats"></div></div>
     <div class="sec" id="noteSec" hidden><h2>说明</h2><div class="note" id="note"></div></div>
-    <div class="sec" id="annSec" hidden><h2 style="color:var(--accent)">本页标记</h2><div id="annList"></div></div>
+    <div class="sec" id="annSec" hidden><h2 style="color:var(--accent)">本页标记<button id="clrRes" class="mini" hidden>清除已处理</button></h2><div id="annList"></div></div>
     <div class="sec" id="badSec" hidden><h2 style="color:var(--bad)">crosscheck 未解释删除</h2><div class="chips" id="bad"></div></div>
     <div class="sec"><h2>重排段落（中间产物）</h2><div id="paras"></div></div>
     <div class="sec"><h2>剔除词</h2><div id="removed"></div></div>
@@ -361,6 +391,7 @@ _TEMPLATE = r"""<!DOCTYPE html>
 <div id="toast"></div>
 <script>
 const DATA = __DATA__;
+const RESOLVED = __RESOLVED__;   // agent 归档件中已处理标记的 (page,bbox) 键集(生成时嵌入,SOP-07 §3)
 const TITLE = document.title.replace(" · debug","");
 const LAYERS = [
   ["line_number","行号(剔)","var(--ln)",true],
@@ -462,13 +493,23 @@ film.addEventListener("wheel",e=>{           // 竖滚轮 → 横滑(相册式)
 
 /* ---- 标记存取 ---- */
 const annKey=(page,bstr)=>page+"|"+bstr;
+/* 已处理判定:与归档键集按 页+坐标(容差0.6pt) 匹配,浮点格式差异免疫 */
+function isResolved(v){
+  return RESOLVED.some(r=>r.page===v.page&&v.bbox.every((c,i)=>Math.abs(c-r.bbox[i])<0.6));
+}
+/* 未导出变更角标:当前标记序列化 vs 上次导出快照 */
+const EXP_KEY="dbgexp:"+TITLE;
+function annSerial(){return JSON.stringify([...ann.entries()].sort((a,b)=>a[0]<b[0]?-1:1));}
+function updateDirty(){
+  $("expBtn").classList.toggle("dirty",ann.size>0&&annSerial()!==localStorage.getItem(EXP_KEY));
+}
 function exportJson(){
   const arr=[...ann.values()].sort((a,b)=>a.page-b.page);
   return JSON.stringify({doc:TITLE,exported:new Date().toISOString(),n:arr.length,
     legend:{wrong_del:"误删(内容被错误剔除)",missed_del:"漏删(噪声未被剔除)",conv_err:"转换错误(空格/段落/标题等)",missed_rec:"漏识别(引擎完全没框到的区域)"},
     annotations:arr},null,2);
 }
-function saveAnn(){localStorage.setItem(ANN_KEY,JSON.stringify(Object.fromEntries(ann)));}
+function saveAnn(){localStorage.setItem(ANN_KEY,JSON.stringify(Object.fromEntries(ann)));updateDirty();}
 /* 导出:浏览器只能落"下载"目录(无法直写工作区路径)。归位到 md 产物文件夹用
    `debug_view.py --collect`(把下载目录的 *_annotations.json 移到 03_Output/patents/<名>/)。 */
 $("expBtn").onclick=()=>{
@@ -477,6 +518,7 @@ $("expBtn").onclick=()=>{
   const a=document.createElement("a");
   a.href=URL.createObjectURL(new Blob([json],{type:"application/json"}));
   a.download=TITLE+"_annotations.json";a.click();URL.revokeObjectURL(a.href);
+  localStorage.setItem(EXP_KEY,annSerial());updateDirty();
   toast(`已导出 ${ann.size} 条(下载目录+剪贴板);跑 --collect 归位到 md 文件夹`);
 };
 
@@ -486,12 +528,14 @@ function drawAnn(){
   const d=DATA[cur];
   for(const [k,v] of ann){
     if(v.page!==d.page)continue;
+    const res=isResolved(v);
     const el=document.createElement("div");
-    el.className="annbox "+v.cat+(k===selKey?" sel":"");
+    el.className="annbox "+v.cat+(v.kind==="region"?" region":"")+(k===selKey?" sel":"")+(res?" resolved":"");
     el.dataset.k=k;
     el.style.left=pct(v.bbox[0],d.w);el.style.top=pct(v.bbox[1],d.h);
     el.style.width=pct(v.bbox[2]-v.bbox[0],d.w);el.style.height=pct(v.bbox[3]-v.bbox[1],d.h);
-    el.title=(v.kind==="region"?"区域: ":"")+ANN_NAMES[v.cat]+(v.text?" — "+v.text:"")+"  (按住拖动 / Delete 删除)";
+    el.title=(res?"✓已处理 ":"")+(v.kind==="region"?"区域: ":"")+ANN_NAMES[v.cat]
+      +(v.text?" — "+v.text:"")+(v.note?"\n备注: "+v.note:"")+"\n(按住拖动 / Delete 删除)";
     el.addEventListener("pointerdown",ev=>startMove(ev,el,k));
     ov.appendChild(el);
   }
@@ -636,29 +680,59 @@ st.addEventListener("click",e=>{
   else if(el.classList.contains("unexplained")) flashEl($("badchip-"+el.dataset.i));
 });
 
-/* ---- 右栏标记清单：改语义/删除/双向联动 ---- */
+/* ---- 右栏标记清单：改语义/note 输入/删除/已处理调和/双向联动 ---- */
+const noteEdit=new Set();   // 正在编辑 note 的 key(不入 ann 值,避免污染导出)
 function renderAnnList(){
   const d=DATA[cur];
   const rows=[...ann.entries()].filter(([,v])=>v.page===d.page);
+  const nRes=[...ann.values()].filter(isResolved).length;        // 全文档已处理数
+  const cb=$("clrRes");
+  cb.hidden=!nRes; cb.textContent=`清除已处理 (${nRes})`;
   $("annSec").hidden=!rows.length;
   $("annList").innerHTML=rows.map(([k,v])=>{
     const cats=(v.kind==="region")?REGION_CATS:WORD_CATS;
-    return `<div class="annrow" data-k="${k}">
-     <span class="cat ${v.cat}">${ANN_NAMES[v.cat]}</span>
-     <span class="atext">${v.kind==="region"?"▭ 区域 ["+v.bbox.map(Math.round)+"]":esc(v.text)}</span>
-     <span class="dots">${cats.map(c=>`<span class="setcat${c===v.cat?" on":""}" data-c="${c}" title="${ANN_NAMES[c]}" style="background:${CATC[c]}"></span>`).join("")}</span>
-     <button class="del" title="删除标记">✕</button></div>`;}).join("");
-  $("annList").querySelectorAll(".annrow").forEach(row=>{
+    const res=isResolved(v), editing=noteEdit.has(k);
+    return `<div class="annitem${res?" res":""}" data-k="${k}">
+     <div class="annrow">
+       <span class="cat ${v.cat}">${res?"✓ ":""}${ANN_NAMES[v.cat]}</span>
+       <span class="atext">${v.kind==="region"?"▭ 区域 ["+v.bbox.map(Math.round)+"]":esc(v.text)}</span>
+       <span class="dots">${cats.map(c=>`<span class="setcat${c===v.cat?" on":""}" data-c="${c}" title="${ANN_NAMES[c]}" style="background:${CATC[c]}"></span>`).join("")}</span>
+       <button class="nbtn${v.note?" has":""}" title="文字说明(随导出 note 字段带给 agent)">✎</button>
+       <button class="del" title="删除标记">✕</button>
+     </div>
+     ${!editing&&v.note?`<div class="nsnip" title="${esc(v.note)}">${esc(v.note)}</div>`:""}
+     ${editing?`<textarea class="annnote" placeholder="描述具体问题…(自动保存)">${esc(v.note||"")}</textarea>`:""}
+    </div>`;}).join("");
+  $("annList").querySelectorAll(".annitem").forEach(row=>{
     const k=row.dataset.k;
     row.querySelectorAll(".setcat").forEach(p=>p.onclick=ev=>{ev.stopPropagation();
       const v=ann.get(k);v.cat=p.dataset.c;ann.set(k,v);saveAnn();drawAnn();});
-    row.querySelector(".del").onclick=ev=>{ev.stopPropagation();delAnn(k);};
+    row.querySelector(".del").onclick=ev=>{ev.stopPropagation();noteEdit.delete(k);delAnn(k);};
+    row.querySelector(".nbtn").onclick=ev=>{ev.stopPropagation();
+      noteEdit.has(k)?noteEdit.delete(k):noteEdit.add(k);
+      renderAnnList();
+      const ta=$("annList").querySelector(`.annitem[data-k="${k}"] .annnote`);
+      if(ta){ta.focus();ta.selectionStart=ta.value.length;}};
+    const ta=row.querySelector(".annnote");
+    if(ta){
+      ta.addEventListener("click",ev=>ev.stopPropagation());
+      ta.addEventListener("input",()=>{
+        const v=ann.get(k);
+        if(ta.value.trim())v.note=ta.value;else delete v.note;
+        ann.set(k,v);saveAnn();});
+    }
     row.addEventListener("mouseenter",()=>{const b=ov.querySelector(`.annbox[data-k="${k}"]`);if(b)b.classList.add("hot");});
     row.addEventListener("mouseleave",()=>{const b=ov.querySelector(`.annbox[data-k="${k}"]`);if(b)b.classList.remove("hot");});
     row.addEventListener("click",()=>{selKey=k;drawAnn();
       const b=ov.querySelector(`.annbox[data-k="${k}"]`);if(b){b.scrollIntoView({block:"center",behavior:"smooth"});flashEl(b);}});
   });
 }
+$("clrRes").onclick=ev=>{
+  ev.stopPropagation();
+  let n=0;
+  for(const [k,v] of [...ann]) if(isResolved(v)){ann.delete(k);noteEdit.delete(k);n++;}
+  saveAnn();drawAnn();toast(`已清除 ${n} 条已处理标记`);
+};
 $("annBtn").onclick=()=>{annMode=!annMode;$("annBtn").classList.toggle("on",annMode);st.classList.toggle("annmode",annMode);
   toast(annMode?"标记模式开：点词框打标 / 空白处拖拽画区域框":"标记模式关");};
 
@@ -666,6 +740,7 @@ $("annBtn").onclick=()=>{annMode=!annMode;$("annBtn").classList.toggle("on",annM
 function applyTheme(t){document.body.dataset.theme=t;$("themeBtn").textContent=t==="dark"?"☀":"☾";localStorage.setItem("dbgtheme",t);}
 $("themeBtn").onclick=()=>applyTheme(document.body.dataset.theme==="dark"?"light":"dark");
 applyTheme(localStorage.getItem("dbgtheme")||"dark");
+updateDirty();
 
 /* ---- 渲染页 ---- */
 $("pgtotal").textContent="/ "+DATA.length;
@@ -834,7 +909,7 @@ def main() -> int:
             unexpl = _load_unexplained(md_root, pdf.stem, doc.page_count)
             pages = [page_payload(doc, info, profile, unexpl[info.index], args.zoom) for info in infos]
             doc.close()
-            html = build_html(pdf.stem, pages)
+            html = build_html(pdf.stem, pages, _load_resolved(md_root, pdf.stem))
             out_dir = Path(args.out)
             out_dir.mkdir(parents=True, exist_ok=True)
             out_html = out_dir / f"{pdf.stem}_debug.html"
