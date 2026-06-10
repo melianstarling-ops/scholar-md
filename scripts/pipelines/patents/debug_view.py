@@ -12,14 +12,19 @@
   竖虚线 = 实测 gutter
 
 交互：
-  * 翻页：‹ › 按钮 / ←→ 键 / 页码输入框直跳 / 底部缩略图条（▦ 开关，横滑点选）。
-  * 缩放：− / + 按钮（中间按钮显示倍率，点击恢复适宽），或 Ctrl+滚轮。
-  * 双向联动：右栏段落卡 hover → 左侧高亮；左侧点击词框/段落框 → 右栏定位
-    到对应段落卡 / 剔除词 chip / 告警 chip（看出"保留/删除/转错"去向）。
-  * 标记模式（按钮或 M 键）：
-      - 点击词框循环打标 误删(红)→漏删(橙)→转换错(蓝)→取消；
-      - 空白处拖拽画框 = 区域标记，默认"漏识别"(主题色)，点击该框可换类别/删除；
-      - 自动存 localStorage，"导出标记"复制/下载 <名>_annotations.json 供 agent 修引擎。
+  * 翻页：‹ › / ←→ 键 / 页码输入框直跳 / 底部缩略图条（Dock 式自动隐藏，
+    鼠标移到底缘弹出，移开收起；横滑+居中吸附+active 放大）。
+  * 缩放：− / + 按钮（中间显示倍率，点击恢复适宽）；Ctrl+滚轮以鼠标位置为锚点缩放。
+  * 暗色页面：默认对 PDF 页做反色渲染（仅暗色主题下生效），◑ 按钮可关。
+  * 双向联动：右栏段落卡 hover → 左侧高亮；左侧点击词框/段落框 → 右栏定位；
+    标记框 ↔ 右栏"本页标记"行互相联动（hover 高亮、点击定位）。
+  * 标记（M 进入标记模式）：
+      - 点击词框 / 拖拽画区域框 → 弹出色点气泡直接选语义（误删红/漏删橙/
+        转换错蓝/漏识别主题色），不再循环切换；点已有标记框可重选/删除；
+      - 右栏标记行内嵌色点，可直接改语义；Delete 键删除选中标记；
+      - localStorage 实时自动保存；点一次「自动保存」选定落盘文件后，
+        后续每次改动静默写入 <名>_annotations.json（File System Access API，
+        外部 Chromium 浏览器可用；不支持的环境退回「导出标记」按钮）。
   * 主题：默认暗色（对齐 .vscode/md-theme.css 的 claude-dark 配色），☀/☾ 可切换。
 
 不进主管线、不改产物；判定数据与主转换同源（同一批函数现算），所见即引擎所判。
@@ -193,7 +198,7 @@ _TEMPLATE = r"""<!DOCTYPE html>
         text-align:center;font-size:12.5px;font-family:inherit;appearance:textfield;-moz-appearance:textfield}
   #pgin::-webkit-outer-spin-button,#pgin::-webkit-inner-spin-button{-webkit-appearance:none;margin:0}
   #pgin:focus{outline:none;border-color:var(--accent)}
-  #kind{font-size:11px;font-weight:600;padding:3px 10px;border-radius:999px;color:#fff}
+  #kind{font-size:11px;font-weight:600;padding:3px 10px;border-radius:999px;color:#fff;cursor:default}
   .k-SPEC_BODY{background:#0a84ff}.k-COVER{background:#5e5ce6}.k-FIGURE{background:#98989d}.k-FRONT_MATTER{background:#ac8e68}
   .tg{display:flex;align-items:center;gap:6px;font-size:12px;color:var(--ink);border:1px solid var(--line);
       border-radius:999px;padding:4px 10px;cursor:pointer;background:var(--panel);user-select:none}
@@ -203,11 +208,12 @@ _TEMPLATE = r"""<!DOCTYPE html>
   .tg.off .dot{opacity:.25}
 
   main{flex:1;display:flex;min-height:0}
-  #leftcol{flex:11;display:flex;flex-direction:column;min-width:0;min-height:0}
-  #leftpane{flex:1;overflow:auto;padding:16px;min-height:0}
+  #leftcol{flex:11;position:relative;display:flex;flex-direction:column;min-width:0;min-height:0;overflow:hidden}
+  #leftpane{flex:1;position:relative;overflow:auto;padding:16px;min-height:0}
   #stage{position:relative;width:min(100%,860px);margin:0 auto;box-shadow:0 2px 14px var(--shadow);
          border-radius:6px;overflow:hidden;background:#fff;touch-action:pan-x pan-y}
   #stage img{display:block;width:100%;pointer-events:none;user-select:none}
+  [data-theme="dark"] #stage.inv img{filter:invert(.93) hue-rotate(180deg)}
   #overlay{position:absolute;inset:0}
   .box{position:absolute;border-radius:2px}
   .box.kept{border:1px solid color-mix(in srgb,var(--kept) 50%,transparent);background:color-mix(in srgb,var(--kept) 9%,transparent);
@@ -218,12 +224,13 @@ _TEMPLATE = r"""<!DOCTYPE html>
   .box.para{border:1px dashed color-mix(in srgb,var(--para) 60%,transparent);border-left:3px solid var(--para);
             background:transparent;z-index:1;cursor:pointer}
   .box.para.hot{background:color-mix(in srgb,var(--para) 15%,transparent);border-color:var(--para)}
-  .annbox{position:absolute;z-index:6;pointer-events:none;border-radius:3px}
-  .annbox.region{pointer-events:auto;cursor:pointer}
+  .annbox{position:absolute;z-index:6;cursor:pointer;border-radius:3px}
   .annbox.wrong_del{border:2.5px double var(--bad);box-shadow:0 0 0 2px color-mix(in srgb,var(--bad) 35%,transparent)}
   .annbox.missed_del{border:2.5px double var(--ln);box-shadow:0 0 0 2px color-mix(in srgb,var(--ln) 35%,transparent)}
   .annbox.conv_err{border:2.5px double var(--kept);box-shadow:0 0 0 2px color-mix(in srgb,var(--kept) 40%,transparent)}
   .annbox.missed_rec{border:2.5px double var(--accent);box-shadow:0 0 0 2px color-mix(in srgb,var(--accent) 35%,transparent)}
+  .annbox.sel{outline:2.5px solid var(--ink);outline-offset:3px}
+  .annbox.hot{filter:saturate(1.5) brightness(1.3)}
   .drawrect{position:absolute;z-index:7;border:1.5px dashed var(--accent);background:color-mix(in srgb,var(--accent) 12%,transparent);
             pointer-events:none;border-radius:3px}
   #gutter{position:absolute;top:0;bottom:0;width:0;border-left:2px dashed rgba(255,69,58,.55);z-index:4}
@@ -231,14 +238,28 @@ _TEMPLATE = r"""<!DOCTYPE html>
   .hide-para .box.para,.hide-unexplained .box.unexplained,.hide-gutter #gutter,.hide-ann .annbox{display:none}
   .annmode .box,.annmode #overlay{cursor:crosshair}
 
-  /* ---- 底部缩略图条(Adobe 式;横向滑动,居中吸附,active 放大) ---- */
-  #film{flex:0 0 auto;border-top:1px solid var(--line);background:var(--panel);padding:10px 16px;overflow-x:auto;
-        scroll-snap-type:x proximity;scrollbar-width:thin}
+  /* ---- 语义气泡 ---- */
+  #pop{position:fixed;display:flex;align-items:center;gap:9px;background:var(--card);border:1px solid var(--line);
+       border-radius:999px;padding:7px 12px;z-index:60;box-shadow:0 6px 22px var(--shadow)}
+  #pop .pdot{width:17px;height:17px;border-radius:50%;cursor:pointer;border:2.5px solid transparent;transition:transform .12s}
+  #pop .pdot:hover{transform:scale(1.18)}
+  #pop .pdot.on{border-color:var(--ink)}
+  #pop .pdel{border:0;background:none;color:var(--sub);cursor:pointer;font-size:14px;padding:0 2px}
+  #pop .pdel:hover{color:var(--bad)}
+
+  /* ---- 底部缩略图条：Dock 式自动隐藏 ---- */
+  #filmzone{position:absolute;left:0;right:0;bottom:0;height:14px;z-index:19}
+  #film{position:absolute;left:0;right:0;bottom:0;z-index:20;padding:10px 16px;overflow-x:auto;
+        scroll-snap-type:x proximity;scrollbar-width:thin;border-top:1px solid var(--line);
+        background:color-mix(in srgb,var(--panel) 88%,transparent);backdrop-filter:blur(10px);
+        transform:translateY(calc(100% - 7px));transition:transform .26s ease}
+  #film.show{transform:translateY(0)}
   #filmtrack{display:flex;gap:10px;width:max-content;padding:2px}
   .thumb{flex:0 0 auto;height:104px;border-radius:8px;overflow:hidden;position:relative;cursor:pointer;
          border:2px solid var(--line);transform:scale(.93);transition:transform .22s,border-color .18s;
          scroll-snap-align:center;background:#fff;box-shadow:0 1px 6px var(--shadow)}
   .thumb img{height:100%;width:auto;display:block}
+  [data-theme="dark"] .inv-thumbs .thumb img{filter:invert(.93) hue-rotate(180deg)}
   .thumb:hover{transform:scale(1)}
   .thumb.active{transform:scale(1);border-color:var(--accent)}
   .thumb .tno{position:absolute;right:4px;bottom:4px;font-size:10px;font-weight:600;color:#fff;
@@ -264,10 +285,16 @@ _TEMPLATE = r"""<!DOCTYPE html>
   .flash{animation:flash 1.2s ease-out}
   @keyframes flash{0%,55%{outline:2px solid var(--accent);outline-offset:2px;background:color-mix(in srgb,var(--accent) 14%,transparent)}100%{outline:0 solid transparent}}
   .annrow{display:flex;align-items:center;gap:8px;font-size:12px;border:1px solid var(--line);background:var(--card);
-          border-radius:8px;padding:6px 10px;margin-bottom:6px}
+          border-radius:8px;padding:6px 10px;margin-bottom:6px;cursor:default}
+  .annrow:hover{border-color:var(--accent)}
   .annrow .cat{font-size:10.5px;font-weight:700;padding:1px 7px;border-radius:999px;color:#fff;flex:0 0 auto}
   .cat.wrong_del{background:var(--bad)}.cat.missed_del{background:var(--ln)}.cat.conv_err{background:var(--kept)}.cat.missed_rec{background:var(--accent)}
-  .annrow .del{margin-left:auto;cursor:pointer;color:var(--sub);border:0;background:none;font-size:13px}
+  .annrow .atext{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+  .annrow .dots{display:flex;gap:5px;flex:0 0 auto}
+  .annrow .setcat{width:13px;height:13px;border-radius:50%;cursor:pointer;border:2px solid transparent;opacity:.5}
+  .annrow .setcat:hover{opacity:1}
+  .annrow .setcat.on{opacity:1;border-color:var(--ink)}
+  .annrow .del{flex:0 0 auto;cursor:pointer;color:var(--sub);border:0;background:none;font-size:13px}
   .annrow .del:hover{color:var(--bad)}
   .note{font-size:12.5px;color:var(--sub);background:var(--bg);border-radius:10px;padding:10px 12px;line-height:1.6}
   .empty{font-size:12px;color:var(--sub)}
@@ -288,18 +315,19 @@ _TEMPLATE = r"""<!DOCTYPE html>
       <input id="pgin" type="number" min="1" value="1" title="输入页码直跳">
       <span id="pgtotal"></span>
       <button id="next" title="下一页 (→)">›</button>
-      <button id="filmBtn" title="缩略图条开关">▦</button>
     </div>
     <span class="sep"></span>
     <div class="grp">
       <button id="zout" title="缩小">−</button>
       <button id="zl" title="点击恢复适宽">适宽</button>
       <button id="zin" title="放大">+</button>
+      <button id="invBtn" title="PDF 页面反色（仅暗色主题下生效）">◑</button>
     </div>
     <span class="sep"></span>
     <div class="grp">
-      <button class="btn" id="annBtn" title="标记模式 (M)：点词框循环打标;空白处拖拽画区域框">✎ 标记</button>
-      <button class="btn" id="expBtn" title="复制并下载 *_annotations.json">导出标记</button>
+      <button class="btn" id="annBtn" title="标记模式 (M)：点词框/拖拽画框 → 气泡选语义">✎ 标记</button>
+      <button class="btn" id="fsBtn" title="选定落盘文件后,标记每次改动自动写入(需浏览器支持;VS Code 内嵌预览不支持时用导出)">💾 自动保存</button>
+      <button class="btn" id="expBtn" title="复制并下载 *_annotations.json">导出</button>
       <button class="btn" id="themeBtn" title="亮/暗切换">☀</button>
     </div>
   </div>
@@ -308,6 +336,7 @@ _TEMPLATE = r"""<!DOCTYPE html>
 <main>
   <section id="leftcol">
     <div id="leftpane"><div id="stage"><img id="img" alt=""><div id="overlay"></div></div></div>
+    <div id="filmzone"></div>
     <div id="film"><div id="filmtrack"></div></div>
   </section>
   <section id="rightpane">
@@ -319,7 +348,8 @@ _TEMPLATE = r"""<!DOCTYPE html>
     <div class="sec"><h2>剔除词</h2><div id="removed"></div></div>
   </section>
 </main>
-<footer><kbd>←</kbd><kbd>→</kbd> 翻页 · <kbd>M</kbd> 标记模式（点词框打标 / 拖拽画区域框） · <kbd>Ctrl</kbd>+滚轮缩放 · 左击词框/段落框 → 右栏定位 · 生成于 __STAMP__</footer>
+<footer><kbd>←</kbd><kbd>→</kbd> 翻页 · <kbd>M</kbd> 标记模式（点词框/拖框 → 气泡选语义） · <kbd>Delete</kbd> 删选中标记 · <kbd>Ctrl</kbd>+滚轮 指针锚点缩放 · 底缘悬停出缩略图 · 生成于 __STAMP__</footer>
+<div id="pop" hidden></div>
 <div id="toast"></div>
 <script>
 const DATA = __DATA__;
@@ -336,9 +366,11 @@ const LAYERS = [
 const WORD_CATS = ["wrong_del","missed_del","conv_err"];
 const REGION_CATS = ["missed_rec","wrong_del","missed_del","conv_err"];
 const ANN_NAMES = {wrong_del:"误删", missed_del:"漏删", conv_err:"转换错", missed_rec:"漏识别"};
+const CATC = {wrong_del:"var(--bad)", missed_del:"var(--ln)", conv_err:"var(--kept)", missed_rec:"var(--accent)"};
+const KIND_LABEL = {SPEC_BODY:"正文·双栏", COVER:"封面", FIGURE:"附图", FRONT_MATTER:"前置/引用"};
 const $=id=>document.getElementById(id);
 const ov=$("overlay"), st=$("stage"), lp=$("leftpane");
-let cur=0, zoom=0, annMode=false, suppressClick=false;   // zoom 0 = 适宽
+let cur=0, zoom=0, annMode=false, suppressClick=false, selKey=null;   // zoom 0 = 适宽
 const BASE=860, ANN_KEY="dbgann:"+TITLE;
 let ann = new Map(Object.entries(JSON.parse(localStorage.getItem(ANN_KEY)||"{}")));
 
@@ -362,22 +394,37 @@ const esc=s=>s.replace(/[&<>"]/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&qu
 function toast(msg){const t=$("toast");t.textContent=msg;t.style.opacity=1;clearTimeout(t._h);t._h=setTimeout(()=>t.style.opacity=0,2200);}
 function flashEl(el){if(!el)return;el.scrollIntoView({block:"center",behavior:"smooth"});el.classList.remove("flash");void el.offsetWidth;el.classList.add("flash");}
 
-/* ---- 缩放 ---- */
+/* ---- 缩放(Ctrl+滚轮以指针为锚点) ---- */
 function applyZoom(){
   st.style.width = zoom===0 ? "min(100%,860px)" : Math.round(BASE*zoom)+"px";
   $("zl").textContent = zoom===0 ? "适宽" : Math.round(zoom*100)+"%";
 }
-$("zin").onclick=()=>{zoom=Math.min((zoom||1)*1.25,5);applyZoom();};
-$("zout").onclick=()=>{zoom=Math.max((zoom||1)/1.25,.4);applyZoom();};
+$("zin").onclick=()=>{zoom=Math.min((zoom||st.offsetWidth/BASE)*1.25,5);applyZoom();};
+$("zout").onclick=()=>{zoom=Math.max((zoom||st.offsetWidth/BASE)/1.25,.4);applyZoom();};
 $("zl").onclick=()=>{zoom=0;applyZoom();};
 lp.addEventListener("wheel",e=>{
   if(!e.ctrlKey)return;
   e.preventDefault();
-  zoom = e.deltaY<0 ? Math.min((zoom||1)*1.12,5) : Math.max((zoom||1)/1.12,.4);
+  const r=lp.getBoundingClientRect();
+  const px=e.clientX-r.left, py=e.clientY-r.top;          // 指针在视口内位置
+  const oldW=st.offsetWidth, oldH=st.offsetHeight;
+  const fx=(lp.scrollLeft+px-st.offsetLeft)/oldW;         // 指针落点在页面内的比例
+  const fy=(lp.scrollTop+py-st.offsetTop)/oldH;
+  if(zoom===0)zoom=oldW/BASE;
+  zoom = e.deltaY<0 ? Math.min(zoom*1.12,5) : Math.max(zoom/1.12,.4);
   applyZoom();
+  const newW=st.offsetWidth, newH=oldH*newW/oldW;         // 读取强制 reflow
+  lp.scrollLeft=st.offsetLeft+fx*newW-px;
+  lp.scrollTop =st.offsetTop +fy*newH-py;
 },{passive:false});
 
-/* ---- 缩略图条 ---- */
+/* ---- PDF 页面反色(暗色主题) ---- */
+function setInv(on){st.classList.toggle("inv",on);$("filmtrack").parentElement.classList.toggle("inv-thumbs",on);
+  $("invBtn").classList.toggle("on",on);localStorage.setItem("dbginv",on?"1":"0");}
+$("invBtn").onclick=()=>setInv(!st.classList.contains("inv"));
+setInv(localStorage.getItem("dbginv")!=="0");
+
+/* ---- 缩略图条(Dock 式自动隐藏) ---- */
 const film=$("film"), track=$("filmtrack");
 const KINDC={SPEC_BODY:"#0a84ff",COVER:"#5e5ce6",FIGURE:"#98989d",FRONT_MATTER:"#ac8e68"};
 DATA.forEach((d,i)=>{
@@ -391,62 +438,105 @@ DATA.forEach((d,i)=>{
 function syncFilm(){
   track.querySelectorAll(".thumb").forEach(t=>t.classList.toggle("active",+t.dataset.i===cur));
   const a=track.querySelector(".thumb.active");
-  if(a&&!film.hidden)a.scrollIntoView({inline:"center",block:"nearest",behavior:"smooth"});
+  if(a&&film.classList.contains("show"))a.scrollIntoView({inline:"center",block:"nearest",behavior:"smooth"});
 }
+$("filmzone").addEventListener("mouseenter",()=>{film.classList.add("show");syncFilm();});
+film.addEventListener("mouseleave",()=>film.classList.remove("show"));
 film.addEventListener("wheel",e=>{           // 竖滚轮 → 横滑(相册式)
   if(e.ctrlKey)return;
   if(Math.abs(e.deltaY)>Math.abs(e.deltaX)){e.preventDefault();film.scrollLeft+=e.deltaY;}
 },{passive:false});
-function setFilm(show){film.hidden=!show;localStorage.setItem("dbgfilm",show?"1":"0");if(show)syncFilm();}
-$("filmBtn").onclick=()=>setFilm(film.hidden);
-setFilm(localStorage.getItem("dbgfilm")!=="0");
 
-/* ---- 标记 ---- */
+/* ---- 标记存取 ---- */
 const annKey=(page,bstr)=>page+"|"+bstr;
-function saveAnn(){localStorage.setItem(ANN_KEY,JSON.stringify(Object.fromEntries(ann)));}
+function exportJson(){
+  const arr=[...ann.values()].sort((a,b)=>a.page-b.page);
+  return JSON.stringify({doc:TITLE,exported:new Date().toISOString(),n:arr.length,
+    legend:{wrong_del:"误删(内容被错误剔除)",missed_del:"漏删(噪声未被剔除)",conv_err:"转换错误(空格/段落/标题等)",missed_rec:"漏识别(引擎完全没框到的区域)"},
+    annotations:arr},null,2);
+}
+/* 自动落盘:File System Access API,一次选文件,之后每次改动静默写入(防抖)。
+   VS Code 内嵌预览等不支持的环境退回「导出」按钮。 */
+let fsHandle=null, fsTimer=null;
+async function fsPick(){
+  if(!window.showSaveFilePicker){toast("此环境不支持自动落盘,请用「导出」按钮");return;}
+  try{
+    fsHandle=await showSaveFilePicker({suggestedName:TITLE+"_annotations.json",
+      types:[{description:"JSON",accept:{"application/json":[".json"]}}]});
+    $("fsBtn").classList.add("on");toast("自动保存已开启:每次改动静默写入");fsWrite();
+  }catch(e){/* 用户取消 */}
+}
+function fsWrite(){
+  if(!fsHandle)return;
+  clearTimeout(fsTimer);
+  fsTimer=setTimeout(async()=>{
+    try{const w=await fsHandle.createWritable();await w.write(exportJson());await w.close();}
+    catch(e){fsHandle=null;$("fsBtn").classList.remove("on");toast("自动保存失败,已退回手动导出");}
+  },500);
+}
+$("fsBtn").onclick=fsPick;
+function saveAnn(){localStorage.setItem(ANN_KEY,JSON.stringify(Object.fromEntries(ann)));fsWrite();}
+$("expBtn").onclick=()=>{
+  const json=exportJson();
+  navigator.clipboard&&navigator.clipboard.writeText(json).then(()=>toast(`已复制 ${ann.size} 条标记 JSON 到剪贴板`),()=>{});
+  const a=document.createElement("a");
+  a.href=URL.createObjectURL(new Blob([json],{type:"application/json"}));
+  a.download=TITLE+"_annotations.json";a.click();URL.revokeObjectURL(a.href);
+};
+
+/* ---- 标记绘制 ---- */
 function drawAnn(){
   ov.querySelectorAll(".annbox").forEach(e=>e.remove());
   const d=DATA[cur];
   for(const [k,v] of ann){
     if(v.page!==d.page)continue;
     const el=document.createElement("div");
-    el.className="annbox "+v.cat+(v.kind==="region"?" region":"");
+    el.className="annbox "+v.cat+(k===selKey?" sel":"");
     el.dataset.k=k;
     el.style.left=pct(v.bbox[0],d.w);el.style.top=pct(v.bbox[1],d.h);
     el.style.width=pct(v.bbox[2]-v.bbox[0],d.w);el.style.height=pct(v.bbox[3]-v.bbox[1],d.h);
-    el.title=(v.kind==="region"?"区域: ":"")+ANN_NAMES[v.cat]+(v.text?" — "+v.text:"");
+    el.title=(v.kind==="region"?"区域: ":"")+ANN_NAMES[v.cat]+(v.text?" — "+v.text:"")+"  (Delete 删除)";
     ov.appendChild(el);
   }
   renderAnnList();
 }
-function renderAnnList(){
-  const d=DATA[cur];
-  const rows=[...ann.entries()].filter(([,v])=>v.page===d.page);
-  $("annSec").hidden=!rows.length;
-  $("annList").innerHTML=rows.map(([k,v])=>
-    `<div class="annrow"><span class="cat ${v.cat}">${ANN_NAMES[v.cat]}</span>
-     <span>${v.kind==="region"?"▭ 区域 ["+v.bbox.map(Math.round)+"]":esc(v.text)}</span>
-     <button class="del" data-k="${esc(k)}" title="删除标记">✕</button></div>`).join("");
-  $("annList").querySelectorAll(".del").forEach(b=>b.onclick=()=>{ann.delete(b.dataset.k);saveAnn();drawAnn();});
+function delAnn(k){ann.delete(k);if(selKey===k)selKey=null;saveAnn();drawAnn();toast("已删除标记");}
+
+/* ---- 语义气泡:点中标记/词框 → 色点直选 ---- */
+const pop={el:$("pop"),key:null,pending:null};
+function openPop(x,y,opts){
+  pop.key=opts.key||null; pop.pending=opts.pending||null;
+  const kind=pop.key?(ann.get(pop.key).kind||"word"):pop.pending.kind;
+  const cats=kind==="region"?REGION_CATS:WORD_CATS;
+  const curCat=pop.key?ann.get(pop.key).cat:null;
+  pop.el.innerHTML=cats.map(c=>
+    `<span class="pdot${c===curCat?" on":""}" data-c="${c}" title="${ANN_NAMES[c]}" style="background:${CATC[c]}"></span>`).join("")
+    +(pop.key?`<button class="pdel" title="删除 (Delete)">✕</button>`:"");
+  pop.el.hidden=false;
+  const pw=pop.el.offsetWidth, ph=pop.el.offsetHeight;
+  pop.el.style.left=Math.min(Math.max(8,x-pw/2),innerWidth-pw-8)+"px";
+  pop.el.style.top=(y-ph-14<8 ? y+18 : y-ph-14)+"px";
+  pop.el.querySelectorAll(".pdot").forEach(p=>p.onclick=ev=>{ev.stopPropagation();applyCat(p.dataset.c);});
+  const del=pop.el.querySelector(".pdel");
+  if(del)del.onclick=ev=>{ev.stopPropagation();delAnn(pop.key);closePop();};
 }
-$("annBtn").onclick=()=>{annMode=!annMode;$("annBtn").classList.toggle("on",annMode);st.classList.toggle("annmode",annMode);
-  toast(annMode?"标记模式开：点词框打标 / 空白处拖拽画区域框":"标记模式关");};
-$("expBtn").onclick=()=>{
-  const arr=[...ann.values()].sort((a,b)=>a.page-b.page);
-  const json=JSON.stringify({doc:TITLE,exported:new Date().toISOString(),n:arr.length,
-    legend:{wrong_del:"误删(内容被错误剔除)",missed_del:"漏删(噪声未被剔除)",conv_err:"转换错误(空格/段落/标题等)",missed_rec:"漏识别(引擎完全没框到的区域)"},
-    annotations:arr},null,2);
-  navigator.clipboard&&navigator.clipboard.writeText(json).then(()=>toast(`已复制 ${arr.length} 条标记 JSON 到剪贴板`),()=>{});
-  const a=document.createElement("a");
-  a.href=URL.createObjectURL(new Blob([json],{type:"application/json"}));
-  a.download=TITLE+"_annotations.json";a.click();URL.revokeObjectURL(a.href);
-};
+function applyCat(c){
+  if(pop.key){const v=ann.get(pop.key);v.cat=c;ann.set(pop.key,v);toast("标记: "+ANN_NAMES[c]);}
+  else if(pop.pending){
+    const p=pop.pending, k=annKey(p.page,p.bbox.join(","));
+    ann.set(k,{page:p.page,text:p.text,bbox:p.bbox,cat:c,kind:p.kind});
+    selKey=k;toast("标记: "+ANN_NAMES[c]+(p.text?" — "+p.text:""));
+  }
+  saveAnn();drawAnn();closePop();
+}
+function closePop(){pop.el.hidden=true;pop.key=null;pop.pending=null;}
+document.addEventListener("click",e=>{if(!pop.el.hidden&&!pop.el.contains(e.target))closePop();});
 
 /* ---- 标记模式：空白处拖拽画区域框 ---- */
 let drawing=null;
 st.addEventListener("pointerdown",e=>{
   if(!annMode||e.button!==0)return;
-  if(e.target.closest(".annbox.region"))return;     // 点已有区域框 → 走 click 换类别
+  if(e.target.closest(".annbox"))return;            // 点已有标记 → 走 click 气泡
   drawing={x0:e.clientX,y0:e.clientY,moved:false,el:null};
 });
 st.addEventListener("pointermove",e=>{
@@ -467,47 +557,71 @@ st.addEventListener("pointerup",e=>{
     drawing.el.remove();
     const d=DATA[cur], r=st.getBoundingClientRect();
     const sx=d.w/r.width, sy=d.h/r.height;
-    const cl=v=>Math.max(0,v);
-    const x0=cl((Math.min(e.clientX,drawing.x0)-r.left)*sx), y0=cl((Math.min(e.clientY,drawing.y0)-r.top)*sy);
+    const x0=Math.max(0,(Math.min(e.clientX,drawing.x0)-r.left)*sx), y0=Math.max(0,(Math.min(e.clientY,drawing.y0)-r.top)*sy);
     const x1=Math.min(d.w,(Math.max(e.clientX,drawing.x0)-r.left)*sx), y1=Math.min(d.h,(Math.max(e.clientY,drawing.y0)-r.top)*sy);
     if(x1-x0>3&&y1-y0>3){
       const b=[x0,y0,x1,y1].map(v=>Math.round(v*10)/10);
-      ann.set(annKey(d.page,b.join(",")),{page:d.page,text:"",bbox:b,cat:"missed_rec",kind:"region"});
-      saveAnn();drawAnn();toast("已添加区域标记：漏识别（点击该框可换类别/删除）");
+      const k=annKey(d.page,b.join(","));
+      ann.set(k,{page:d.page,text:"",bbox:b,cat:"missed_rec",kind:"region"});
+      selKey=k;saveAnn();drawAnn();
+      openPop(e.clientX,e.clientY,{key:k});         // 落框即默认漏识别,气泡可改
     }
   }
   drawing=null;
 });
 
-/* ---- 左侧点击：标记(词/区域) 或 联动 ---- */
+/* ---- 左侧点击：标记气泡 或 双向联动 ---- */
 st.addEventListener("click",e=>{
   if(suppressClick){suppressClick=false;return;}
   const d=DATA[cur];
-  const reg=e.target.closest(".annbox.region");
-  if(reg&&annMode){                                   // 区域框：循环类别,末位删除
-    const k=reg.dataset.k, v=ann.get(k);
-    if(!v)return;
-    const idx=REGION_CATS.indexOf(v.cat)+1;
-    if(idx>=REGION_CATS.length){ann.delete(k);toast("已删除区域标记");}
-    else{v.cat=REGION_CATS[idx];ann.set(k,v);toast("区域标记: "+ANN_NAMES[v.cat]);}
-    saveAnn();drawAnn();return;
+  const ab=e.target.closest(".annbox");
+  if(ab){                                            // 任意模式:点标记框 → 选中+气泡
+    selKey=ab.dataset.k;drawAnn();
+    openPop(e.clientX,e.clientY,{key:ab.dataset.k});
+    flashEl($("annList")&&$("annList").querySelector(`[data-k="${ab.dataset.k}"]`));
+    e.stopPropagation();return;
   }
   const el=e.target.closest(".box");
   if(!el)return;
   if(annMode){
-    if(!el.dataset.t)return;                          // 词级框才可点标
+    if(!el.dataset.t)return;                         // 词级框才可点标
     const k=annKey(d.page,el.dataset.b);
-    const curCat=ann.get(k)?.cat, idx=curCat?WORD_CATS.indexOf(curCat)+1:0;
-    if(idx>=WORD_CATS.length||idx<0){ann.delete(k);toast("已取消标记");}
-    else{ann.set(k,{page:d.page,text:el.dataset.t,bbox:el.dataset.b.split(",").map(Number),cat:WORD_CATS[idx],kind:"word"});
-         toast("标记: "+ANN_NAMES[WORD_CATS[idx]]+" — "+el.dataset.t);}
-    saveAnn();drawAnn();return;
+    if(ann.has(k)){selKey=k;drawAnn();openPop(e.clientX,e.clientY,{key:k});}
+    else openPop(e.clientX,e.clientY,{pending:{kind:"word",page:d.page,
+      bbox:el.dataset.b.split(",").map(Number),text:el.dataset.t}});
+    e.stopPropagation();return;
   }
   if(el.dataset.p)      flashEl($("card-"+el.dataset.p));                       // 保留词 → 段落卡
   else if(el.dataset.id) flashEl($("card-"+el.dataset.id));                     // 段落框 → 段落卡
   else if(el.dataset.r)  flashEl($("chip-"+el.dataset.r+"-"+el.dataset.i));     // 剔除词 → chip
   else if(el.classList.contains("unexplained")) flashEl($("badchip-"+el.dataset.i));
 });
+
+/* ---- 右栏标记清单：改语义/删除/双向联动 ---- */
+function renderAnnList(){
+  const d=DATA[cur];
+  const rows=[...ann.entries()].filter(([,v])=>v.page===d.page);
+  $("annSec").hidden=!rows.length;
+  $("annList").innerHTML=rows.map(([k,v])=>{
+    const cats=(v.kind==="region")?REGION_CATS:WORD_CATS;
+    return `<div class="annrow" data-k="${k}">
+     <span class="cat ${v.cat}">${ANN_NAMES[v.cat]}</span>
+     <span class="atext">${v.kind==="region"?"▭ 区域 ["+v.bbox.map(Math.round)+"]":esc(v.text)}</span>
+     <span class="dots">${cats.map(c=>`<span class="setcat${c===v.cat?" on":""}" data-c="${c}" title="${ANN_NAMES[c]}" style="background:${CATC[c]}"></span>`).join("")}</span>
+     <button class="del" title="删除标记">✕</button></div>`;}).join("");
+  $("annList").querySelectorAll(".annrow").forEach(row=>{
+    const k=row.dataset.k;
+    row.querySelectorAll(".setcat").forEach(p=>p.onclick=ev=>{ev.stopPropagation();
+      const v=ann.get(k);v.cat=p.dataset.c;ann.set(k,v);saveAnn();drawAnn();});
+    row.querySelector(".del").onclick=ev=>{ev.stopPropagation();delAnn(k);};
+    row.addEventListener("mouseenter",()=>{const b=ov.querySelector(`.annbox[data-k="${k}"]`);if(b)b.classList.add("hot");});
+    row.addEventListener("mouseleave",()=>{const b=ov.querySelector(`.annbox[data-k="${k}"]`);if(b)b.classList.remove("hot");});
+    row.addEventListener("click",()=>{selKey=k;drawAnn();
+      const b=ov.querySelector(`.annbox[data-k="${k}"]`);if(b){b.scrollIntoView({block:"center",behavior:"smooth"});flashEl(b);}});
+  });
+}
+$("annBtn").onclick=()=>{annMode=!annMode;$("annBtn").classList.toggle("on",annMode);st.classList.toggle("annmode",annMode);
+  toast(annMode?"标记模式开：点词框打标 / 空白处拖拽画区域框":"标记模式关");};
 
 /* ---- 主题 ---- */
 function applyTheme(t){document.body.dataset.theme=t;$("themeBtn").textContent=t==="dark"?"☀":"☾";localStorage.setItem("dbgtheme",t);}
@@ -525,9 +639,11 @@ $("pgin").addEventListener("keydown",e=>{if(e.key==="Enter")$("pgin").blur();});
 
 function render(i){
   cur=i; const d=DATA[i];
+  closePop(); selKey=null;
   $("img").src="data:image/png;base64,"+d.img;
   $("pgin").value=i+1;
-  const k=$("kind"); k.textContent=d.kind; k.className="k-"+d.kind;
+  const k=$("kind"); k.textContent=KIND_LABEL[d.kind]; k.className="k-"+d.kind;
+  k.title="页型判定(page_classify): "+d.kind;
   $("prev").disabled=i===0; $("next").disabled=i===DATA.length-1;
   syncFilm();
 
@@ -584,6 +700,8 @@ document.addEventListener("keydown",e=>{
   if(e.key==="ArrowRight"&&cur<DATA.length-1)render(cur+1);
   if(e.key==="ArrowLeft"&&cur>0)render(cur-1);
   if(e.key==="m"||e.key==="M")$("annBtn").click();
+  if(e.key==="Delete"&&selKey){delAnn(selKey);closePop();}
+  if(e.key==="Escape"){closePop();selKey=null;drawAnn();}
 });
 render(0);
 </script>
