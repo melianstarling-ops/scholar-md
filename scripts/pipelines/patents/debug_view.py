@@ -324,9 +324,8 @@ _TEMPLATE = r"""<!DOCTYPE html>
   .annrow .setcat{width:13px;height:13px;border-radius:50%;cursor:pointer;border:2px solid transparent;opacity:.5}
   .annrow .setcat:hover{opacity:1}
   .annrow .setcat.on{opacity:1;border-color:var(--ink)}
-  .annrow .del,.annrow .nbtn{flex:0 0 auto;cursor:pointer;color:var(--sub);border:0;background:none;font-size:13px}
+  .annrow .del{flex:0 0 auto;cursor:pointer;color:var(--sub);border:0;background:none;font-size:13px}
   .annrow .del:hover{color:var(--bad)}
-  .annrow .nbtn:hover,.annrow .nbtn.has{color:var(--accent)}
   .annnote{display:block;width:calc(100% - 16px);margin:0 8px 8px;border:1px solid var(--line);border-radius:6px;
            background:var(--bg);color:var(--ink);font-family:inherit;font-size:12px;line-height:1.5;
            padding:6px 8px;resize:vertical;min-height:46px}
@@ -697,22 +696,16 @@ function renderAnnList(){
        <span class="cat ${v.cat}">${res?"✓ ":""}${ANN_NAMES[v.cat]}</span>
        <span class="atext">${v.kind==="region"?"▭ 区域 ["+v.bbox.map(Math.round)+"]":esc(v.text)}</span>
        <span class="dots">${cats.map(c=>`<span class="setcat${c===v.cat?" on":""}" data-c="${c}" title="${ANN_NAMES[c]}" style="background:${CATC[c]}"></span>`).join("")}</span>
-       <button class="nbtn${v.note?" has":""}" title="文字说明(随导出 note 字段带给 agent)">✎</button>
        <button class="del" title="删除标记">✕</button>
      </div>
      ${!editing&&v.note?`<div class="nsnip" title="${esc(v.note)}">${esc(v.note)}</div>`:""}
-     ${editing?`<textarea class="annnote" placeholder="描述具体问题…(自动保存)">${esc(v.note||"")}</textarea>`:""}
+     ${editing?`<textarea class="annnote" placeholder="描述具体问题…(自动保存,失焦收起)">${esc(v.note||"")}</textarea>`:""}
     </div>`;}).join("");
   $("annList").querySelectorAll(".annitem").forEach(row=>{
     const k=row.dataset.k;
     row.querySelectorAll(".setcat").forEach(p=>p.onclick=ev=>{ev.stopPropagation();
       const v=ann.get(k);v.cat=p.dataset.c;ann.set(k,v);saveAnn();drawAnn();});
     row.querySelector(".del").onclick=ev=>{ev.stopPropagation();noteEdit.delete(k);delAnn(k);};
-    row.querySelector(".nbtn").onclick=ev=>{ev.stopPropagation();
-      noteEdit.has(k)?noteEdit.delete(k):noteEdit.add(k);
-      renderAnnList();
-      const ta=$("annList").querySelector(`.annitem[data-k="${k}"] .annnote`);
-      if(ta){ta.focus();ta.selectionStart=ta.value.length;}};
     const ta=row.querySelector(".annnote");
     if(ta){
       ta.addEventListener("click",ev=>ev.stopPropagation());
@@ -720,11 +713,16 @@ function renderAnnList(){
         const v=ann.get(k);
         if(ta.value.trim())v.note=ta.value;else delete v.note;
         ann.set(k,v);saveAnn();});
+      ta.addEventListener("keydown",ev=>{if(ev.key==="Escape")ta.blur();});
+      ta.addEventListener("blur",()=>{noteEdit.delete(k);drawAnn();});   // 失焦收起,回摘要显示
     }
     row.addEventListener("mouseenter",()=>{const b=ov.querySelector(`.annbox[data-k="${k}"]`);if(b)b.classList.add("hot");});
     row.addEventListener("mouseleave",()=>{const b=ov.querySelector(`.annbox[data-k="${k}"]`);if(b)b.classList.remove("hot");});
-    row.addEventListener("click",()=>{selKey=k;drawAnn();
-      const b=ov.querySelector(`.annbox[data-k="${k}"]`);if(b){b.scrollIntoView({block:"center",behavior:"smooth"});flashEl(b);}});
+    row.addEventListener("click",()=>{        // 点行 = 联动定位 + 直接展开 note 输入(无需按钮)
+      selKey=k;noteEdit.add(k);drawAnn();
+      const b=ov.querySelector(`.annbox[data-k="${k}"]`);if(b){b.scrollIntoView({block:"center",behavior:"smooth"});flashEl(b);}
+      const t2=$("annList").querySelector(`.annitem[data-k="${k}"] .annnote`);
+      if(t2){t2.focus();t2.selectionStart=t2.value.length;}});
   });
 }
 $("clrRes").onclick=ev=>{
