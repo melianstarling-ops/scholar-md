@@ -217,7 +217,7 @@ _TEMPLATE = r"""<!DOCTYPE html>
          border-radius:6px;overflow:hidden;background:#fff;touch-action:pan-x pan-y}
   #stage img{display:block;width:100%;pointer-events:none;user-select:none}
   [data-theme="dark"] #stage.inv img{filter:invert(.93) hue-rotate(180deg)}
-  #overlay{position:absolute;inset:0}
+  #overlay{position:absolute;inset:0;user-select:none}
   .box{position:absolute;border-radius:2px;opacity:.8}
   .box:hover{opacity:1}
   .box.kept{border:1px solid color-mix(in srgb,var(--kept) 50%,transparent);background:color-mix(in srgb,var(--kept) 9%,transparent);
@@ -228,9 +228,8 @@ _TEMPLATE = r"""<!DOCTYPE html>
   .box.para{border:1px dashed color-mix(in srgb,var(--para) 60%,transparent);border-left:3px solid var(--para);
             background:transparent;z-index:1;cursor:pointer}
   .box.para.hot{background:color-mix(in srgb,var(--para) 15%,transparent);border-color:var(--para)}
-  .annbox{position:absolute;z-index:6;cursor:pointer;border-radius:3px;opacity:.8}
+  .annbox{position:absolute;z-index:6;cursor:grab;border-radius:3px;opacity:.8;touch-action:none}
   .annbox:hover,.annbox.sel,.annbox.moving{opacity:1}
-  .annbox.region{cursor:grab}
   .annbox.moving{cursor:grabbing}
   .annbox.wrong_del{border:2.5px double var(--bad);box-shadow:0 0 0 2px color-mix(in srgb,var(--bad) 35%,transparent)}
   .annbox.missed_del{border:2.5px double var(--ln);box-shadow:0 0 0 2px color-mix(in srgb,var(--ln) 35%,transparent)}
@@ -261,7 +260,7 @@ _TEMPLATE = r"""<!DOCTYPE html>
         scroll-snap-type:x proximity;scrollbar-width:thin;border:1px solid var(--line);border-radius:14px;
         background:color-mix(in srgb,var(--panel) 88%,transparent);backdrop-filter:blur(10px);
         box-shadow:0 8px 28px var(--shadow);
-        transform:translateY(calc(100% + 22px));opacity:.4;
+        transform:translateY(calc(100% - 12px));opacity:.55;   /* 静止态:线上方留 12px 把手 */
         transition:transform .7s cubic-bezier(.22,1,.36,1),opacity .55s ease}
   #film.show{transform:translateY(0);opacity:1}
   #filmtrack{display:flex;gap:10px;width:max-content;padding:2px}
@@ -492,10 +491,45 @@ function drawAnn(){
     el.dataset.k=k;
     el.style.left=pct(v.bbox[0],d.w);el.style.top=pct(v.bbox[1],d.h);
     el.style.width=pct(v.bbox[2]-v.bbox[0],d.w);el.style.height=pct(v.bbox[3]-v.bbox[1],d.h);
-    el.title=(v.kind==="region"?"区域: ":"")+ANN_NAMES[v.cat]+(v.text?" — "+v.text:"")+"  (Delete 删除)";
+    el.title=(v.kind==="region"?"区域: ":"")+ANN_NAMES[v.cat]+(v.text?" — "+v.text:"")+"  (按住拖动 / Delete 删除)";
+    el.addEventListener("pointerdown",ev=>startMove(ev,el,k));
     ov.appendChild(el);
   }
   renderAnnList();
+}
+
+/* 标记框拖动微调:逐框 pointer capture(不走委托,webview 下可靠);4px 阈值区分点击 */
+function startMove(ev,el,k){
+  if(ev.button!==0)return;
+  const v=ann.get(k);
+  if(!v)return;
+  ev.preventDefault();
+  const d=DATA[cur], mv={x0:ev.clientX,y0:ev.clientY,bbox:[...v.bbox],moved:false,nb:null};
+  el.setPointerCapture(ev.pointerId);
+  const onMove=em=>{
+    if(!mv.moved&&Math.hypot(em.clientX-mv.x0,em.clientY-mv.y0)<4)return;
+    mv.moved=true;el.classList.add("moving");
+    const r=st.getBoundingClientRect();
+    const dx=(em.clientX-mv.x0)*d.w/r.width, dy=(em.clientY-mv.y0)*d.h/r.height;
+    const [x0,y0,x1,y1]=mv.bbox, w=x1-x0, h=y1-y0;
+    const nx=Math.min(Math.max(0,x0+dx),d.w-w), ny=Math.min(Math.max(0,y0+dy),d.h-h);
+    mv.nb=[nx,ny,nx+w,ny+h].map(n=>Math.round(n*10)/10);
+    el.style.left=pct(nx,d.w);el.style.top=pct(ny,d.h);
+  };
+  const onUp=()=>{
+    el.removeEventListener("pointermove",onMove);
+    el.removeEventListener("pointerup",onUp);
+    el.classList.remove("moving");
+    if(mv.moved&&mv.nb){
+      suppressClick=true;setTimeout(()=>suppressClick=false,250);   // 拖后click可能因元素重建而不触发,定时清旗
+      ann.delete(k);                                  // key 含坐标,移动后重建
+      const nk=annKey(d.page,mv.nb.join(","));
+      ann.set(nk,{...v,bbox:mv.nb});
+      selKey=nk;saveAnn();drawAnn();
+    }
+  };
+  el.addEventListener("pointermove",onMove);
+  el.addEventListener("pointerup",onUp);
 }
 function delAnn(k){ann.delete(k);if(selKey===k)selKey=null;saveAnn();drawAnn();toast("已删除标记");}
 
@@ -532,40 +566,6 @@ function applyCat(c){
 function closePop(){pop.el.hidden=true;pop.key=null;pop.pending=null;}
 document.addEventListener("click",e=>{
   if(!pop.el.hidden&&!pop.justOpened&&!pop.el.contains(e.target))closePop();
-});
-
-/* ---- 区域框拖动微调：按住左键拖整框,松手提交;未动则照常弹气泡 ---- */
-let moveSt=null;
-st.addEventListener("pointerdown",e=>{
-  const ab=e.target.closest(".annbox.region");
-  if(!ab||e.button!==0)return;
-  const v=ann.get(ab.dataset.k);
-  if(!v)return;
-  moveSt={k:ab.dataset.k,el:ab,x0:e.clientX,y0:e.clientY,bbox:[...v.bbox],moved:false};
-});
-document.addEventListener("pointermove",e=>{
-  if(!moveSt)return;
-  if(!moveSt.moved&&Math.hypot(e.clientX-moveSt.x0,e.clientY-moveSt.y0)<4)return;
-  moveSt.moved=true;
-  moveSt.el.classList.add("moving");
-  const d=DATA[cur], r=st.getBoundingClientRect();
-  const dx=(e.clientX-moveSt.x0)*d.w/r.width, dy=(e.clientY-moveSt.y0)*d.h/r.height;
-  const [x0,y0,x1,y1]=moveSt.bbox, w=x1-x0, h=y1-y0;
-  const nx=Math.min(Math.max(0,x0+dx),d.w-w), ny=Math.min(Math.max(0,y0+dy),d.h-h);
-  moveSt.nb=[nx,ny,nx+w,ny+h].map(v=>Math.round(v*10)/10);
-  moveSt.el.style.left=pct(nx,d.w);moveSt.el.style.top=pct(ny,d.h);
-});
-document.addEventListener("pointerup",()=>{
-  if(!moveSt)return;
-  if(moveSt.moved&&moveSt.nb){
-    suppressClick=true;
-    const v=ann.get(moveSt.k);
-    ann.delete(moveSt.k);                            // key 含坐标,移动后重建
-    const d=DATA[cur], k=annKey(d.page,moveSt.nb.join(","));
-    ann.set(k,{...v,bbox:moveSt.nb});
-    selKey=k;saveAnn();drawAnn();
-  }
-  moveSt=null;
 });
 
 /* ---- 标记模式：空白处拖拽画区域框 ---- */
