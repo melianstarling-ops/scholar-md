@@ -182,8 +182,12 @@ def crosscheck(pdf_path: Path, md_path: Path, profile: LayoutProfile | None = No
                 for t in toks:
                     md_tokens[t] -= 1
                 continue
-            # 连字符断词合并归因："exten-"+"sion"→md "extension"
-            if all(len(t) >= 3 and any(t in mt for mt in md_token_set) for t in toks):
+            # 断词合并归因：行末连字符 "exten-"+"sion"→md "extension"，
+            # 及词内空格重连 "non-conduc"+"tive"→md "non-conductive"（reading_order.rejoin_split_words，L9）。
+            # 子 token 命中即可：① 直接现于 md（覆盖 "non" 这类短前缀，仍以 md 真实存在为证），
+            # 或 ② ≥3 字符且为某 md token(≥4) 的子串（覆盖被并入更长词的碎片）。
+            if all(md_tokens[t] > 0 or (len(t) >= 3 and any(t in mt for mt in md_token_set))
+                   for t in toks):
                 merged.append(w.text)
                 continue
             unexplained.append({

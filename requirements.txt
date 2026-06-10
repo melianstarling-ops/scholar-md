@@ -13,6 +13,12 @@ PyMuPDF==1.27.2.3
 # 迁移评估结论(04_Docs/pymupdf4llm-迁移评估.md):规则不迁移,仅用作独立校验源。
 pymupdf4llm==1.27.2.3
 
+# --- 词内空格断裂重连(reading_order.rejoin_split_words 的词典成员判定) ---
+# 仅用其自带 frequency_dictionary_en_82_765.txt(MIT,~82k 常用词)做"是不是词"判定;
+# 刻意不调用 lookup_compound/word_segmentation/bigram(实测对术语幻觉、改源缺陷,破忠于源;
+# 见 04_Docs/lessons L9)。给定该词表 narrow 规则完全确定性、不造词。
+symspellpy==6.9.0
+
 # --- 可选:Tier1 AI 审查(按你用的模型供应商选装) ---
 # anthropic==0.46.0
 # openai==1.109.1

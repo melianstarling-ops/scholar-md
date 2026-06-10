@@ -17,7 +17,8 @@ from claims import find_claims_split, structure_claims
 from figures import extract_figures
 from page_classify import PageKind, classify_document
 from profiles import LayoutProfile, get_profile
-from reading_order import _assemble_paragraphs, reconstruct, reconstruct_linear
+from reading_order import _assemble_paragraphs, reconstruct, reconstruct_linear, rejoin_split_words
+from wordfix import is_word
 
 _ALLCAPS_RE = re.compile(r"^[^a-z]*$")
 # 段首"全大写连续词串 + 紧跟 Title-case 词" —— 用于行内标题(标题与正文未分段时)。
@@ -176,6 +177,9 @@ def convert(pdf_path: Path, out_dir: Path, profile: LayoutProfile | None = None)
         expected_words += [w.text for w in kept]
     full_spec = "\n\n".join(t for t in (p.strip() for p in _assemble_paragraphs(body_paras)) if t)
     full_spec = _strip_leading_title_block(full_spec, meta.get("title", ""))
+    # 词内空格断裂重连（行末连字符在文字层丢失致 `combina tion`）：narrow 保守判据，
+    # 删空格不动 alnum（Tier0 恒 0）；仅"合并体是词且两碎片非皆独立词"才接，零误连（lessons L9）。
+    full_spec = rejoin_split_words(full_spec, is_word)
 
     desc_text, claims_text = find_claims_split(full_spec, profile)
     desc_md = _mark_headings(desc_text, profile)
@@ -202,7 +206,7 @@ def convert(pdf_path: Path, out_dir: Path, profile: LayoutProfile | None = None)
         parts.append(f"# {meta['title']}\n")
     if abstract:
         parts.append("## Abstract\n")
-        parts.append(abstract + "\n")
+        parts.append(rejoin_split_words(abstract, is_word) + "\n")
     if desc_md.strip():
         parts.append(desc_md + "\n")
     if claims_md.strip():

@@ -294,6 +294,48 @@ def _assemble_paragraphs(paras: list[dict]) -> list[str]:
     return out
 
 
+def rejoin_split_words(text: str, is_word) -> str:
+    """重连【词内空格断裂】——行末连字符在文字层丢失致 `combina tion`→应为 `combination`。
+    保守 narrow 判据（实测：在专利语料上零误连，见 lessons L9）：
+      相邻两个【纯字母】token、中间**恰为单个普通空格**时，
+        若 is_word(a+b)  且  not(is_word(a) and is_word(b))  →  删空格合并（保留源大小写）。
+    即"合并体是词、且两碎片并非都是独立常用词"才接：
+      · `con`+`nection`→`connection`（nection 非词）✓ 合并
+      · `set`+`screws`（setscrews 非词）✓ 不合并；`set`+`screw`（setscrew 是词，但 set/screw 皆词）✓ 不合并
+      · `implant`+`able`（皆词）✓ 不合并——故意放弃（总则4 宁缺勿错，README 已记为源缺陷）
+    只认普通空格分隔的字母-字母对；跨标点/数字/换行一律不碰，与软连字符续接（行末 '-'）不重叠。
+    `is_word(w)` 由调用方注入（大小写不敏感的词典成员判定），本函数不依赖任何词库。
+
+    >>> wd = {"connection","combination","extension","tissue","set","screw","screws",
+    ...       "setscrew","implant","able","metal"}
+    >>> isw = lambda w: w.lower() in wd
+    >>> rejoin_split_words("electrical con nection here", isw)   # nection 非词 → 合并
+    'electrical connection here'
+    >>> rejoin_split_words("a combina tion of", isw)             # 两碎片皆非词 → 合并
+    'a combination of'
+    >>> rejoin_split_words("the set screws here", isw)           # setscrews 非词 → 不合并
+    'the set screws here'
+    >>> rejoin_split_words("metal set screw block", isw)         # setscrew 是词但 set/screw 皆词 → 不合并(保守)
+    'metal set screw block'
+    >>> rejoin_split_words("an implant able device", isw)        # 皆词 → 不合并
+    'an implant able device'
+    >>> rejoin_split_words("exten Sion kept", isw)               # 保留源大小写
+    'extenSion kept'
+    >>> rejoin_split_words("con, nection split", isw)            # 中间含标点 → 不碰
+    'con, nection split'
+    """
+    tokens = re.findall(r"[A-Za-z]+|[^A-Za-z]+", text)
+    i = 0
+    while i + 2 < len(tokens):
+        a, sep, b = tokens[i], tokens[i + 1], tokens[i + 2]
+        if (a.isalpha() and b.isalpha() and sep == " "
+                and is_word(a + b) and not (is_word(a) and is_word(b))):
+            tokens[i:i + 3] = [a + b]   # 删空格合并；不前进 i，允许与后续继续判定
+            continue
+        i += 1
+    return "".join(tokens)
+
+
 def reconstruct(
     words: list[Word],
     page_height: float,
