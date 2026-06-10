@@ -245,22 +245,23 @@ _TEMPLATE = r"""<!DOCTYPE html>
   .annmode .box,.annmode #overlay{cursor:crosshair}
 
   /* ---- 语义气泡 ---- */
-  #pop{position:fixed;display:flex;align-items:center;gap:9px;background:var(--card);border:1px solid var(--line);
-       border-radius:999px;padding:7px 12px;z-index:60;box-shadow:0 6px 22px var(--shadow)}
+  /* 紧凑气泡:高度与顶栏控件(28px)一致,锚定标记框、留间距不遮挡 */
+  #pop{position:fixed;display:flex;align-items:center;gap:7px;background:var(--card);border:1px solid var(--line);
+       border-radius:999px;padding:0 10px;height:28px;z-index:60;box-shadow:0 6px 22px var(--shadow)}
   #pop[hidden]{display:none}   /* 显式覆盖:#pop 的 display:flex 优先级高于 UA 的 [hidden] */
-  #pop .pdot{width:17px;height:17px;border-radius:50%;cursor:pointer;border:2.5px solid transparent;transition:transform .12s}
-  #pop .pdot:hover{transform:scale(1.18)}
+  #pop .pdot{width:13px;height:13px;border-radius:50%;cursor:pointer;border:2px solid transparent;transition:transform .12s}
+  #pop .pdot:hover{transform:scale(1.2)}
   #pop .pdot.on{border-color:var(--ink)}
-  #pop .pdel{border:0;background:none;color:var(--sub);cursor:pointer;font-size:14px;padding:0 2px}
+  #pop .pdel{border:0;background:none;color:var(--sub);cursor:pointer;font-size:12.5px;padding:0 1px;line-height:1}
   #pop .pdel:hover{color:var(--bad)}
 
   /* ---- 底部缩略图条：Dock 式自动隐藏 ---- */
   #filmzone{position:absolute;left:0;right:0;bottom:0;height:16px;z-index:19}
-  #film{position:absolute;left:12px;right:12px;bottom:10px;z-index:20;padding:10px 14px;overflow-x:auto;
+  #film{position:absolute;left:12px;right:12px;bottom:24px;z-index:20;padding:10px 14px;overflow-x:auto;
         scroll-snap-type:x proximity;scrollbar-width:thin;border:1px solid var(--line);border-radius:14px;
         background:color-mix(in srgb,var(--panel) 88%,transparent);backdrop-filter:blur(10px);
         box-shadow:0 8px 28px var(--shadow);
-        transform:translateY(calc(100% - 12px));opacity:.55;   /* 静止态:线上方留 12px 把手 */
+        transform:translateY(calc(100% - 14px));opacity:.55;   /* 静止态:bottom 24px + 14px 把手,悬在分割线上方 */
         transition:transform .7s cubic-bezier(.22,1,.36,1),opacity .55s ease}
   #film.show{transform:translateY(0);opacity:1}
   #filmtrack{display:flex;gap:10px;width:max-content;padding:2px}
@@ -535,7 +536,7 @@ function delAnn(k){ann.delete(k);if(selKey===k)selKey=null;saveAnn();drawAnn();t
 
 /* ---- 语义气泡:点中标记/词框 → 色点直选 ---- */
 const pop={el:$("pop"),key:null,pending:null,justOpened:false};
-function openPop(x,y,opts){
+function openPop(anchor,opts){   // anchor: 标记框/词框的 DOMRect,气泡悬于框上方 10px(放不下翻到下方)
   pop.key=opts.key||null; pop.pending=opts.pending||null;
   pop.justOpened=true; setTimeout(()=>pop.justOpened=false,50);
   const kind=pop.key?(ann.get(pop.key).kind||"word"):pop.pending.kind;
@@ -546,8 +547,8 @@ function openPop(x,y,opts){
     +(pop.key?`<button class="pdel" title="删除 (Delete)">✕</button>`:"");
   pop.el.hidden=false;
   const pw=pop.el.offsetWidth, ph=pop.el.offsetHeight;
-  pop.el.style.left=Math.min(Math.max(8,x-pw/2),innerWidth-pw-8)+"px";
-  pop.el.style.top=(y-ph-14<8 ? y+18 : y-ph-14)+"px";
+  pop.el.style.left=Math.min(Math.max(8,(anchor.left+anchor.right)/2-pw/2),innerWidth-pw-8)+"px";
+  pop.el.style.top=(anchor.top-ph-10<8 ? anchor.bottom+10 : anchor.top-ph-10)+"px";
   pop.el.querySelectorAll(".pdot").forEach(p=>p.onclick=ev=>{ev.stopPropagation();applyCat(p.dataset.c);});
   const del=pop.el.querySelector(".pdel");
   if(del)del.onclick=ev=>{ev.stopPropagation();delAnn(pop.key);closePop();};
@@ -600,7 +601,8 @@ st.addEventListener("pointerup",e=>{
       const k=annKey(d.page,b.join(","));
       ann.set(k,{page:d.page,text:"",bbox:b,cat:"missed_rec",kind:"region"});
       selKey=k;saveAnn();drawAnn();
-      openPop(e.clientX,e.clientY,{key:k});         // 落框即默认漏识别,气泡可改
+      const nb=ov.querySelector(`.annbox[data-k="${k}"]`);   // 落框即默认漏识别,气泡锚框可改
+      if(nb)openPop(nb.getBoundingClientRect(),{key:k});
     }
   }
   drawing=null;
@@ -612,9 +614,10 @@ st.addEventListener("click",e=>{
   const d=DATA[cur];
   const ab=e.target.closest(".annbox");
   if(ab){                                            // 任意模式:点标记框 → 选中+气泡
-    selKey=ab.dataset.k;drawAnn();
-    openPop(e.clientX,e.clientY,{key:ab.dataset.k});
-    flashEl($("annList")&&$("annList").querySelector(`[data-k="${ab.dataset.k}"]`));
+    const k0=ab.dataset.k, r0=ab.getBoundingClientRect();
+    selKey=k0;drawAnn();                             // drawAnn 重建元素,先取 rect
+    openPop(r0,{key:k0});
+    flashEl($("annList")&&$("annList").querySelector(`[data-k="${k0}"]`));
     e.stopPropagation();return;
   }
   const el=e.target.closest(".box");
@@ -622,8 +625,9 @@ st.addEventListener("click",e=>{
   if(annMode){
     if(!el.dataset.t)return;                         // 词级框才可点标
     const k=annKey(d.page,el.dataset.b);
-    if(ann.has(k)){selKey=k;drawAnn();openPop(e.clientX,e.clientY,{key:k});}
-    else openPop(e.clientX,e.clientY,{pending:{kind:"word",page:d.page,
+    const r0=el.getBoundingClientRect();
+    if(ann.has(k)){selKey=k;drawAnn();openPop(r0,{key:k});}
+    else openPop(r0,{pending:{kind:"word",page:d.page,
       bbox:el.dataset.b.split(",").map(Number),text:el.dataset.t}});
     e.stopPropagation();return;
   }
