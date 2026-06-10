@@ -17,7 +17,7 @@ from claims import find_claims_split, structure_claims
 from figures import extract_figures
 from page_classify import PageKind, classify_document
 from profiles import LayoutProfile, get_profile
-from reading_order import reconstruct, reconstruct_linear
+from reading_order import _assemble_paragraphs, reconstruct, reconstruct_linear
 
 _ALLCAPS_RE = re.compile(r"^[^a-z]*$")
 # 段首"全大写连续词串 + 紧跟 Title-case 词" —— 用于行内标题(标题与正文未分段时)。
@@ -166,12 +166,15 @@ def convert(pdf_path: Path, out_dir: Path, profile: LayoutProfile | None = None)
         expected_words += [meta.get("title", "")] + meta.get("inventors", []) + [abstract]
 
     # --- 正文双栏 ---
-    body_text_parts = []
+    # 收集各页【原始段信息】（含 new_by），多页拼成一条后交给 _assemble_paragraphs：
+    # 同一句被栏间 / 页间边界劈开的续写在此统一重接（仅在 new_by=='first' 的栏顶/页顶处合并，
+    # 三信号判据见 reading_order._assemble_paragraphs；标题/claims 由首字母小写信号挡住）。
+    body_paras: list[dict] = []
     for info in sorted(bodies, key=lambda i: i.index):
-        txt, kept, _ = reconstruct(info.words, info.height, info.gutter_x, profile)
-        body_text_parts.append(txt)
+        _, kept, _, paras = reconstruct(info.words, info.height, info.gutter_x, profile)
+        body_paras.extend(paras)
         expected_words += [w.text for w in kept]
-    full_spec = "\n\n".join(p for p in body_text_parts if p.strip())
+    full_spec = "\n\n".join(t for t in (p.strip() for p in _assemble_paragraphs(body_paras)) if t)
     full_spec = _strip_leading_title_block(full_spec, meta.get("title", ""))
 
     desc_text, claims_text = find_claims_split(full_spec, profile)

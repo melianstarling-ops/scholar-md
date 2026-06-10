@@ -71,7 +71,7 @@ def _patent_number_from_name(stem: str) -> str:
 def parse_cover(cover: PageInfo, profile: LayoutProfile, source_stem: str) -> tuple[dict, str]:
     """返回 (metadata, abstract_text)。"""
     gutter = cover.width / 2
-    text, _, _ = reconstruct(cover.words, cover.height, gutter, profile)
+    text, _, _, _ = reconstruct(cover.words, cover.height, gutter, profile)
     inid = _inid_map(text)
 
     title = _clean_field(inid.get("54", ""))

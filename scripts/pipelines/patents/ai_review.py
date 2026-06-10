@@ -144,7 +144,7 @@ def review_document(pdf_path: Path, out_dir: Path, model_spec: str,
     results = []
     for idx in pages:
         info = by_index[idx]
-        page_md, _, _ = reconstruct(info.words, info.height, info.gutter_x, profile)
+        page_md, _, _, _ = reconstruct(info.words, info.height, info.gutter_x, profile)
         img = _png_b64(doc[idx])
         try:
             raw = call_model(model_spec, img, page_md)

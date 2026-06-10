@@ -231,31 +231,98 @@ def _column_paragraphs(words: list[Word], threshold: float, y_tol: float, line_h
     return [p["text"] for p in _column_paragraph_infos(words, threshold, y_tol, line_h)]
 
 
+_SENT_END_CHARS = ".!?:"
+# 段末尾随的收尾符（引号/括号），判"是否收尾"前先剥掉看真正末字符
+_TRAILING_CLOSERS = "’”\"')]"
+
+
+def _para_is_open(text: str) -> bool:
+    """段落是否"未收尾"（末字符非句末标点）→ 跨边界时可能是被劈开的续写。
+    先剥尾随收尾引号/括号，再看真正末字符是否落在句末标点集。"""
+    t = text.rstrip()
+    while t and t[-1] in _TRAILING_CLOSERS:
+        t = t[:-1].rstrip()
+    return bool(t) and t[-1] not in _SENT_END_CHARS
+
+
+def _first_alpha_is_lower(text: str) -> bool:
+    """段落首个字母是否小写（续写句以小写词承接；ALLCAPS 标题、数字编号 claims 不满足）。"""
+    for ch in text:
+        if ch.isalpha():
+            return ch.islower()
+    return False
+
+
+def _assemble_paragraphs(paras: list[dict]) -> list[str]:
+    """把被【栏边界 / 页边界】劈开的同一段续写重新接上。三信号判据（保守，宁缺勿错）：
+      ① 后段为齐头续写（new_by=='first'，即栏/页顶、非缩进非大行距）
+      ② 前段未收尾（末字符非句末标点）
+      ③ 后段首字母小写
+    三者同时满足 → 单空格并入前段；否则独立成段。
+    合并仅在 new_by=='first' 处发生 → 只作用于栏顶/页顶边界，栏内段落分割完全不受影响；
+    ③挡住把 ALLCAPS 章节标题、数字编号 claims 误并入正文（trap-3）。
+
+    >>> # 正例：前段未收尾 + 后段栏顶续写 + 小写起 → 合并
+    >>> _assemble_paragraphs([{"text": "Connection of the", "new_by": "indent"},
+    ...                        {"text": "lead to an extension.", "new_by": "first"}])
+    ['Connection of the lead to an extension.']
+    >>> # 反例①：前段已收尾（句号）→ 不合并
+    >>> _assemble_paragraphs([{"text": "End of sentence.", "new_by": "indent"},
+    ...                        {"text": "next clause", "new_by": "first"}])
+    ['End of sentence.', 'next clause']
+    >>> # 反例②：后段非栏/页顶（new_by!='first'，是缩进新段）→ 不合并
+    >>> _assemble_paragraphs([{"text": "open clause", "new_by": "indent"},
+    ...                        {"text": "indented fresh para", "new_by": "indent"}])
+    ['open clause', 'indented fresh para']
+    >>> # 反例③：后段 ALLCAPS 标题（首字母非小写）→ 不合并（trap-3）
+    >>> _assemble_paragraphs([{"text": "open clause", "new_by": "indent"},
+    ...                        {"text": "BACKGROUND OF THE INVENTION", "new_by": "first"}])
+    ['open clause', 'BACKGROUND OF THE INVENTION']
+    >>> # 反例④：后段数字编号 claim（首字符数字，无字母小写）→ 不合并（trap-3）
+    >>> _assemble_paragraphs([{"text": "open clause", "new_by": "indent"},
+    ...                        {"text": "2. The device of claim 1", "new_by": "first"}])
+    ['open clause', '2. The device of claim 1']
+    """
+    out: list[str] = []
+    for p in paras:
+        text = p["text"]
+        if (out and p.get("new_by") == "first"
+                and _para_is_open(out[-1]) and _first_alpha_is_lower(text)):
+            out[-1] = out[-1].rstrip() + " " + text.lstrip()
+        else:
+            out.append(text)
+    return out
+
+
 def reconstruct(
     words: list[Word],
     page_height: float,
     gutter_x: float,
     profile: LayoutProfile,
-) -> tuple[str, list[Word], list[Word]]:
-    """一页双栏正文 → (markdown文本, 保留词, 剔除词)。"""
+) -> tuple[str, list[Word], list[Word], list[dict]]:
+    """一页双栏正文 → (markdown文本, 保留词, 剔除词, 原始段信息列表)。
+
+    第4项 `paras` 是【未跨边界合并】的原始段信息（左栏段… + 右栏段…，每段带 new_by），
+    供上游 convert_patent 把多页 paras 拼起来后用 _assemble_paragraphs 统一做"跨页续接"；
+    本函数返回的 `text` 已对【页内栏间】边界做过续接合并，供独立调用方（cover/ai_review）直接用。"""
     removed_all: list[Word] = []
     body, rm = strip_bands(words, page_height, profile)
     removed_all += rm
     body, rm = strip_line_numbers(body, gutter_x, profile)
     removed_all += rm
     if not body:
-        return "", [], removed_all
+        return "", [], removed_all, []
 
     punct_thr = max(profile.space_gap_abs, profile.space_gap_ratio * median_char_width(body))
     line_h = median_height(body)
     y_tol = Y_TOL_RATIO * line_h
 
     left, right = split_columns(body, gutter_x)
-    paras = _column_paragraphs(left, punct_thr, y_tol, line_h)
-    paras += _column_paragraphs(right, punct_thr, y_tol, line_h)
+    paras = _column_paragraph_infos(left, punct_thr, y_tol, line_h)
+    paras += _column_paragraph_infos(right, punct_thr, y_tol, line_h)
 
-    text = "\n\n".join(p.strip() for p in paras if p.strip())
-    return text, body, removed_all
+    text = "\n\n".join(t for t in (p.strip() for p in _assemble_paragraphs(paras)) if t)
+    return text, body, removed_all, paras
 
 
 def reconstruct_linear(
