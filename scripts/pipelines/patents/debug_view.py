@@ -257,11 +257,10 @@ _TEMPLATE = r"""<!DOCTYPE html>
 
   /* ---- 底部缩略图条：Dock 式自动隐藏 ---- */
   #filmzone{position:absolute;left:0;right:0;bottom:0;height:16px;z-index:19}
-  #film{position:absolute;left:12px;right:12px;bottom:-10px;z-index:20;padding:10px 14px;overflow-x:auto;
-        scroll-snap-type:x proximity;scrollbar-width:thin;border:1px solid var(--line);border-radius:14px;
+  #film{position:absolute;left:0;right:0;bottom:0;z-index:20;padding:10px 16px;overflow-x:auto;
+        scroll-snap-type:x proximity;scrollbar-width:thin;border-top:1px solid var(--line);
         background:color-mix(in srgb,var(--panel) 88%,transparent);backdrop-filter:blur(10px);
-        box-shadow:0 8px 28px var(--shadow);
-        transform:translateY(calc(100% - 14px));opacity:.55;   /* 静止态:bottom 24px + 14px 把手,悬在分割线上方 */
+        transform:translateY(calc(100% - 7px));opacity:.6;     /* 静止态:贴底,露 7px 把手(恢复原始形态) */
         transition:transform .7s cubic-bezier(.22,1,.36,1),opacity .55s ease}
   #film.show{transform:translateY(0);opacity:1}
   #filmtrack{display:flex;gap:10px;width:max-content;padding:2px}
