@@ -39,6 +39,7 @@ from pathlib import Path
 
 import pymupdf4llm
 
+from garblecheck import classify_garble
 from page_classify import PageKind, classify_document, page_words
 from profiles import LayoutProfile, get_profile
 from reading_order import _is_footer_noise, group_lines, join_line, median_height, Word, Y_TOL_RATIO
@@ -152,6 +153,18 @@ def crosscheck(pdf_path: Path, md_path: Path, profile: LayoutProfile | None = No
     for info in infos:
         bwords = baseline[info.index]
         rep: dict = {"page": info.index + 1, "kind": info.kind.value, "n_words": len(bwords)}
+
+        # 坏字形检测（只标不改，独立于覆盖审计；全页型都查，图像页无词自然跳过）。
+        # 与 unexplained 正交：unexplained=词消失了；garble=词在但字符被坏（OCR 误读/字体映射）污染。
+        garbles = [
+            {"text": w.text,
+             "bbox": [round(w.x0, 1), round(w.y0, 1), round(w.x1, 1), round(w.y1, 1)],
+             "reason": g}
+            for w in bwords if (g := classify_garble(w.text))
+        ]
+        if garbles:
+            rep["garbles"] = garbles
+            totals["garble"] += len(garbles)
 
         diff = _parity_diff(bwords, page_words(doc[info.index]))
         if diff:
@@ -279,7 +292,7 @@ def main() -> int:
     profile = get_profile()
 
     print(f"[{datetime.now():%H:%M:%S}] 交叉校验 {len(pdfs)} 份（第二取词器 vs 转换产物）\n")
-    alerts = failed = 0
+    alerts = failed = garble_total = 0
     for pdf in pdfs:
         md = _locate_md(pdf, md_root)
         if md is None:
@@ -300,17 +313,26 @@ def main() -> int:
         flag = "OK" if rep["passed"] else "ALERT"
         if not rep["passed"]:
             alerts += 1
+        n_garble = s.get("garble", 0)
+        garble_total += n_garble
         print(f"  [{flag}] {pdf.stem} — 审计 {len(rep['audited_pages'])}/{rep['n_pages']} 页 "
               f"噪声(行号={s.get('noise_line_number', 0)} 页眉={s.get('noise_header_footer', 0)} "
               f"claims标记={s.get('claims_marker', 0)}) 合并={s.get('merged', 0)} "
-              f"未解释={s.get('unexplained', 0)} 取词差异页(审计/非审计)="
+              f"未解释={s.get('unexplained', 0)} 坏字形={n_garble} 取词差异页(审计/非审计)="
               f"{rep['parity_diff_pages_audited']}/{rep['parity_diff_pages_info']} → {out_json.name}")
         if not rep["passed"]:
             for pr in rep["pages"]:
                 for u in pr.get("unexplained", [])[:3]:
                     print(f"        · p{pr['page']} {u['text']!r} @ {u['bbox']}")
+        if n_garble:   # 源缺陷,不翻 passed,但务必显出来供人工审查
+            shown = [(pr["page"], gb) for pr in rep["pages"] for gb in pr.get("garbles", ())]
+            for page, gb in shown[:5]:
+                print(f"        ⚠ 坏字形 p{page} {gb['text']!r} ⟨{gb['reason']}⟩ @ {gb['bbox']}")
+            if len(shown) > 5:
+                print(f"        ⚠ …另有 {len(shown) - 5} 处坏字形(详见 {out_json.name})")
 
-    print(f"\n{'=' * 56}\n交叉校验完成: {len(pdfs) - alerts - failed} OK / {alerts} 告警 / {failed} 失败")
+    print(f"\n{'=' * 56}\n交叉校验完成: {len(pdfs) - alerts - failed} OK / {alerts} 告警 / {failed} 失败"
+          + (f" · 坏字形 {garble_total} 处待人工审查" if garble_total else ""))
     return 0 if failed == 0 else 1
 
 

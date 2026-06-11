@@ -93,7 +93,7 @@ def _union(words: list[Word]) -> list[float]:
 
 
 def page_payload(doc: "fitz.Document", info, profile: LayoutProfile,
-                 unexplained: list[dict], zoom: float) -> dict:
+                 unexplained: list[dict], garbles: list[dict], zoom: float) -> dict:
     pix = doc[info.index].get_pixmap(matrix=fitz.Matrix(zoom, zoom))
     payload: dict = {
         "page": info.index + 1,
@@ -108,6 +108,7 @@ def page_payload(doc: "fitz.Document", info, profile: LayoutProfile,
         "paras": [],
         "removed": {"line_number": [], "header_footer": []},
         "unexplained": unexplained,
+        "garbles": garbles,
         "note": _KIND_NOTE[info.kind.value],
     }
     boxes: list[dict] = payload["boxes"]
@@ -155,6 +156,8 @@ def page_payload(doc: "fitz.Document", info, profile: LayoutProfile,
 
     for i, u in enumerate(unexplained):
         boxes.append({"c": "unexplained", "b": u["bbox"], "t": u["text"], "i": i})
+    for i, gb in enumerate(garbles):
+        boxes.append({"c": "garble", "b": gb["bbox"], "t": f"{gb['text']} ⟨{gb['reason']}⟩", "i": i})
     return payload
 
 
@@ -248,6 +251,7 @@ _TEMPLATE = r"""<!DOCTYPE html>
   .box.line_number{border:1.5px solid var(--ln);background:color-mix(in srgb,var(--ln) 24%,transparent);z-index:3;cursor:pointer}
   .box.header_footer{border:1.5px solid var(--hf);background:color-mix(in srgb,var(--hf) 20%,transparent);z-index:3;cursor:pointer}
   .box.unexplained{border:2.5px solid var(--bad);background:color-mix(in srgb,var(--bad) 20%,transparent);z-index:5;cursor:pointer}
+  .box.garble{border:2.5px solid #d2a106;background:color-mix(in srgb,#d2a106 22%,transparent);z-index:5;cursor:pointer}
   .box.para{border:1px dashed color-mix(in srgb,var(--para) 60%,transparent);border-left:3px solid var(--para);
             background:transparent;z-index:1;cursor:pointer}
   .box.para.hot{background:color-mix(in srgb,var(--para) 15%,transparent);border-color:var(--para)}
@@ -265,7 +269,7 @@ _TEMPLATE = r"""<!DOCTYPE html>
             pointer-events:none;border-radius:3px}
   #gutter{position:absolute;top:0;bottom:0;width:0;border-left:2px dashed rgba(255,69,58,.55);z-index:4}
   .hide-kept .box.kept,.hide-line_number .box.line_number,.hide-header_footer .box.header_footer,
-  .hide-para .box.para,.hide-unexplained .box.unexplained,.hide-gutter #gutter,.hide-ann .annbox{display:none}
+  .hide-para .box.para,.hide-unexplained .box.unexplained,.hide-garble .box.garble,.hide-gutter #gutter,.hide-ann .annbox{display:none}
   .annmode .box,.annmode #overlay{cursor:crosshair}
 
   /* ---- 语义气泡 ---- */
@@ -385,6 +389,7 @@ _TEMPLATE = r"""<!DOCTYPE html>
     <div class="sec" id="noteSec" hidden><h2>说明</h2><div class="note" id="note"></div></div>
     <div class="sec" id="annSec" hidden><h2 style="color:var(--accent)">本页标记<button id="clrRes" class="mini" hidden>清除已处理</button></h2><div id="annList"></div></div>
     <div class="sec" id="badSec" hidden><h2 style="color:var(--bad)">crosscheck 未解释删除</h2><div class="chips" id="bad"></div></div>
+    <div class="sec" id="garbleSec" hidden><h2 style="color:#d2a106">坏字形(疑似源缺陷·只标不改)</h2><div class="chips" id="garble"></div></div>
     <div class="sec"><h2>重排段落（中间产物）</h2><div id="paras"></div></div>
     <div class="sec"><h2>剔除词</h2><div id="removed"></div></div>
   </section>
@@ -403,6 +408,7 @@ const LAYERS = [
   ["kept","保留词","var(--kept)",false],
   ["para","段落","var(--para)",true],
   ["unexplained","未解释","var(--bad)",true],
+  ["garble","坏字形","#d2a106",true],
   ["ann","标记","var(--accent)",true],
   ["gutter","gutter","rgba(255,69,58,.8)",true],
 ];
@@ -695,6 +701,7 @@ st.addEventListener("click",e=>{
   else if(el.dataset.id) flashEl($("card-"+el.dataset.id));                     // 段落框 → 段落卡
   else if(el.dataset.r)  flashEl($("chip-"+el.dataset.r+"-"+el.dataset.i));     // 剔除词 → chip
   else if(el.classList.contains("unexplained")) flashEl($("badchip-"+el.dataset.i));
+  else if(el.classList.contains("garble")) flashEl($("garblechip-"+el.dataset.i));
 });
 
 /* ---- 右栏标记清单：改语义/note 输入/删除/已处理调和/双向联动 ---- */
@@ -790,7 +797,7 @@ function render(i){
     if(b.t!==undefined){el.title=b.t+"  ["+b.b.map(Math.round)+"]";el.dataset.t=b.t;el.dataset.b=b.b.join(",");}
     if(b.p!==undefined&&b.p)el.dataset.p=b.p;
     if(b.i!==undefined&&(b.c==="line_number"||b.c==="header_footer")){el.dataset.r=b.c;el.dataset.i=b.i;}
-    if(b.i!==undefined&&b.c==="unexplained")el.dataset.i=b.i;
+    if(b.i!==undefined&&(b.c==="unexplained"||b.c==="garble"))el.dataset.i=b.i;
     ov.appendChild(el);
   }
   drawAnn();
@@ -806,6 +813,10 @@ function render(i){
 
   $("badSec").hidden=!d.unexplained.length;
   $("bad").innerHTML=d.unexplained.map((u,j)=>`<span class="chip bad" id="badchip-${j}" title="[${u.bbox}]">${esc(u.text)}</span>`).join("");
+
+  const gb=d.garbles||[];
+  $("garbleSec").hidden=!gb.length;
+  $("garble").innerHTML=gb.map((u,j)=>`<span class="chip" id="garblechip-${j}" style="border-color:#d2a106;color:#d2a106" title="${u.reason} [${u.bbox}]">${esc(u.text)}</span>`).join("");
 
   const NEWBY={indent:"缩进起段",gap:"行距起段",first:"栏首",linear:"线性"};
   $("paras").innerHTML=d.paras.length?d.paras.map(p=>
@@ -880,26 +891,28 @@ def collect_annotations(pdfs: list[Path], md_root: Path) -> int:
     return moved
 
 
-def _load_unexplained(md_root: Path, stem: str, n_pages: int) -> list[list[dict]]:
-    """读 crosscheck 报告（如有），取每页未解释词。"""
-    per_page: list[list[dict]] = [[] for _ in range(n_pages)]
+def _load_crosscheck(md_root: Path, stem: str, n_pages: int) -> tuple[list[list[dict]], list[list[dict]]]:
+    """读 crosscheck 报告（如有），取每页未解释词与坏字形（ToUnicode 缺陷,只标不改）。"""
+    unexpl: list[list[dict]] = [[] for _ in range(n_pages)]
+    garble: list[list[dict]] = [[] for _ in range(n_pages)]
     for cand in (md_root / stem / f"{stem}_crosscheck.json", md_root / f"{stem}_crosscheck.json"):
         if cand.exists():
             rep = json.loads(cand.read_text(encoding="utf-8"))
             for pr in rep.get("pages", []):
                 idx = pr["page"] - 1
                 if 0 <= idx < n_pages:
-                    per_page[idx] = pr.get("unexplained", [])
+                    unexpl[idx] = pr.get("unexplained", [])
+                    garble[idx] = pr.get("garbles", [])
             break
-    return per_page
+    return unexpl, garble
 
 
 def render_doc(pdf: Path, md_root: Path, profile: LayoutProfile, zoom: float, serve: bool) -> tuple[str, int]:
     """单篇 → (html, 页数)。静态/服务两模式共用，仅 SAVE_URL 注入不同。"""
     doc = fitz.open(str(pdf))
     infos = classify_document(doc, profile)
-    unexpl = _load_unexplained(md_root, pdf.stem, doc.page_count)
-    pages = [page_payload(doc, info, profile, unexpl[info.index], zoom) for info in infos]
+    unexpl, garble = _load_crosscheck(md_root, pdf.stem, doc.page_count)
+    pages = [page_payload(doc, info, profile, unexpl[info.index], garble[info.index], zoom) for info in infos]
     doc.close()
     return build_html(pdf.stem, pages, _load_resolved(md_root, pdf.stem), serve), len(pages)
 
