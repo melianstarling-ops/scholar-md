@@ -15,6 +15,9 @@
   * 翻页：‹ › / ←→ 键 / 页码输入框直跳 / 底部缩略图条（Dock 式自动隐藏，
     鼠标移到底缘弹出，移开收起；横滑+居中吸附+active 放大）。
   * 缩放：− / + 按钮（中间显示倍率，点击恢复适宽）；Ctrl+滚轮以鼠标位置为锚点缩放。
+  * 平移：普通模式长按左键 250ms 进入拖动平移（标记模式下拖拽仍是画框）；
+    横向滚动条在左栏**顶缘**（代理条，仅页面宽于视口时出现）——原生底部横条
+    会被 Dock 弹出遮挡，已收口禁用；触控板横扫/Shift+滚轮照常横移。
   * 暗色页面：默认对 PDF 页做反色渲染（仅暗色主题下生效），◑ 按钮可关。
   * 双向联动：右栏段落卡 hover → 左侧高亮；左侧点击词框/段落框 → 右栏定位；
     标记框 ↔ 右栏"本页标记"行互相联动（hover 高亮、点击定位）。
@@ -238,7 +241,14 @@ _TEMPLATE = r"""<!DOCTYPE html>
 
   main{flex:1;display:flex;min-height:0}
   #leftcol{flex:11;position:relative;display:flex;flex-direction:column;min-width:0;min-height:0;overflow:hidden}
-  #leftpane{flex:1;position:relative;overflow:auto;padding:16px;min-height:0}
+  /* 横向滚动收口到顶部代理条(#hscroll):原生底部横条会被 Dock 弹出遮挡 */
+  #leftpane{flex:1;position:relative;overflow-y:auto;overflow-x:hidden;padding:16px;min-height:0}
+  #leftpane.panning{cursor:grabbing}
+  #leftpane.panning *{cursor:grabbing!important}
+  #hscroll{height:0;overflow-x:auto;overflow-y:hidden;scrollbar-width:thin;background:var(--panel);
+           border-bottom:1px solid transparent;transition:height .2s ease}
+  #hscroll.on{height:12px;border-bottom-color:var(--line)}
+  #hscroll>div{height:1px}
   #stage{position:relative;width:min(100%,860px);margin:0 auto;box-shadow:0 2px 14px var(--shadow);
          border-radius:6px;overflow:hidden;background:#fff;touch-action:pan-x pan-y}
   #stage img{display:block;width:100%;pointer-events:none;user-select:none}
@@ -380,6 +390,7 @@ _TEMPLATE = r"""<!DOCTYPE html>
 </header>
 <main>
   <section id="leftcol">
+    <div id="hscroll" title="横向滚动(页面宽于视口时出现)"><div></div></div>
     <div id="leftpane"><div id="stage"><img id="img" alt=""><div id="overlay"></div></div></div>
     <div id="filmzone"></div>
     <div id="film"><div id="filmtrack"></div></div>
@@ -394,7 +405,7 @@ _TEMPLATE = r"""<!DOCTYPE html>
     <div class="sec"><h2>剔除词</h2><div id="removed"></div></div>
   </section>
 </main>
-<footer><kbd>←</kbd><kbd>→</kbd> 翻页 · <kbd>M</kbd> 标记模式（点词框/拖框 → 气泡选语义） · <kbd>Delete</kbd> 删选中标记 · <kbd>Ctrl</kbd>+滚轮 指针锚点缩放 · 底缘悬停出缩略图 · 生成于 __STAMP__</footer>
+<footer><kbd>←</kbd><kbd>→</kbd> 翻页 · <kbd>M</kbd> 标记模式（点词框/拖框 → 气泡选语义） · <kbd>Delete</kbd> 删选中标记 · <kbd>Ctrl</kbd>+滚轮 指针锚点缩放 · 长按左键拖动平移 · 横向滚动条在左栏顶缘 · 底缘悬停出缩略图 · 生成于 __STAMP__</footer>
 <div id="pop" hidden></div>
 <div id="toast"></div>
 <script>
@@ -466,6 +477,58 @@ lp.addEventListener("wheel",e=>{
   lp.scrollLeft=st.offsetLeft+fx*newW-px;
   lp.scrollTop =st.offsetTop +fy*newH-py;
 },{passive:false});
+
+/* ---- 顶部横向滚动条(代理):#leftpane overflow-x:hidden,原生底横条让位给 Dock ---- */
+const hs=$("hscroll"), hsi=hs.firstElementChild;
+function syncH(){
+  hsi.style.width=lp.scrollWidth+"px";
+  hs.classList.toggle("on",lp.scrollWidth>lp.clientWidth+1);
+}
+/* 双向同步:scroll 事件仅在值实际变化时触发,赋同值即收敛,无需加锁 */
+hs.addEventListener("scroll",()=>{lp.scrollLeft=hs.scrollLeft;});
+lp.addEventListener("scroll",()=>{hs.scrollLeft=lp.scrollLeft;});
+new ResizeObserver(syncH).observe(st);
+new ResizeObserver(syncH).observe(lp);
+/* overflow-x:hidden 杀掉了原生横向手势 → 触控板 deltaX / Shift+滚轮 改由 JS 横移 */
+lp.addEventListener("wheel",e=>{
+  if(e.ctrlKey)return;                                  // 缩放走上面的 ctrl 分支
+  const dx=(e.shiftKey&&!e.deltaX)?e.deltaY:e.deltaX;
+  if(dx){e.preventDefault();lp.scrollLeft+=dx;}
+},{passive:false});
+
+/* ---- 长按左键拖动平移(普通模式;标记模式拖拽仍是画区域框) ---- */
+let pan=null,panTimer=null,panStart=null;
+lp.addEventListener("pointerdown",e=>{
+  if(e.button!==0||annMode||e.target.closest(".annbox"))return;
+  panStart={x:e.clientX,y:e.clientY,id:e.pointerId};
+  clearTimeout(panTimer);
+  panTimer=setTimeout(()=>{                             // 按住 250ms 不动 → 进入平移
+    if(!panStart)return;
+    pan={x:panStart.x,y:panStart.y,sl:lp.scrollLeft,st:lp.scrollTop,moved:false};
+    try{lp.setPointerCapture(panStart.id);}catch(_){}   // D2:指针捕获直挂容器
+    lp.classList.add("panning");
+  },250);
+});
+lp.addEventListener("pointermove",e=>{
+  if(pan){
+    e.preventDefault();
+    if(!pan.moved&&Math.hypot(e.clientX-pan.x,e.clientY-pan.y)>2)pan.moved=true;
+    lp.scrollLeft=pan.sl-(e.clientX-pan.x);
+    lp.scrollTop =pan.st-(e.clientY-pan.y);
+  }else if(panStart&&Math.hypot(e.clientX-panStart.x,e.clientY-panStart.y)>6){
+    clearTimeout(panTimer);panStart=null;               // 先动后停 ≠ 长按,放行原有点击/画框
+  }
+});
+function endPan(e){
+  clearTimeout(panTimer);panStart=null;
+  if(!pan)return;
+  const moved=pan.moved;pan=null;
+  lp.classList.remove("panning");
+  try{lp.releasePointerCapture(e.pointerId);}catch(_){}
+  if(moved){suppressClick=true;setTimeout(()=>suppressClick=false,250);}  // D2:旗标定时清除
+}
+lp.addEventListener("pointerup",endPan);
+lp.addEventListener("pointercancel",endPan);
 
 /* ---- PDF 页面反色(暗色主题) ---- */
 function setInv(on){st.classList.toggle("inv",on);$("filmtrack").parentElement.classList.toggle("inv-thumbs",on);
