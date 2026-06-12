@@ -312,6 +312,11 @@ _TEMPLATE = r"""<!DOCTYPE html>
   .thumb .tno{position:absolute;right:4px;bottom:4px;font-size:10px;font-weight:600;color:#fff;
               background:rgba(0,0,0,.55);border-radius:5px;padding:1px 5px}
   .thumb .tdot{position:absolute;left:5px;top:5px;width:8px;height:8px;border-radius:50%}
+  /* 错误页筛选:⚠ 角标常显,开启时缩略图只剩错误页 */
+  .thumb .terr{position:absolute;right:4px;top:3px;font-size:10px;color:var(--bad);
+               text-shadow:0 0 3px rgba(0,0,0,.6)}
+  #errBtn.on{color:var(--bad);border-color:var(--bad);background:color-mix(in srgb,var(--bad) 12%,transparent)}
+  .erronly #filmtrack .thumb.noerr{display:none}
 
   #rightpane{flex:9;overflow:auto;padding:16px 18px;border-left:1px solid var(--line);background:var(--panel)}
   .sec{margin-bottom:18px}
@@ -371,6 +376,7 @@ _TEMPLATE = r"""<!DOCTYPE html>
       <input id="pgin" type="number" min="1" value="1" title="输入页码直跳">
       <span id="pgtotal"></span>
       <button id="next" title="下一页 (→)">›</button>
+      <button id="errBtn" title="只看有错误标记的页:未解释删除/坏字形 (E)">⚠</button>
     </div>
     <span class="sep"></span>
     <div class="grp">
@@ -405,7 +411,7 @@ _TEMPLATE = r"""<!DOCTYPE html>
     <div class="sec"><h2>剔除词</h2><div id="removed"></div></div>
   </section>
 </main>
-<footer><kbd>←</kbd><kbd>→</kbd> 翻页 · <kbd>M</kbd> 标记模式（点词框/拖框 → 气泡选语义） · <kbd>Delete</kbd> 删选中标记 · <kbd>Ctrl</kbd>+滚轮 指针锚点缩放 · 长按左键拖动平移 · 横向滚动条在左栏顶缘 · 底缘悬停出缩略图 · 生成于 __STAMP__</footer>
+<footer><kbd>←</kbd><kbd>→</kbd> 翻页 · <kbd>M</kbd> 标记模式（点词框/拖框 → 气泡选语义） · <kbd>Delete</kbd> 删选中标记 · <kbd>Ctrl</kbd>+滚轮 指针锚点缩放 · 长按左键拖动平移 · 横向滚动条在左栏顶缘 · <kbd>E</kbd> 错误页筛选 · 底缘悬停出缩略图 · 生成于 __STAMP__</footer>
 <div id="pop" hidden></div>
 <div id="toast"></div>
 <script>
@@ -539,11 +545,15 @@ setInv(localStorage.getItem("dbginv")!=="0");
 /* ---- 缩略图条(Dock 式自动隐藏) ---- */
 const film=$("film"), track=$("filmtrack");
 const KINDC={SPEC_BODY:"#0a84ff",COVER:"#5e5ce6",FIGURE:"#98989d",FRONT_MATTER:"#ac8e68"};
+/* 错误页 = 有 crosscheck 未解释删除 或 坏字形标记的页(确定性标记,与右栏区块同源) */
+const errPages=DATA.map((d,i)=>(d.unexplained.length||(d.garbles||[]).length)?i:-1).filter(i=>i>=0);
+let errOnly=false;
 DATA.forEach((d,i)=>{
   const t=document.createElement("div");
-  t.className="thumb"; t.dataset.i=i;
+  const isErr=errPages.includes(i);
+  t.className="thumb"+(isErr?"":" noerr"); t.dataset.i=i;
   t.innerHTML=`<img loading="lazy" src="data:image/png;base64,${d.img}" alt="">
-    <span class="tdot" style="background:${KINDC[d.kind]}"></span><span class="tno">${i+1}</span>`;
+    <span class="tdot" style="background:${KINDC[d.kind]}"></span>${isErr?'<span class="terr">⚠</span>':''}<span class="tno">${i+1}</span>`;
   t.onclick=()=>render(i);
   track.appendChild(t);
 });
@@ -828,6 +838,21 @@ $("themeBtn").onclick=()=>applyTheme(document.body.dataset.theme==="dark"?"light
 applyTheme(localStorage.getItem("dbgtheme")||"dark");
 updateDirty();
 
+/* ---- 错误页筛选(⚠/E):翻页与缩略图条都只在错误页间移动 ---- */
+function updatePgTotal(){
+  const pos=errPages.indexOf(cur);
+  $("pgtotal").textContent="/ "+DATA.length+(errOnly?` · ⚠${pos>=0?pos+1:"-"}/${errPages.length}`:"");
+}
+function setErrOnly(on){
+  if(on&&!errPages.length){toast("本档没有错误标记页(未解释/坏字形)");return;}
+  errOnly=on;
+  $("errBtn").classList.toggle("on",on);
+  document.body.classList.toggle("erronly",on);
+  if(on&&!errPages.includes(cur))render(errPages[0]); else render(cur);
+  toast(on?`错误页筛选开:${errPages.length} 页(未解释/坏字形)`:"错误页筛选关");
+}
+$("errBtn").onclick=()=>setErrOnly(!errOnly);
+
 /* ---- 渲染页 ---- */
 $("pgtotal").textContent="/ "+DATA.length;
 $("pgin").max=DATA.length;
@@ -844,7 +869,10 @@ function render(i){
   $("pgin").value=i+1;
   const k=$("kind"); k.textContent=KIND_LABEL[d.kind]; k.className="k-"+d.kind;
   k.title="页型判定(page_classify): "+d.kind;
-  $("prev").disabled=i===0; $("next").disabled=i===DATA.length-1;
+  const lo=errOnly&&errPages.length?errPages[0]:0,
+        hi=errOnly&&errPages.length?errPages[errPages.length-1]:DATA.length-1;
+  $("prev").disabled=i<=lo; $("next").disabled=i>=hi;
+  updatePgTotal();
   syncFilm();
 
   ov.innerHTML="";
@@ -897,13 +925,23 @@ function render(i){
   $("removed").innerHTML=html||`<div class="empty">本页无剔除</div>`;
 }
 function hot(id,on){const el=ov.querySelector(`[data-id="${id}"]`); if(el) el.classList.toggle("hot",on);}
-$("prev").onclick=()=>cur>0&&render(cur-1);
-$("next").onclick=()=>cur<DATA.length-1&&render(cur+1);
+function step(dir){
+  if(errOnly&&errPages.length){
+    const nxt=dir>0?errPages.find(p=>p>cur):[...errPages].reverse().find(p=>p<cur);
+    if(nxt!==undefined)render(nxt);
+  }else{
+    const t=cur+dir;
+    if(t>=0&&t<DATA.length)render(t);
+  }
+}
+$("prev").onclick=()=>step(-1);
+$("next").onclick=()=>step(1);
 document.addEventListener("keydown",e=>{
   if(e.target.tagName==="INPUT")return;
-  if(e.key==="ArrowRight"&&cur<DATA.length-1)render(cur+1);
-  if(e.key==="ArrowLeft"&&cur>0)render(cur-1);
+  if(e.key==="ArrowRight")step(1);
+  if(e.key==="ArrowLeft")step(-1);
   if(e.key==="m"||e.key==="M")$("annBtn").click();
+  if(e.key==="e"||e.key==="E")$("errBtn").click();
   if(e.key==="Delete"&&selKey){delAnn(selKey);closePop();}
   if(e.key==="Escape"){closePop();selKey=null;drawAnn();}
 });

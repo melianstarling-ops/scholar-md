@@ -11,7 +11,9 @@
 默认仓内 `.tessdata/`（gitignore；放官方 tessdata_best 的 eng.traineddata）。
 
 模式（2026-06-12 所有者拍板：混合策略）：
-  gapfill(默认)  只 OCR 无文本层页，有层页原样保留。
+  gapfill(默认)  只 OCR 无文本层页，有层页原样保留。无层页 OCR 后若按管线页型
+                 判定非 SPEC_BODY（图纸页等）则**弃层保原页**——"识别到的是图片
+                 就不写入正文"（所有者政策）；图纸照旧走 FIGURE 渲染。
   force          全部页栅格化重 OCR（弃源文本层）。
   --extra-pages  gapfill 基础上对指定页(0 起)定点重 OCR——给 garblecheck 标过
                  正文坏字形的页用（如 US9216286B2 的 idx89 CaSOS / idx99 ringS）；
@@ -262,11 +264,15 @@ def _worker(args: tuple) -> tuple[int, bytes, bool]:
 def build_sandwich(src: Path, out_pdf: Path, mode: str, extra_pages: set[int],
                    dpi: int, tessdata: str, jobs: int) -> dict:
     """产夹层 PDF + provenance。返回 provenance dict。"""
+    from page_classify import PageKind, classify_page
+    from profiles import get_profile
+
     t0 = time.time()
     doc = fitz.open(src)
+    textless = {i for i in range(doc.page_count) if not doc[i].get_text("words")}
     targets = [
         i for i in range(doc.page_count)
-        if mode == "force" or i in extra_pages or not doc[i].get_text("words")
+        if mode == "force" or i in extra_pages or i in textless
     ]
     results: dict[int, tuple[bytes, bool]] = {}
     if targets:
@@ -278,6 +284,20 @@ def build_sandwich(src: Path, out_pdf: Path, mode: str, extra_pages: set[int],
         else:
             for i in targets:
                 results[i] = ocr_page_sandwich(doc[i], dpi, tessdata)
+
+    # 无层页弃层规则(2026-06-12 所有者政策:识别到的是图片就不写入正文)：
+    # 无层页 OCR 后按管线同一套页型判定——非 SPEC_BODY(图纸/无法判为正文)则
+    # **不写入文本层**,保留原无层页(下游照旧按 FIGURE 渲染图,图签不进 md)。
+    # 正文无层页(US9216286 的 22 页,有行号阶梯)判 SPEC_BODY → 保留 OCR 层。
+    profile = get_profile()
+    discarded: list[int] = []
+    for i in sorted(textless & set(results)):
+        one = fitz.open("pdf", results[i][0])
+        kind = classify_page(i, one[0], profile).kind
+        one.close()
+        if kind is not PageKind.SPEC_BODY:
+            del results[i]
+            discarded.append(i)
 
     out = fitz.open()
     for i in range(doc.page_count):
@@ -301,8 +321,9 @@ def build_sandwich(src: Path, out_pdf: Path, mode: str, extra_pages: set[int],
                     + (hashlib.sha256(eng_data.read_bytes()).hexdigest()[:16]
                        if eng_data.exists() else "?"),
         "mode": mode, "dpi": dpi,
-        "ocr_pages": targets,
+        "ocr_pages": sorted(results),
         "extra_pages": sorted(extra_pages),
+        "ocr_discarded_nonbody_pages": discarded,
         "column_retry_pages": sorted(i for i, (_, r) in results.items() if r),
         "elapsed_sec": round(time.time() - t0, 1),
         "generated": time.strftime("%Y-%m-%d %H:%M:%S"),

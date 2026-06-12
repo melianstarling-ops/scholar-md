@@ -7,11 +7,17 @@ SPEC_BODY 同时实测 gutter_x（由中央"5 的倍数"行号阶梯的中位 x 
   1. page 0           → COVER
   2. 页眉含 "Page N"  → FRONT_MATTER（引用文献表/分类号续页）
   3. 有中央行号阶梯   → SPEC_BODY
-  4. 词数 < 阈值      → FIGURE
-  5. 其余             → FRONT_MATTER（兜底）
+  4. 页内有 "Sheet N of M" → FIGURE（图纸页页眉铁证。文字密的图纸页——电路图
+     标签/流程图文字 165–863 词——会超过词数阈值漏成 FRONT_MATTER,图签文本被
+     线性重排进 md(US9999764 实测 10 页;2026-06-12 所有者指出)。正文/文献页
+     页眉是 "US X,XXX,XXX B2 (Page N)" 体例,5 件全量核验零误伤。容 'Of' 大写
+     OCR 变体。词数判据保留作无文字图纸的兜底。）
+  5. 词数 < 阈值      → FIGURE
+  6. 其余             → FRONT_MATTER（兜底）
 """
 from __future__ import annotations
 
+import re
 import statistics
 from dataclasses import dataclass, field
 from enum import Enum
@@ -20,6 +26,9 @@ import fitz
 
 from profiles import LayoutProfile
 from reading_order import Word
+
+
+_SHEET_RE = re.compile(r"Sheet\s+\d+\s+[Oo]f\s+\d+")   # 图纸页页眉(容 OCR 'Of')
 
 
 class PageKind(str, Enum):
@@ -84,6 +93,8 @@ def classify_page(index: int, page: "fitz.Page", profile: LayoutProfile) -> Page
         info.kind = PageKind.SPEC_BODY
         info.gutter_x = gutter
         info.ladder = ladder
+    elif _SHEET_RE.search(" ".join(w.text for w in words)):
+        info.kind = PageKind.FIGURE   # 图纸页铁证,文字密图纸不再漏成 FRONT_MATTER
     elif len(words) < profile.figure_word_max:
         info.kind = PageKind.FIGURE
     else:
