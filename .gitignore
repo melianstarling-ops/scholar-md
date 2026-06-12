@@ -16,6 +16,10 @@ __pycache__/
 *.pyc
 *.pyo
 
+# --- OCR 语言数据(纯数据文件,~15MB;来源 github.com/tesseract-ocr/tessdata_best,
+#     provenance JSON 记录其 sha256;ocr_layer.py 默认读此处) ---
+.tessdata/
+
 # --- IDE / 本地设置 ---
 .claude/
 .vscode/
