@@ -8,7 +8,12 @@
     python scripts/patents/batch_patents.py
     python scripts/patents/batch_patents.py --list
     python scripts/patents/batch_patents.py --resume
+    python scripts/patents/batch_patents.py --ocr     # 一键:前置 OCR 夹层产线(ocr_layer)
     python scripts/patents/batch_patents.py --review --review-model anthropic:claude-haiku-4-5
+
+--ocr(2026-06-12):对每件按需前置 OCR——无文本层页补层 + 正文坏字形页自动定点重
+OCR(混合策略,文献页不动)。需要时产派生夹层 03_Output/patents/<stem>/_ocr/<stem>.pdf
+(带 provenance,源 PDF 只读不动)并以其为转换输入;无需 OCR 的件直接喂原件,零额外开销。
 """
 from __future__ import annotations
 
@@ -38,6 +43,8 @@ def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--list", action="store_true", help="只列出待处理 PDF")
     ap.add_argument("--resume", action="store_true", help="跳过已存在输出")
+    ap.add_argument("--ocr", action="store_true",
+                    help="前置 OCR 夹层产线(无层页补层+正文坏字形页自动定点重 OCR)")
     ap.add_argument("--review", action="store_true", help="转换后跑 Tier1 云端 AI 审查")
     ap.add_argument("--review-model", default="anthropic:claude-haiku-4-5")
     ap.add_argument("--review-max-pages", type=int, default=3)
@@ -59,7 +66,14 @@ def main() -> int:
             print(f"  [SKIP] {p.stem}")
             continue
         try:
-            r = convert(p, out_dir, profile)
+            src_pdf = p
+            if args.ocr:
+                import ocr_layer
+                sandwich = ocr_layer.prepare_sandwich(p)
+                if sandwich:
+                    print(f"  [OCR] {p.stem} → {sandwich.relative_to(OUTPUT_ROOT)}")
+                    src_pdf = sandwich
+            r = convert(src_pdf, out_dir, profile)
         except Exception as e:  # noqa: BLE001
             failed += 1
             print(f"  [ERROR] {p.stem}: {e}")

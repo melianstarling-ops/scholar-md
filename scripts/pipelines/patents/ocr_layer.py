@@ -32,9 +32,14 @@
 
 用法（H.5 自适应 I/O）：
     python ocr_layer.py --src <pdf|目录> [...] [--mode gapfill|force]
-                        [--extra-pages 89,99] [--dpi 300] [--jobs N] [--out 目录]
-  --out 省略时落 `03_Output/patents/<stem>/<stem>_ocr.pdf`（不写源目录，
-  保 02_Source 纯净；同时写 `<stem>_ocr.provenance.json` 留痕）。
+                        [--extra-pages auto|89,99] [--dpi 300] [--jobs N] [--out 目录]
+  --extra-pages auto = 按混合策略自动选定点页（SPEC_BODY 且 garblecheck 有坏字形）。
+  --out 省略时落 `03_Output/patents/<stem>/_ocr/<stem>.pdf`（不写源目录，保 02_Source
+  纯净；派生件与源同 stem → crosscheck/debug_view 的 stem 配对零改），同目录写
+  `<stem>.provenance.json` 留痕。
+
+一键集成：`batch_patents.py --ocr` 经 `prepare_sandwich()` 调本模块——需要才产
+夹层（有无层页或自动定点页），否则直接喂原件。
 
 doctest:  python -m doctest ocr_layer.py
 """
@@ -56,6 +61,8 @@ from wordfix import is_word
 PROJECT_ROOT = Path(__file__).resolve().parents[3]
 DEFAULT_TESSDATA = PROJECT_ROOT / ".tessdata"
 OUTPUT_ROOT = PROJECT_ROOT / "03_Output" / "patents"
+# 并行默认上限 8:实测 30 进程比 8 慢 52%(争用),且留核防前台卡顿(L12 教训 6)
+DEFAULT_JOBS = max(1, min(8, (os.cpu_count() or 2) - 2))
 
 LANG = "eng"
 DIPLOPIA_H_RATIO = 1.6   # 词框高/基线 ≥ 此值 → 候选重影(正常词框约 1 行高)
@@ -306,6 +313,45 @@ def build_sandwich(src: Path, out_pdf: Path, mode: str, extra_pages: set[int],
     return prov
 
 
+# ------------------------------------------------------------------ 一键集成
+
+def auto_extra_pages(doc: "fitz.Document", profile) -> set[int]:
+    """混合策略(2026-06-12 所有者拍板)的自动定点页：
+    SPEC_BODY 且 garblecheck 有坏字形 → 重 OCR 根治；
+    文献页(FRONT_MATTER)等不入选 → 坏字形维持标记交付。"""
+    from garblecheck import classify_garble
+    from page_classify import PageKind, classify_page
+    extra = set()
+    for i in range(doc.page_count):
+        words = doc[i].get_text("words")
+        if not words:
+            continue                      # 无层页归 gapfill,不算定点
+        if (any(classify_garble(w[4]) for w in words)
+                and classify_page(i, doc[i], profile).kind == PageKind.SPEC_BODY):
+            extra.add(i)
+    return extra
+
+
+def prepare_sandwich(src: Path, out_dir: Path | None = None, dpi: int = 300,
+                     tessdata: str | None = None, jobs: int | None = None) -> Path | None:
+    """一键入口(batch_patents --ocr 调用)：需要才产夹层。
+
+    返回夹层 PDF 路径；无无层页且无自动定点页时返回 None(直接喂原件即可)。
+    """
+    from profiles import get_profile
+    tessdata = tessdata or os.environ.get("SCHOLARMD_TESSDATA", str(DEFAULT_TESSDATA))
+    doc = fitz.open(src)
+    textless = any(not doc[i].get_text("words") for i in range(doc.page_count))
+    extra = auto_extra_pages(doc, get_profile())
+    doc.close()
+    if not textless and not extra:
+        return None
+    out_dir = out_dir or OUTPUT_ROOT / src.stem / "_ocr"
+    prov = build_sandwich(src, out_dir / f"{src.stem}.pdf", "gapfill", extra,
+                          dpi, tessdata, jobs or DEFAULT_JOBS)
+    return Path(prov["output"])
+
+
 # ----------------------------------------------------------------------- CLI
 
 def collect_pdfs(srcs: list[str]) -> list[Path]:
@@ -329,13 +375,11 @@ def main() -> int:
                     help="输出目录(默认 03_Output/patents/<stem>/,不写源目录)")
     ap.add_argument("--mode", choices=("gapfill", "force"), default="gapfill")
     ap.add_argument("--extra-pages", default="",
-                    help="gapfill 基础上定点重 OCR 的页号(0 起,逗号分隔),如 89,99")
+                    help="gapfill 基础上定点重 OCR 的页号(0 起,逗号分隔,如 89,99);"
+                         "或 'auto'=自动选(SPEC_BODY 且有坏字形)")
     ap.add_argument("--dpi", type=int, default=300)
-    # 默认上限 8:实测 30 进程对 24 页仅 ~1.7×(内存带宽争用+子进程启动开销吞掉收益),
-    # 8 进程性能几乎不损失且给系统留足余量;工人另设 BELOW_NORMAL 优先级防前台卡顿。
-    ap.add_argument("--jobs", type=int,
-                    default=max(1, min(8, (os.cpu_count() or 2) - 2)),
-                    help="并行进程数(默认 min(8, CPU-2);1=串行)")
+    ap.add_argument("--jobs", type=int, default=DEFAULT_JOBS,
+                    help="并行进程数(默认 min(8, CPU-2),工人低优先级;1=串行)")
     ap.add_argument("--tessdata", default=os.environ.get("SCHOLARMD_TESSDATA",
                                                          str(DEFAULT_TESSDATA)))
     args = ap.parse_args()
@@ -345,17 +389,24 @@ def main() -> int:
               "github.com/tesseract-ocr/tessdata_best 下载后放入该目录,"
               "或设 SCHOLARMD_TESSDATA。")
         return 1
-    extra = {int(x) for x in args.extra_pages.split(",") if x.strip()}
+    auto = args.extra_pages.strip().lower() == "auto"
+    extra = (set() if auto
+             else {int(x) for x in args.extra_pages.split(",") if x.strip()})
 
     pdfs = collect_pdfs(args.src)
     print(f"OCR 夹层产线: {len(pdfs)} 份 · mode={args.mode}"
-          + (f" extra={sorted(extra)}" if extra else "")
+          + (" extra=auto" if auto else (f" extra={sorted(extra)}" if extra else ""))
           + f" dpi={args.dpi} jobs={args.jobs}")
     failed = 0
     for p in pdfs:
-        out_dir = Path(args.out) if args.out else OUTPUT_ROOT / p.stem
+        out_dir = Path(args.out) if args.out else OUTPUT_ROOT / p.stem / "_ocr"
+        if auto:
+            from profiles import get_profile
+            d = fitz.open(p)
+            extra = auto_extra_pages(d, get_profile())
+            d.close()
         try:
-            prov = build_sandwich(p, out_dir / f"{p.stem}_ocr.pdf", args.mode,
+            prov = build_sandwich(p, out_dir / f"{p.stem}.pdf", args.mode,
                                   extra, args.dpi, args.tessdata, args.jobs)
         except Exception as e:  # noqa: BLE001
             failed += 1
