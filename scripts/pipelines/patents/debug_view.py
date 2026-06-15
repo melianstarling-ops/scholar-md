@@ -96,14 +96,17 @@ def _union(words: list[Word]) -> list[float]:
 
 
 def page_payload(doc: "fitz.Document", info, profile: LayoutProfile,
-                 unexplained: list[dict], garbles: list[dict], zoom: float) -> dict:
-    pix = doc[info.index].get_pixmap(matrix=fitz.Matrix(zoom, zoom))
+                 unexplained: list[dict], garbles: list[dict], zoom: float,
+                 img: str | None = None) -> dict:
+    if img is None:   # serve 热刷新时由 _cached_imgs 复用,静态模式现渲染
+        pix = doc[info.index].get_pixmap(matrix=fitz.Matrix(zoom, zoom))
+        img = base64.b64encode(pix.tobytes("png")).decode()
     payload: dict = {
         "page": info.index + 1,
         "kind": info.kind.value,
         "w": info.width,
         "h": info.height,
-        "img": base64.b64encode(pix.tobytes("png")).decode(),
+        "img": img,
         "gutter": round(info.gutter_x, 1),
         "ladder_n": len(info.ladder),
         "n_words": len(info.words),
@@ -377,6 +380,7 @@ _TEMPLATE = r"""<!DOCTYPE html>
       <span id="pgtotal"></span>
       <button id="next" title="下一页 (→)">›</button>
       <button id="errBtn" title="只看有错误标记的页:未解释删除/坏字形 (E)">⚠</button>
+      <button id="reloadBtn" title="重新载入最新转换结果(服务模式下重读最新 md/crosscheck) (R / F5)">↻</button>
     </div>
     <span class="sep"></span>
     <div class="grp">
@@ -864,6 +868,7 @@ $("pgin").addEventListener("keydown",e=>{if(e.key==="Enter")$("pgin").blur();});
 
 function render(i){
   cur=i; const d=DATA[i];
+  localStorage.setItem("dbgpage:"+TITLE,i);   // 记当前页,刷新后恢复(热刷新不弹回首页)
   closePop(); selKey=null;
   $("img").src="data:image/png;base64,"+d.img;
   $("pgin").value=i+1;
@@ -936,16 +941,19 @@ function step(dir){
 }
 $("prev").onclick=()=>step(-1);
 $("next").onclick=()=>step(1);
+$("reloadBtn").onclick=()=>location.reload();
 document.addEventListener("keydown",e=>{
   if(e.target.tagName==="INPUT")return;
   if(e.key==="ArrowRight")step(1);
   if(e.key==="ArrowLeft")step(-1);
   if(e.key==="m"||e.key==="M")$("annBtn").click();
   if(e.key==="e"||e.key==="E")$("errBtn").click();
+  if(e.key==="r"||e.key==="R")location.reload();
   if(e.key==="Delete"&&selKey){delAnn(selKey);closePop();}
   if(e.key==="Escape"){closePop();selKey=null;drawAnn();}
 });
-render(0);
+const _saved=+(localStorage.getItem("dbgpage:"+TITLE)||0);
+render(_saved>=0&&_saved<DATA.length?_saved:0);   // 刷新后停在原页(热刷新工作流)
 </script>
 </body>
 </html>
@@ -1008,26 +1016,73 @@ def _load_crosscheck(md_root: Path, stem: str, n_pages: int) -> tuple[list[list[
     return unexpl, garble
 
 
+# serve 热刷新:页面图(PDF 渲染)按 PDF mtime 缓存。改转换代码重转 md 后浏览器刷新,
+# 只要源/夹层 PDF 未变就复用图,刷新只重算 overlay/md。仅 serve 模式用(静态生成不缓存,免内存涨)。
+_IMG_CACHE: dict[tuple, list[str]] = {}
+
+
+def _cached_imgs(pdf: Path, doc: "fitz.Document", zoom: float) -> list[str]:
+    key = (str(pdf), pdf.stat().st_mtime, zoom)
+    if key not in _IMG_CACHE:
+        for k in [k for k in _IMG_CACHE if k[0] == str(pdf)]:   # PDF 重转 → 旧版本图作废
+            del _IMG_CACHE[k]
+        _IMG_CACHE[key] = [
+            base64.b64encode(doc[i].get_pixmap(matrix=fitz.Matrix(zoom, zoom)).tobytes("png")).decode()
+            for i in range(doc.page_count)
+        ]
+    return _IMG_CACHE[key]
+
+
+# serve 热刷新需 reload 的转换模块,顺序=被依赖者在前(拓扑):wordfix/profiles 无内部依赖,
+# reading_order 依赖 wordfix,page_classify 依赖 profiles+reading_order。新增管线模块时补这里。
+_PIPELINE_MODULES = ("wordfix", "profiles", "reading_order", "claims",
+                     "figures", "bib_parse", "page_classify")
+
+
+def _reload_pipeline() -> None:
+    """reload 转换模块并重绑定本模块 from-import 的符号 —— 改转换代码后浏览器刷新即见最新
+    (改代码有语法错时,reload 在此抛异常,do_GET 捕获并显示在错误页,正是开发期想要的)。"""
+    import importlib
+    for name in _PIPELINE_MODULES:
+        mod = sys.modules.get(name)
+        if mod is not None:
+            importlib.reload(mod)
+    import page_classify as _pc
+    import profiles as _pf
+    import reading_order as _ro
+    g = globals()
+    g.update(classify_document=_pc.classify_document, PageKind=_pc.PageKind,
+             get_profile=_pf.get_profile, LayoutProfile=_pf.LayoutProfile)
+    for fn in ("Word", "Y_TOL_RATIO", "_column_paragraph_infos", "group_lines", "join_line",
+               "median_char_width", "median_height", "split_columns", "strip_bands",
+               "strip_line_numbers"):
+        g[fn] = getattr(_ro, fn)
+
+
 def render_doc(pdf: Path, md_root: Path, profile: LayoutProfile, zoom: float, serve: bool) -> tuple[str, int]:
-    """单篇 → (html, 页数)。静态/服务两模式共用，仅 SAVE_URL 注入不同。"""
+    """单篇 → (html, 页数)。静态/服务两模式共用，仅 SAVE_URL 注入不同。
+    serve 模式每次请求实时重读最新 md/crosscheck 渲染(热刷新),页面图按 PDF mtime 缓存复用。"""
     doc = fitz.open(str(pdf))
     infos = classify_document(doc, profile)
     unexpl, garble = _load_crosscheck(md_root, pdf.stem, doc.page_count)
-    pages = [page_payload(doc, info, profile, unexpl[info.index], garble[info.index], zoom) for info in infos]
+    imgs = _cached_imgs(pdf, doc, zoom) if serve else None
+    pages = [page_payload(doc, info, profile, unexpl[info.index], garble[info.index], zoom,
+                          imgs[info.index] if imgs else None) for info in infos]
     doc.close()
     return build_html(pdf.stem, pages, _load_resolved(md_root, pdf.stem), serve), len(pages)
 
 
-def serve_docs(docs: dict[str, str], md_root: Path, port: int) -> int:
-    """本地服务模式：GET 返回页面，POST /save/<stem> 直接回写
+def serve_docs(pdfs: list[Path], md_root: Path, zoom: float, port: int) -> int:
+    """本地服务模式（热刷新）：每次 GET **实时重读最新 md/crosscheck 渲染** —— 改转换代码、
+    终端重转后,浏览器刷新即见最新结果。POST /save/<stem> 直接回写
     03_Output/<stem>/<stem>_annotations.json（无需 --collect）。仅绑 127.0.0.1。"""
     import urllib.parse
     from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-    stems = set(docs)
+    by_stem = {p.stem: p for p in pdfs}
 
     def index_html() -> str:
-        links = "".join(f'<li><a href="/{s}">{s}</a></li>' for s in sorted(docs))
+        links = "".join(f'<li><a href="/{s}">{s}</a></li>' for s in sorted(by_stem))
         return f"<!doctype html><meta charset=utf-8><title>debug_view</title><h2>调试视图</h2><ul>{links}</ul>"
 
     class Handler(BaseHTTPRequestHandler):
@@ -1038,18 +1093,29 @@ def serve_docs(docs: dict[str, str], md_root: Path, port: int) -> int:
             body = html.encode("utf-8")
             self.send_response(code)
             self.send_header("Content-Type", "text/html; charset=utf-8")
+            self.send_header("Cache-Control", "no-store")   # 刷新必拿最新,不走浏览器缓存
             self.send_header("Content-Length", str(len(body)))
             self.end_headers()
             self.wfile.write(body)
 
         def do_GET(self):
             key = urllib.parse.unquote(self.path.split("?")[0]).strip("/")
-            if key == "":
-                self._html(next(iter(docs.values())) if len(docs) == 1 else index_html())
-            elif key in docs:
-                self._html(docs[key])
-            else:
+            if key == "" and len(by_stem) > 1:
+                self._html(index_html())
+                return
+            pdf = by_stem.get(key) or (next(iter(by_stem.values())) if key == "" else None)
+            if pdf is None:
                 self.send_error(404)
+                return
+            try:
+                _reload_pipeline()   # 改转换代码 → 刷新即用最新逻辑(语法错在此抛,显错误页)
+                html, _ = render_doc(pdf, md_root, get_profile(), zoom, serve=True)  # 实时重读最新产物
+            except Exception:   # noqa: BLE001  单次渲染/reload 失败回错误页,不崩服务
+                import traceback
+                self._html("<!doctype html><meta charset=utf-8>"
+                           f"<pre style='padding:16px;color:#c33'>渲染失败:\n\n{traceback.format_exc()}</pre>", 500)
+                return
+            self._html(html)
 
         def do_POST(self):
             path = urllib.parse.unquote(self.path)
@@ -1057,7 +1123,7 @@ def serve_docs(docs: dict[str, str], md_root: Path, port: int) -> int:
                 self.send_error(404)
                 return
             stem = path[len("/save/"):]
-            if stem not in stems:   # 只接受已知文档,只写固定文件名
+            if stem not in by_stem:   # 只接受已知文档,只写固定文件名
                 self.send_error(403, "unknown doc")
                 return
             body = self.rfile.read(int(self.headers.get("Content-Length", 0)))
@@ -1078,12 +1144,12 @@ def serve_docs(docs: dict[str, str], md_root: Path, port: int) -> int:
     srv = ThreadingHTTPServer(("127.0.0.1", port), Handler)
     base = f"http://127.0.0.1:{port}"
     print(f"\n服务已启动 → 在 VS Code Simple Browser 或浏览器打开：")
-    if len(docs) == 1:
+    if len(by_stem) == 1:
         print(f"  {base}/")
     else:
-        for s in sorted(docs):
+        for s in sorted(by_stem):
             print(f"  {base}/{s}")
-    print("  导出标记将直接回写 03_Output/<专利>/（无需 --collect）。Ctrl+C 停止。\n")
+    print("  改代码→终端重转→浏览器刷新即见最新；导出标记直接回写 03_Output/。Ctrl+C 停止。\n")
     try:
         srv.serve_forever()
     except KeyboardInterrupt:
@@ -1118,19 +1184,11 @@ def main() -> int:
         return 0 if collect_annotations(pdfs, md_root) >= 0 else 1
     profile = get_profile()
 
-    if args.serve:   # 内存生成 + 本地服务，不落静态文件
-        print(f"[{datetime.now():%H:%M:%S}] 服务模式生成 {len(pdfs)} 份（zoom={args.zoom}）\n")
-        docs: dict[str, str] = {}
-        for pdf in pdfs:
-            try:
-                html, n = render_doc(pdf, md_root, profile, args.zoom, serve=True)
-                docs[pdf.stem] = html
-                print(f"  [READY] {pdf.stem} — {n} 页")
-            except Exception as e:  # noqa: BLE001
-                print(f"  [ERROR] {pdf.stem}: {e}")
-        if not docs:
-            return 1
-        return serve_docs(docs, md_root, args.port)
+    if args.serve:   # 本地服务(热刷新):每次刷新实时重读最新产物渲染
+        print(f"[{datetime.now():%H:%M:%S}] 服务模式(热刷新) {len(pdfs)} 份（zoom={args.zoom}）")
+        print("  工作流:改转换代码 → 浏览器刷新(↻/R/F5)即见最新(转换逻辑自动 reload);")
+        print("  crosscheck/标记类需先在终端重跑 crosscheck_words.py 再刷新。")
+        return serve_docs(pdfs, md_root, args.zoom, args.port)
 
     print(f"[{datetime.now():%H:%M:%S}] 生成调试视图 {len(pdfs)} 份（zoom={args.zoom}）\n")
     failed = 0
