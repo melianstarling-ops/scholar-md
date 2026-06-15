@@ -120,14 +120,31 @@ def _parity_diff(baseline: list[Word], engine: list[Word]) -> dict | None:
     }
 
 
-def _explain_claims_marker(unexplained_tokens: Counter, profile: LayoutProfile) -> bool:
-    """残余未解释 token 是否可被某个 claims 起始标记完全解释。
-    引擎在 claims 切分时会剔除标记词本身（如 "What is claimed is:"），
-    属已知有意变换 —— 残余 ⊆ 某标记的 token 多重集即归因成立。"""
-    for marker in profile.claims_markers:
-        if not (unexplained_tokens - Counter(_subtokens(marker))):
-            return True
-    return False
+def _claims_marker_budget(unexplained_tokens: Counter, markers: tuple) -> Counter:
+    """选与未解释 token 池交集最大的 claims 起始标记，返回其 token 预算（Counter）。
+
+    引擎在 claims 切分时剔除标记词本身（如 "What is claimed is:"），属已知有意变换。
+    返回的预算供**减法归因**：从未解释词里逐个扣除被预算覆盖的（只扣一次标记句的量），
+    剩下的才算真未解释 —— 取代旧"全有或全无"（残余 ⊆ 某标记才归因，一个无关碎片
+    me/ne/s 混入就整体失败，把 What/claimed/is 误报，5 件里 3 件刷假告警；经验 L14）。
+    Tier0（字符级，missing=0）独立兜底真丢失，不依赖本归因，故减法即便偶尔多归因一个
+    同名标记 token 也不破坏零丢失保证。
+
+    >>> from collections import Counter
+    >>> b = _claims_marker_budget(Counter(['what', 'is', 'claimed', 'me']),
+    ...                           ('What is claimed is', 'What is claimed'))
+    >>> sorted(b.items())            # 选交集最大的 "What is claimed is"(is×2)
+    [('claimed', 1), ('is', 2), ('what', 1)]
+    >>> _claims_marker_budget(Counter(['xyz']), ('What is claimed is',))  # 无交集
+    Counter()
+    """
+    best, best_overlap = Counter(), 0
+    for marker in markers:
+        mc = Counter(_subtokens(marker))
+        overlap = sum((unexplained_tokens & mc).values())
+        if overlap > best_overlap:
+            best, best_overlap = mc, overlap
+    return best
 
 
 def crosscheck(pdf_path: Path, md_path: Path, profile: LayoutProfile | None = None) -> dict:
@@ -217,16 +234,30 @@ def crosscheck(pdf_path: Path, md_path: Path, profile: LayoutProfile | None = No
 
     doc.close()
 
-    # 文档级后处理：残余未解释词若恰为被剔除的 claims 起始标记 → 已知变换，归因
+    # 文档级后处理：claims 起始标记(如 "What is claimed is:")被引擎按设计剔除，属已知
+    # 变换。**减法归因**(L14)：从未解释词逐个扣除被"标记预算"覆盖的(只扣一次标记句的量)，
+    # 剩下的才报真未解释。旧"全有或全无"被一个无关碎片(me/ne)整体拖垮 → What/claimed/is 假报。
     all_unexplained = Counter(
         t for r in page_reports for u in r.get("unexplained", ()) for t in _subtokens(u["text"])
     )
-    if all_unexplained and "## Claims" in md_text and _explain_claims_marker(all_unexplained, profile):
-        for r in page_reports:
-            if r.get("unexplained"):
-                totals["claims_marker"] += len(r["unexplained"])
-                r["claims_marker"] = [u["text"] for u in r.pop("unexplained")]
-                r["unexplained"] = []
+    budget = (_claims_marker_budget(all_unexplained, profile.claims_markers)
+              if "## Claims" in md_text else Counter())
+    for r in page_reports:
+        if not r.get("unexplained"):
+            continue
+        kept, attributed = [], []
+        for u in r["unexplained"]:
+            toks = _subtokens(u["text"])
+            if toks and all(budget[t] > 0 for t in toks):   # 全部 token 在预算内 → 标记残片
+                for t in toks:
+                    budget[t] -= 1
+                attributed.append(u["text"])
+            else:
+                kept.append(u)
+        if attributed:
+            r["claims_marker"] = attributed
+            totals["claims_marker"] += len(attributed)
+        r["unexplained"] = kept
     for r in page_reports:
         if r.get("audited"):
             totals["unexplained"] += len(r["unexplained"])
