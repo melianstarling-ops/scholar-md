@@ -289,13 +289,16 @@ def build_sandwich(src: Path, out_pdf: Path, mode: str, extra_pages: set[int],
     # 无层页 OCR 后按管线同一套页型判定——非 SPEC_BODY(图纸/无法判为正文)则
     # **不写入文本层**,保留原无层页(下游照旧按 FIGURE 渲染图,图签不进 md)。
     # 正文无层页(US9216286 的 22 页,有行号阶梯)判 SPEC_BODY → 保留 OCR 层。
+    # 例外:COVER(封面,恒第一页)同样保留 OCR 层——封面是书目文字而非图纸,
+    # 须喂 bib_parse 出 YAML 元数据(2026-06-15 所有者:扫描件封面要喂进去)。
+    # 封面文字只被 convert 的 parse_cover 读取,不进 bodies/fronts/figs → 不泄漏正文。
     profile = get_profile()
     discarded: list[int] = []
     for i in sorted(textless & set(results)):
         one = fitz.open("pdf", results[i][0])
         kind = classify_page(i, one[0], profile).kind
         one.close()
-        if kind is not PageKind.SPEC_BODY:
+        if kind not in (PageKind.SPEC_BODY, PageKind.COVER):
             del results[i]
             discarded.append(i)
 
