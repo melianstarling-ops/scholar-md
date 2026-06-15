@@ -54,6 +54,7 @@ from pathlib import Path
 
 import fitz
 
+from bib_parse import _inid_map, parse_cover
 from page_classify import PageKind, classify_document
 from profiles import LayoutProfile, get_profile
 from reading_order import (
@@ -64,6 +65,7 @@ from reading_order import (
     join_line,
     median_char_width,
     median_height,
+    reconstruct,
     split_columns,
     strip_bands,
     strip_line_numbers,
@@ -97,7 +99,7 @@ def _union(words: list[Word]) -> list[float]:
 
 def page_payload(doc: "fitz.Document", info, profile: LayoutProfile,
                  unexplained: list[dict], garbles: list[dict], zoom: float,
-                 img: str | None = None) -> dict:
+                 img: str | None = None, stem: str = "") -> dict:
     if img is None:   # serve 热刷新时由 _cached_imgs 复用,静态模式现渲染
         pix = doc[info.index].get_pixmap(matrix=fitz.Matrix(zoom, zoom))
         img = base64.b64encode(pix.tobytes("png")).decode()
@@ -118,6 +120,34 @@ def page_payload(doc: "fitz.Document", info, profile: LayoutProfile,
         "note": _KIND_NOTE[info.kind.value],
     }
     boxes: list[dict] = payload["boxes"]
+
+    if info.kind == PageKind.COVER:
+        # 封面走 bib_parse(INID 切片)而非几何重排:画全部 OCR 词框(cword 层,默认可见),
+        # 右栏出 bib_parse 抽取诊断——6 个 YAML 字段抽到没抽到、切到哪些 INID 码、缺哪些关键码。
+        boxes += [_box(w, "cword") for w in info.words]
+        meta, abstract = parse_cover(info, profile, stem)
+        text, _, _, _ = reconstruct(info.words, info.height, info.width / 2, profile)
+        inid = _inid_map(text)
+        ab = abstract.strip()
+        fields = [
+            {"label": "标题 (54)", "val": meta.get("title", ""), "ok": bool(meta.get("title"))},
+            {"label": "发明人 (72)", "val": "; ".join(meta.get("inventors") or []),
+             "ok": bool(meta.get("inventors"))},
+            {"label": "受让人 (73)", "val": meta.get("assignee", ""), "ok": bool(meta.get("assignee"))},
+            {"label": "公告日 (45)", "val": meta.get("date_granted", ""),
+             "ok": bool(meta.get("date_granted"))},
+            {"label": "分类号 (51/52)", "val": ", ".join(meta.get("classifications") or []),
+             "ok": bool(meta.get("classifications"))},
+            {"label": "摘要 (57)", "val": (ab[:160] + "…") if len(ab) > 160 else ab, "ok": bool(ab)},
+        ]
+        key_codes = ["54", "72", "73", "45", "57"]
+        payload["cover"] = {
+            "patent_number": meta.get("patent_number", ""),   # 取自文件名,不靠 OCR
+            "fields": fields,
+            "inid_found": sorted(inid.keys(), key=int),
+            "missing_key": [c for c in key_codes if c not in inid],
+        }
+        payload["n_kept"] = len(info.words)
 
     if info.kind in (PageKind.SPEC_BODY, PageKind.FRONT_MATTER):
         body, rm_bands = strip_bands(info.words, info.height, profile)
@@ -261,6 +291,8 @@ _TEMPLATE = r"""<!DOCTYPE html>
   .box:hover{opacity:1}
   .box.kept{border:1px solid color-mix(in srgb,var(--kept) 50%,transparent);background:color-mix(in srgb,var(--kept) 9%,transparent);
             z-index:2;cursor:pointer}
+  .box.cword{border:1px solid color-mix(in srgb,var(--kept) 55%,transparent);background:color-mix(in srgb,var(--kept) 10%,transparent);
+            z-index:2;cursor:default}
   .box.line_number{border:1.5px solid var(--ln);background:color-mix(in srgb,var(--ln) 24%,transparent);z-index:3;cursor:pointer}
   .box.header_footer{border:1.5px solid var(--hf);background:color-mix(in srgb,var(--hf) 20%,transparent);z-index:3;cursor:pointer}
   .box.unexplained{border:2.5px solid var(--bad);background:color-mix(in srgb,var(--bad) 20%,transparent);z-index:5;cursor:pointer}
@@ -281,8 +313,17 @@ _TEMPLATE = r"""<!DOCTYPE html>
   .drawrect{position:absolute;z-index:7;border:1.5px dashed var(--accent);background:color-mix(in srgb,var(--accent) 12%,transparent);
             pointer-events:none;border-radius:3px}
   #gutter{position:absolute;top:0;bottom:0;width:0;border-left:2px dashed rgba(255,69,58,.55);z-index:4}
-  .hide-kept .box.kept,.hide-line_number .box.line_number,.hide-header_footer .box.header_footer,
+  .hide-kept .box.kept,.hide-cword .box.cword,.hide-line_number .box.line_number,.hide-header_footer .box.header_footer,
   .hide-para .box.para,.hide-unexplained .box.unexplained,.hide-garble .box.garble,.hide-gutter #gutter,.hide-ann .annbox{display:none}
+  /* ---- 封面解析(bib_parse)诊断面板 ---- */
+  .cfield{display:flex;gap:7px;align-items:baseline;padding:5px 0;border-bottom:1px solid var(--line);font-size:11px}
+  .cfield:last-child{border-bottom:0}
+  .cfield .ck{flex:none;font-weight:700;width:13px;text-align:center}
+  .cfield .ck.ok{color:var(--para)}.cfield .ck.no{color:var(--bad)}
+  .cfield .cl{flex:none;min-width:78px;color:var(--sub)}
+  .cfield .cv{color:var(--ink);word-break:break-word}
+  .cfield.miss .cv{color:var(--sub)}
+  .chip.misscode{border-color:var(--bad);color:var(--bad)}
   .annmode .box,.annmode #overlay{cursor:crosshair}
 
   /* ---- 语义气泡 ---- */
@@ -407,12 +448,13 @@ _TEMPLATE = r"""<!DOCTYPE html>
   </section>
   <section id="rightpane">
     <div class="sec"><h2>页统计</h2><div id="stats"></div></div>
+    <div class="sec" id="coverSec" hidden><h2 style="color:var(--kept)">封面解析 (bib_parse)</h2><div id="coverBody"></div></div>
     <div class="sec" id="noteSec" hidden><h2>说明</h2><div class="note" id="note"></div></div>
     <div class="sec" id="annSec" hidden><h2 style="color:var(--accent)">本页标记<button id="clrRes" class="mini" hidden>清除已处理</button></h2><div id="annList"></div></div>
     <div class="sec" id="badSec" hidden><h2 style="color:var(--bad)">crosscheck 未解释删除</h2><div class="chips" id="bad"></div></div>
     <div class="sec" id="garbleSec" hidden><h2 style="color:#d2a106">坏字形(疑似源缺陷·只标不改)</h2><div class="chips" id="garble"></div></div>
-    <div class="sec"><h2>重排段落（中间产物）</h2><div id="paras"></div></div>
-    <div class="sec"><h2>剔除词</h2><div id="removed"></div></div>
+    <div class="sec" id="parasSec"><h2>重排段落（中间产物）</h2><div id="paras"></div></div>
+    <div class="sec" id="removedSec"><h2>剔除词</h2><div id="removed"></div></div>
   </section>
 </main>
 <footer><kbd>←</kbd><kbd>→</kbd> 翻页 · <kbd>M</kbd> 标记模式（点词框/拖框 → 气泡选语义） · <kbd>Delete</kbd> 删选中标记 · <kbd>Ctrl</kbd>+滚轮 指针锚点缩放 · 长按左键拖动平移 · 横向滚动条在左栏顶缘 · <kbd>E</kbd> 错误页筛选 · 底缘悬停出缩略图 · 生成于 __STAMP__</footer>
@@ -427,6 +469,7 @@ const LAYERS = [
   ["line_number","行号(剔)","var(--ln)",true],
   ["header_footer","页眉/页脚(剔)","var(--hf)",true],
   ["kept","保留词","var(--kept)",false],
+  ["cword","封面词(OCR)","var(--kept)",true],
   ["para","段落","var(--para)",true],
   ["unexplained","未解释","var(--bad)",true],
   ["garble","坏字形","#d2a106",true],
@@ -898,12 +941,14 @@ function render(i){
   }
   drawAnn();
 
-  const kept=("n_kept" in d)?` · 保留 <b>${d.n_kept}</b>`:"";
+  const isCover=d.kind==="COVER";
+  const okN=isCover&&d.cover?d.cover.fields.filter(f=>f.ok).length:0;
+  const kept=("n_kept" in d&&!isCover)?` · 保留 <b>${d.n_kept}</b>`:"";
   const rm=d.removed, nrm=(rm.line_number.length+rm.header_footer.length);
   $("stats").innerHTML=
-    `<span>词 <b>${d.n_words}</b>${kept} · 剔除 <b>${nrm}</b></span>`+
+    `<span>词 <b>${d.n_words}</b>${kept}${isCover?"":` · 剔除 <b>${nrm}</b>`}</span>`+
     (d.kind==="SPEC_BODY"?`<span>gutter <b>${d.gutter}</b> · 行号阶梯 <b>${d.ladder_n}</b></span>`:"")+
-    `<span>段落 <b>${d.paras.length}</b></span>`;
+    (isCover?`<span>字段抽取 <b>${okN}/6</b></span>`:`<span>段落 <b>${d.paras.length}</b></span>`);
 
   $("noteSec").hidden=!d.note; $("note").textContent=d.note;
 
@@ -928,6 +973,22 @@ function render(i){
      <div class="chips">${arr.map((t,j)=>`<span class="chip ${cls}" id="chip-${key}-${j}">${esc(t)}</span>`).join("")}</div>`:"";
   const html=sec("ln","line_number","中央行号",rm.line_number)+sec("hf","header_footer","页眉/页脚/栏号",rm.header_footer);
   $("removed").innerHTML=html||`<div class="empty">本页无剔除</div>`;
+
+  // 封面页:用 bib_parse 诊断面板替代重排段落/剔除词区
+  $("coverSec").hidden=!isCover; $("parasSec").hidden=isCover; $("removedSec").hidden=isCover;
+  if(isCover&&d.cover){
+    const cv=d.cover;
+    const pn=`<div class="cfield"><span class="ck ok">✓</span><span class="cl">专利号</span>`+
+      `<span class="cv">${esc(cv.patent_number)} <span style="color:var(--sub)">(取自文件名)</span></span></div>`;
+    const fields=cv.fields.map(f=>
+      `<div class="cfield${f.ok?"":" miss"}"><span class="ck ${f.ok?"ok":"no"}">${f.ok?"✓":"✗"}</span>`+
+      `<span class="cl">${esc(f.label)}</span><span class="cv">${f.val?esc(f.val):"— 未解析 —"}</span></div>`).join("");
+    const found=cv.inid_found.map(c=>`<span class="chip">(${c})</span>`).join("");
+    const miss=cv.missing_key.map(c=>`<span class="chip misscode" title="OCR 未读对该 INID 码 → 对应字段抽空">(${c})</span>`).join("");
+    $("coverBody").innerHTML=pn+fields+
+      `<div style="margin-top:9px"><div style="color:var(--sub);font-size:10px;margin-bottom:4px">切到的 INID 码 × ${cv.inid_found.length}</div><div class="chips">${found}</div></div>`+
+      (miss?`<div style="margin-top:8px"><div style="color:var(--bad);font-size:10px;margin-bottom:4px">缺失关键码 × ${cv.missing_key.length}(对应字段抽空)</div><div class="chips">${miss}</div></div>`:"");
+  }
 }
 function hot(id,on){const el=ov.querySelector(`[data-id="${id}"]`); if(el) el.classList.toggle("hot",on);}
 function step(dir){
@@ -1047,14 +1108,16 @@ def _reload_pipeline() -> None:
         mod = sys.modules.get(name)
         if mod is not None:
             importlib.reload(mod)
+    import bib_parse as _bp
     import page_classify as _pc
     import profiles as _pf
     import reading_order as _ro
     g = globals()
     g.update(classify_document=_pc.classify_document, PageKind=_pc.PageKind,
-             get_profile=_pf.get_profile, LayoutProfile=_pf.LayoutProfile)
+             get_profile=_pf.get_profile, LayoutProfile=_pf.LayoutProfile,
+             parse_cover=_bp.parse_cover, _inid_map=_bp._inid_map)
     for fn in ("Word", "Y_TOL_RATIO", "_column_paragraph_infos", "group_lines", "join_line",
-               "median_char_width", "median_height", "split_columns", "strip_bands",
+               "median_char_width", "median_height", "reconstruct", "split_columns", "strip_bands",
                "strip_line_numbers"):
         g[fn] = getattr(_ro, fn)
 
@@ -1067,7 +1130,7 @@ def render_doc(pdf: Path, md_root: Path, profile: LayoutProfile, zoom: float, se
     unexpl, garble = _load_crosscheck(md_root, pdf.stem, doc.page_count)
     imgs = _cached_imgs(pdf, doc, zoom) if serve else None
     pages = [page_payload(doc, info, profile, unexpl[info.index], garble[info.index], zoom,
-                          imgs[info.index] if imgs else None) for info in infos]
+                          imgs[info.index] if imgs else None, pdf.stem) for info in infos]
     doc.close()
     return build_html(pdf.stem, pages, _load_resolved(md_root, pdf.stem), serve), len(pages)
 
