@@ -36,6 +36,16 @@ def check_coverage(expected_words: list[str], output_text: str) -> dict:
 
 
 def lint(output_text: str, claims_md: str, fig_labels_all: list[str], profile: LayoutProfile) -> list[str]:
+    """结构 lint。FIG 引用解析复用 profile 图号正则，故全词 "FIGURE N"
+    也能与图注 "FIG. N" 对上、不再误报缺图：
+
+    >>> from profiles import get_profile
+    >>> p = get_profile()
+    >>> lint("As shown in FIGURE 29 and FIGS. 7", "", ["FIG. 29", "FIG. 7"], p)
+    []
+    >>> lint("see FIG. 5", "", ["FIG. 29"], p)
+    ["正文引用但未找到对应附图: FIG ['5']"]
+    """
     issues: list[str] = []
 
     # 残留运行页眉：仅当"短独立行"整体像页眉时才报（避开正文内 "U.S. patent
@@ -62,8 +72,9 @@ def lint(output_text: str, claims_md: str, fig_labels_all: list[str], profile: L
         if nums != expected:
             issues.append(f"claims 编号非连续 1..N: 实际 {nums}")
 
-    # FIG 引用是否都有对应附图
-    referenced = set(re.findall(r"FIG\s*\.?\s*([0-9]+[A-Z]?)", output_text, re.IGNORECASE))
+    # FIG 引用是否都有对应附图。引用端复用 profile 的图号正则（认 FIG./FIGURE/FIGS，
+    # 守词边界不吃 configure）；have 端 fig_labels 已由 _fig_labels 统一格式化为 "FIG. N"。
+    referenced = set(profile.figure_caption_re.findall(output_text))
     have = set(re.findall(r"FIG\.\s*([0-9]+[A-Z]?)", " ".join(fig_labels_all), re.IGNORECASE))
     unresolved = {r for r in referenced if r.upper() not in {h.upper() for h in have}}
     if unresolved and have:

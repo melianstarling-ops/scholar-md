@@ -85,7 +85,7 @@ class LayoutProfile:
     )
     # 图标题
     figure_caption_re: re.Pattern = field(
-        default_factory=lambda: re.compile(r"FIG\s*\.?\s*([0-9]+[A-Z]?)", re.IGNORECASE)
+        default_factory=lambda: re.compile(r"\bFIG(?:URE|S)?\s*\.?\s*([0-9]+[A-Z]?)", re.IGNORECASE)
     )
     # INID 字段（美国专利书目）
     inid_re: re.Pattern = field(
@@ -97,6 +97,21 @@ US_GRANT = LayoutProfile(name="US_GRANT")
 
 
 def get_profile(name: str = "US_GRANT") -> LayoutProfile:
+    """返回布局 profile。
+
+    图标题正则同时认缩写 "FIG."、全词 "FIGURE"、复数 "FIGS."，并以 \\b 守词边界，
+    不误吃 "configure"/"config3" 这类内含 "fig" 的词：
+
+    >>> p = get_profile()
+    >>> p.figure_caption_re.findall("FIGURE 29")          # 全词(旋转图题常见)
+    ['29']
+    >>> p.figure_caption_re.findall("see FIGS. 7 and 8")  # 复数缩写
+    ['7']
+    >>> p.figure_caption_re.findall("FIG. 3B")            # 既有缩写仍命中
+    ['3B']
+    >>> p.figure_caption_re.findall("configured config3") # 词边界:不命中
+    []
+    """
     profiles = {"US_GRANT": US_GRANT}
     if name not in profiles:
         raise ValueError(f"未知 profile: {name!r}，可用: {list(profiles)}")
