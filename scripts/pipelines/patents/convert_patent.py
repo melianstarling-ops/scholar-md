@@ -146,7 +146,8 @@ def _clean(text: str) -> str:
     return text.strip()
 
 
-def convert(pdf_path: Path, out_dir: Path, profile: LayoutProfile | None = None) -> ConvertResult:
+def convert(pdf_path: Path, out_dir: Path, profile: LayoutProfile | None = None,
+            write_selfcheck: bool = True) -> ConvertResult:
     profile = profile or get_profile()
     stem = pdf_path.stem
     doc = fitz.open(str(pdf_path))
@@ -239,9 +240,10 @@ def convert(pdf_path: Path, out_dir: Path, profile: LayoutProfile | None = None)
 
     lint_text = final_md.split("## References Cited")[0]
     report = selfcheck.run(expected_words, final_md, claims_md, fig_labels_all, profile, lint_text=lint_text)
-    (out_dir / f"{name}_selfcheck.json").write_text(
-        __import__("json").dumps(report, ensure_ascii=False, indent=2), encoding="utf-8"
-    )
+    if write_selfcheck:
+        (out_dir / f"{name}_selfcheck.json").write_text(
+            __import__("json").dumps(report, ensure_ascii=False, indent=2), encoding="utf-8"
+        )
 
     return ConvertResult(
         name=name, out_md=out_md, meta=meta, selfcheck=report,
