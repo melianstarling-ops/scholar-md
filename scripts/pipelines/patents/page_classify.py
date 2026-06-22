@@ -59,7 +59,7 @@ def _ladder_xcenters(words: list[Word], center_x: float, profile: LayoutProfile)
     return [
         w.xc
         for w in words
-        if w.text.isdigit()
+        if w.text.isdecimal()  # 非 isdigit:上标 ²³ 等 isdigit()=True 但 int() 报错(如撇号被字体编码成 ² 的 '552 简写)
         and int(w.text) % 5 == 0
         and 5 <= int(w.text) <= profile.ladder_value_max
         and abs(w.xc - center_x) <= profile.ladder_band_halfwidth

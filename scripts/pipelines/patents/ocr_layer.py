@@ -189,7 +189,7 @@ def ladder_band(words: list[tuple], page_w: float) -> tuple[float, float]:
     xs = [
         (w[0], w[2])
         for w in words
-        if w[4].isdigit() and int(w[4]) % 5 == 0 and 0 < int(w[4]) <= 80
+        if w[4].isdecimal() and int(w[4]) % 5 == 0 and 0 < int(w[4]) <= 80  # isdecimal:挡上标 ²³(isdigit()=True 但 int() 报错)
         and lo <= (w[0] + w[2]) / 2 <= hi
     ]
     if not xs:
