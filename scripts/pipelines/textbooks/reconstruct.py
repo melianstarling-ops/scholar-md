@@ -4,6 +4,17 @@ from __future__ import annotations
 import re
 
 _NUM_RE = re.compile(r"^\(?([\w.\-]+)\)?$")   # (5.30) / 5.30 → 5.30
+_EMPH_RE = re.compile(r"\x5cunderset\{\x5ccdot\}\{([^{}]*)\}")
+_EMPH_WRAP_RE = re.compile(r"\$\s*((?:\x5cunderset\{\x5ccdot\}\{[^{}]*\}\s*)*)\s*\$")
+
+
+def restore_emphasis_dots(text: str) -> str:
+    r"""把 \underset{\cdot}{X}…(常被整体裹进 $…$) 还原为纯文字 XYZ。"""
+    def _unwrap(m):
+        content = m.group(1).strip()
+        return _EMPH_RE.sub(r"\1", content)
+    text = _EMPH_WRAP_RE.sub(_unwrap, text)     # 先解掉包裹的 $…$
+    return _EMPH_RE.sub(r"\1", text)            # 再兜底裸露的
 
 
 def _formula_body(content: str) -> str:
@@ -32,7 +43,7 @@ def reconstruct_markdown(blocks: list[dict]) -> str:
         if label == "paragraph_title":
             parts.append(f"## {content}")
         elif label == "text":
-            parts.append(content)
+            parts.append(restore_emphasis_dots(content))
         elif label == "display_formula":
             body = _formula_body(content)
             nxt = ordered[i + 1] if i + 1 < len(ordered) else None
