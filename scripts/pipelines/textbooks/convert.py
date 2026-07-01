@@ -9,7 +9,7 @@ from scripts.pipelines.textbooks.triage import triage
 from scripts.pipelines.textbooks.preprocess import pdf_to_pngs
 from scripts.pipelines.textbooks.engine import predict_page
 from scripts.pipelines.textbooks.reconstruct import reconstruct_markdown
-from scripts.pipelines.textbooks.selfcheck import block_coverage
+from scripts.pipelines.textbooks.selfcheck import block_coverage, katex_incompat_scan
 
 
 def convert_pdf(pdf_path: str, out_dir: str | None = None) -> dict:
@@ -40,6 +40,7 @@ def convert_pdf(pdf_path: str, out_dir: str | None = None) -> dict:
     with open(md_path, "w", encoding="utf-8") as f:
         f.write(md)
     check = block_coverage(all_blocks, md)
+    check["katex_incompat"] = katex_incompat_scan(md)   # Tier0:KaTeX 渲染兼容 lint
     return {"route": route, "md_path": md_path, "selfcheck": check}
 
 
@@ -55,6 +56,8 @@ def main() -> None:
         print(f"[Tier0] blocks {c['in_md']}/{c['total']} 覆盖, 缺 {len(c['missing'])}")
         for m in c["missing"]:
             print("   MISSING:", m)
+        if c.get("katex_incompat"):
+            print("[Tier0] KaTeX 不兼容残留:", ", ".join(c["katex_incompat"]))
 
 
 if __name__ == "__main__":

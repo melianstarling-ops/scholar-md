@@ -7,6 +7,20 @@ _NUM_RE = re.compile(r"^\(?([\w.\-]+)\)?$")   # (5.30) / 5.30 → 5.30
 _EMPH_RE = re.compile(r"\\underset\{\\cdot\}\{([^{}]*)\}")
 _EMPH_WRAP_RE = re.compile(r"\$\s*((?:\\underset\{\\cdot\}\{[^{}]*\}\s*)*)\s*\$")
 
+# KaTeX(Typora 默认渲染器)不认、但在 $$ display 模式里语义冗余的命令。
+# 新踩坑命令追加到这里即可;清洗层(sanitize_latex)与 Tier0 lint(selfcheck) 共用此单一清单。
+# L-T16:PaddleOCR-VL 把 display 积分输出成 \int\displaylimits_{下}^{上},KaTeX 报红。
+KATEX_INCOMPAT_COMMANDS = [r"\displaylimits"]
+# (?![a-zA-Z]) 负向边界:删 \displaylimits 不误伤前缀相近的 \displaystyle
+_KATEX_SUB = [(re.compile(re.escape(cmd) + r"(?![a-zA-Z])"), "") for cmd in KATEX_INCOMPAT_COMMANDS]
+
+
+def sanitize_latex(s: str) -> str:
+    r"""删除 KaTeX 不支持、但语义冗余的 LaTeX 命令(引擎方言清洗)。"""
+    for pat, repl in _KATEX_SUB:
+        s = pat.sub(repl, s)
+    return s
+
 
 def restore_emphasis_dots(text: str) -> str:
     r"""把 \underset{\cdot}{X}…(常被整体裹进 $…$) 还原为纯文字 XYZ。"""
@@ -43,9 +57,12 @@ def reconstruct_markdown(blocks: list[dict]) -> str:
         if label == "paragraph_title":
             parts.append(f"## {content}")
         elif label == "text":
+            # pending: text 内联 $...$ 公式也可能夹带 KaTeX 不兼容命令,但暂无实例、
+            # 且 sanitize 对纯文字的影响未验证,故此路暂不接 sanitize_latex。
+            # 待出现 text 块内公式红字实例再评估接入。见 TODO / lessons L-T16。
             parts.append(restore_emphasis_dots(content))
         elif label == "display_formula":
-            body = _formula_body(content)
+            body = sanitize_latex(_formula_body(content))
             nxt = ordered[i + 1] if i + 1 < len(ordered) else None
             if nxt and nxt.get("block_label") == "formula_number":
                 m = _NUM_RE.match((nxt.get("block_content") or "").strip())

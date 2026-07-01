@@ -1,7 +1,11 @@
 import json
 from pathlib import Path
 
-from scripts.pipelines.textbooks.reconstruct import reconstruct_markdown, restore_emphasis_dots
+from scripts.pipelines.textbooks.reconstruct import (
+    reconstruct_markdown,
+    restore_emphasis_dots,
+    sanitize_latex,
+)
 
 FIX = Path(__file__).parent / "fixtures"
 
@@ -79,3 +83,22 @@ def test_golden_paul_english():
     assert r"\tag{5.33}" in md                          # 编号全部绑回(md 端到端曾丢失的)
     assert "THE PER-UNIT-LENGTH" not in md              # 页眉(order=None)剔除
     assert "178" not in md                              # 页码剔除
+    assert r"\displaylimits" not in md                  # KaTeX 不兼容命令已清洗(L-T16)
+
+
+def test_sanitize_latex_strips_displaylimits():
+    # \displaylimits 在 $$ 里冗余,删除;KaTeX 才能渲染
+    assert sanitize_latex(r"\int\displaylimits_{a}^{b}") == r"\int_{a}^{b}"
+
+
+def test_sanitize_latex_preserves_displaystyle():
+    # 负向边界:不得误伤前缀相近的 \displaystyle
+    assert sanitize_latex(r"\displaystyle\int x") == r"\displaystyle\int x"
+
+
+def test_reconstruct_cleans_displaylimits_in_formula():
+    blocks = [{"block_label": "display_formula",
+               "block_content": r"$$ \int\displaylimits_{S} \mathbf{B} $$", "block_order": 1}]
+    md = reconstruct_markdown(blocks)
+    assert r"\displaylimits" not in md
+    assert r"\int_{S}" in md

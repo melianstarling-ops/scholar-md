@@ -1,4 +1,4 @@
-from scripts.pipelines.textbooks.selfcheck import block_coverage
+from scripts.pipelines.textbooks.selfcheck import block_coverage, katex_incompat_scan
 
 
 def test_all_ordered_blocks_covered():
@@ -34,3 +34,13 @@ def test_formula_number_absorbed_into_tag_not_missing():
     rep = block_coverage(blocks, md)
     assert rep["missing"] == []
     assert rep["in_md"] == rep["total"] == 2
+
+
+def test_katex_scan_detects_residual():
+    # 清洗遗漏/回归时,Tier0 lint 应检出残留的不兼容命令
+    hits = katex_incompat_scan(r"$$ \int\displaylimits_{S} x $$")
+    assert r"\displaylimits" in hits
+
+
+def test_katex_scan_clean_returns_empty():
+    assert katex_incompat_scan(r"$$ \int_{S} \displaystyle x $$") == []

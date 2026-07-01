@@ -39,3 +39,6 @@ TODO.md
 #     故全局拦截,任何位置都不入 git) ---
 *_debug.html
 *_annotations.json
+
+# --- 本地手工测试临时产物(patents 端到端 smoke 的输入 PDF + 页面 PNG,二进制,不入 git) ---
+_selftest/

@@ -3,6 +3,13 @@ from __future__ import annotations
 
 import re
 
+from scripts.pipelines.textbooks.reconstruct import KATEX_INCOMPAT_COMMANDS
+
+
+def katex_incompat_scan(md: str) -> list[str]:
+    """Tier0 lint:md 不应残留已知 KaTeX 不兼容命令(与清洗层同源清单)。返回命中命令。"""
+    return [c for c in KATEX_INCOMPAT_COMMANDS if c in md]
+
 
 def _probe(content: str) -> str:
     """取块内容一段稳定的可检子串(去 LaTeX 包裹与空白,取前 12 个非空字符)。"""
