@@ -4,8 +4,8 @@ from __future__ import annotations
 import re
 
 _NUM_RE = re.compile(r"^\(?([\w.\-]+)\)?$")   # (5.30) / 5.30 → 5.30
-_EMPH_RE = re.compile(r"\x5cunderset\{\x5ccdot\}\{([^{}]*)\}")
-_EMPH_WRAP_RE = re.compile(r"\$\s*((?:\x5cunderset\{\x5ccdot\}\{[^{}]*\}\s*)*)\s*\$")
+_EMPH_RE = re.compile(r"\\underset\{\\cdot\}\{([^{}]*)\}")
+_EMPH_WRAP_RE = re.compile(r"\$\s*((?:\\underset\{\\cdot\}\{[^{}]*\}\s*)*)\s*\$")
 
 
 def restore_emphasis_dots(text: str) -> str:
