@@ -12,6 +12,7 @@
 
 # --- Python 环境与缓存 ---
 .venv/
+.venv-textbooks/
 __pycache__/
 *.pyc
 *.pyo
