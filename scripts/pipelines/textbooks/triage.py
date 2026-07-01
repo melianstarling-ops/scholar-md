@@ -12,7 +12,7 @@ _PUA_RANGES = ((0xE000, 0xF8FF), (0xF0000, 0xFFFFD), (0x100000, 0x10FFFD))
 
 def _is_bad_char(ch: str) -> bool:
     o = ord(ch)
-    if ch in ("�", "·"):                # replacement char or PyMuPDF substitute
+    if ch == "�":                       # replacement char
         return True
     return any(lo <= o <= hi for lo, hi in _PUA_RANGES)
 
