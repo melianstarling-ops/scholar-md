@@ -1,0 +1,8 @@
+# textbooks 管线专属环境(.venv-textbooks)，勿装进 patents/general 的 .venv
+# 安装:
+#   .venv-textbooks/Scripts/python -m pip install paddlepaddle-gpu==3.2.1 -i https://www.paddlepaddle.org.cn/packages/stable/cu126/
+#   .venv-textbooks/Scripts/python -m pip install -U "paddleocr[doc-parser]"
+paddlepaddle-gpu==3.2.1
+paddleocr[doc-parser]==3.7.0
+PyMuPDF>=1.27
+pytest>=8

@@ -1,0 +1,522 @@
+{
+    "input_path": "jackson_p200_hd.png",
+    "page_index": null,
+    "page_count": null,
+    "width": 1153,
+    "height": 1661,
+    "model_settings": {
+        "use_doc_preprocessor": false,
+        "use_layout_detection": true,
+        "use_chart_recognition": false,
+        "use_seal_recognition": false,
+        "use_ocr_for_image_block": false,
+        "format_block_content": false,
+        "merge_layout_blocks": true,
+        "markdown_ignore_labels": [
+            "number",
+            "footnote",
+            "header",
+            "header_image",
+            "footer",
+            "footer_image",
+            "aside_text"
+        ],
+        "return_layout_polygon_points": true
+    },
+    "parsing_res_list": [
+        {
+            "block_label": "paragraph_title",
+            "block_content": "第五章 静 磁 学",
+            "block_bbox": [
+                358,
+                203,
+                784,
+                254
+            ],
+            "block_id": 0,
+            "block_order": 1,
+            "group_id": 0,
+            "block_polygon_points": [
+                [
+                    358.0,
+                    203.0
+                ],
+                [
+                    784.0,
+                    203.0
+                ],
+                [
+                    784.0,
+                    254.0
+                ],
+                [
+                    358.0,
+                    254.0
+                ]
+            ]
+        },
+        {
+            "block_label": "paragraph_title",
+            "block_content": "5.1 引言和定义",
+            "block_bbox": [
+                169,
+                322,
+                409,
+                359
+            ],
+            "block_id": 1,
+            "block_order": 2,
+            "group_id": 1,
+            "block_polygon_points": [
+                [
+                    169.0,
+                    322.0
+                ],
+                [
+                    409.0,
+                    322.0
+                ],
+                [
+                    409.0,
+                    359.0
+                ],
+                [
+                    169.0,
+                    359.0
+                ]
+            ]
+        },
+        {
+            "block_label": "text",
+            "block_content": "前几章中，已经研究了静电学的各个方面(即静止电荷的场和相互作用，以及边界等)。现在转入研究稳恒态磁现象。由历史观点看来，人们认识和研究磁现象的历史，至少与电现象一样悠久。古代就已经知道磁石；航海用罗盘就是一项很古老的发明；在1600年以前，吉伯把地球当作一块巨大磁铁来研究。和静电学不同，磁场的基本规律不是直接根据人类同磁性材料的最早接触中得出的。其理由都出自静磁学和静电学的根本差别： $ \\underset{\\cdot}{没}\\underset{\\cdot}{有}\\underset{\\cdot}{自}\\underset{\\cdot}{由}\\underset{\\cdot}{磁}\\underset{\\cdot}{荷}\\underset{\\cdot}{存}\\underset{\\cdot}{在} $。这意味着，磁现象完全不同于电现象，而且在很长时期内都没有建立起电磁这两种现象之间的连系。在磁学研究中，基本单元就是我们现在知道的磁偶极子。在磁性材料面前，磁偶极子有使其自身沿某一方向排列的倾向。倘若磁偶极子充分小并且充分弱，使得它不会改变所存在的场，那末，按定义，磁偶极子所处的方向就是磁通量密度(用B表示)的方向。磁通量密度B的量值可以用下式确定：",
+            "block_bbox": [
+                114,
+                385,
+                1031,
+                1007
+            ],
+            "block_id": 2,
+            "block_order": 3,
+            "group_id": 2,
+            "block_polygon_points": [
+                [
+                    114.0,
+                    385.0
+                ],
+                [
+                    1031.0,
+                    385.0
+                ],
+                [
+                    1031.0,
+                    1007.0
+                ],
+                [
+                    114.0,
+                    1007.0
+                ]
+            ]
+        },
+        {
+            "block_label": "display_formula",
+            "block_content": " $$ \\mathbf{N}=\\boldsymbol{\\mu}\\times\\mathbf{B} $$ ",
+            "block_bbox": [
+                475,
+                1016,
+                611,
+                1050
+            ],
+            "block_id": 3,
+            "block_order": 4,
+            "group_id": 3,
+            "block_polygon_points": [
+                [
+                    475.0,
+                    1016.0
+                ],
+                [
+                    611.0,
+                    1016.0
+                ],
+                [
+                    611.0,
+                    1050.0
+                ],
+                [
+                    475.0,
+                    1050.0
+                ]
+            ]
+        },
+        {
+            "block_label": "formula_number",
+            "block_content": "(5.1)",
+            "block_bbox": [
+                949,
+                1016,
+                1026,
+                1049
+            ],
+            "block_id": 4,
+            "block_order": 5,
+            "group_id": 4,
+            "block_polygon_points": [
+                [
+                    949.0,
+                    1016.0
+                ],
+                [
+                    1026.0,
+                    1016.0
+                ],
+                [
+                    1026.0,
+                    1049.0
+                ],
+                [
+                    949.0,
+                    1049.0
+                ]
+            ]
+        },
+        {
+            "block_label": "text",
+            "block_content": "式中 N 是施于磁偶极子的力矩， $ \\mu $ 是按适当的一组单位定义的偶极子的磁矩.",
+            "block_bbox": [
+                116,
+                1065,
+                1029,
+                1150
+            ],
+            "block_id": 5,
+            "block_order": 6,
+            "group_id": 5,
+            "block_polygon_points": [
+                [
+                    116.0,
+                    1065.0
+                ],
+                [
+                    1029.0,
+                    1065.0
+                ],
+                [
+                    1029.0,
+                    1150.0
+                ],
+                [
+                    116.0,
+                    1150.0
+                ]
+            ]
+        },
+        {
+            "block_label": "text",
+            "block_content": "在定义磁通量密度 B(有时叫做 $ \\underset{\\cdot}{磁}\\underset{\\cdot}{感}\\underset{\\cdot}{应}\\underset{\\cdot}{强}\\underset{\\cdot}{度} $)时，我们已经遇到了一种比电场更复杂的情况. 而且在建立电流和磁场的关系之前，不可能定量地阐明磁现象. 电流相当于运动电荷，并用电流密度J来描述，J是以每单位时间流过每单位面积的正电荷量来量度的，电荷运动的方向规定为J的方向. 在静电系单位中，电流密度是以每平方厘米每",
+            "block_bbox": [
+                117,
+                1162,
+                1034,
+                1394
+            ],
+            "block_id": 6,
+            "block_order": 7,
+            "group_id": 6,
+            "block_polygon_points": [
+                [
+                    117.0,
+                    1162.0
+                ],
+                [
+                    1034.0,
+                    1162.0
+                ],
+                [
+                    1034.0,
+                    1394.0
+                ],
+                [
+                    117.0,
+                    1394.0
+                ]
+            ]
+        },
+        {
+            "block_label": "number",
+            "block_content": "186",
+            "block_bbox": [
+                154,
+                1410,
+                207,
+                1434
+            ],
+            "block_id": 7,
+            "block_order": null,
+            "group_id": 7,
+            "block_polygon_points": [
+                [
+                    154.0,
+                    1410.0
+                ],
+                [
+                    206.0,
+                    1410.0
+                ],
+                [
+                    206.0,
+                    1433.0
+                ],
+                [
+                    154.0,
+                    1433.0
+                ]
+            ]
+        }
+    ],
+    "layout_det_res": {
+        "input_path": null,
+        "page_index": null,
+        "boxes": [
+            {
+                "cls_id": 17,
+                "label": "paragraph_title",
+                "score": 0.8792046904563904,
+                "coordinate": [
+                    358,
+                    203,
+                    784,
+                    254
+                ],
+                "order": 1,
+                "polygon_points": [
+                    [
+                        358.0,
+                        203.0
+                    ],
+                    [
+                        784.0,
+                        203.0
+                    ],
+                    [
+                        784.0,
+                        254.0
+                    ],
+                    [
+                        358.0,
+                        254.0
+                    ]
+                ]
+            },
+            {
+                "cls_id": 17,
+                "label": "paragraph_title",
+                "score": 0.8602202534675598,
+                "coordinate": [
+                    169,
+                    322,
+                    409,
+                    359
+                ],
+                "order": 2,
+                "polygon_points": [
+                    [
+                        169.0,
+                        322.0
+                    ],
+                    [
+                        409.0,
+                        322.0
+                    ],
+                    [
+                        409.0,
+                        359.0
+                    ],
+                    [
+                        169.0,
+                        359.0
+                    ]
+                ]
+            },
+            {
+                "cls_id": 22,
+                "label": "text",
+                "score": 0.9657825827598572,
+                "coordinate": [
+                    114,
+                    385,
+                    1031,
+                    1007
+                ],
+                "order": 3,
+                "polygon_points": [
+                    [
+                        114.0,
+                        385.0
+                    ],
+                    [
+                        1031.0,
+                        385.0
+                    ],
+                    [
+                        1031.0,
+                        1007.0
+                    ],
+                    [
+                        114.0,
+                        1007.0
+                    ]
+                ]
+            },
+            {
+                "cls_id": 5,
+                "label": "display_formula",
+                "score": 0.8681982755661011,
+                "coordinate": [
+                    475,
+                    1016,
+                    611,
+                    1050
+                ],
+                "order": 4,
+                "polygon_points": [
+                    [
+                        475.0,
+                        1016.0
+                    ],
+                    [
+                        611.0,
+                        1016.0
+                    ],
+                    [
+                        611.0,
+                        1050.0
+                    ],
+                    [
+                        475.0,
+                        1050.0
+                    ]
+                ]
+            },
+            {
+                "cls_id": 11,
+                "label": "formula_number",
+                "score": 0.8549460172653198,
+                "coordinate": [
+                    949,
+                    1016,
+                    1026,
+                    1049
+                ],
+                "order": 5,
+                "polygon_points": [
+                    [
+                        949.0,
+                        1016.0
+                    ],
+                    [
+                        1026.0,
+                        1016.0
+                    ],
+                    [
+                        1026.0,
+                        1049.0
+                    ],
+                    [
+                        949.0,
+                        1049.0
+                    ]
+                ]
+            },
+            {
+                "cls_id": 22,
+                "label": "text",
+                "score": 0.9201447367668152,
+                "coordinate": [
+                    116,
+                    1065,
+                    1029,
+                    1150
+                ],
+                "order": 6,
+                "polygon_points": [
+                    [
+                        116.0,
+                        1065.0
+                    ],
+                    [
+                        1029.0,
+                        1065.0
+                    ],
+                    [
+                        1029.0,
+                        1150.0
+                    ],
+                    [
+                        116.0,
+                        1150.0
+                    ]
+                ]
+            },
+            {
+                "cls_id": 22,
+                "label": "text",
+                "score": 0.9560173749923706,
+                "coordinate": [
+                    117,
+                    1162,
+                    1034,
+                    1394
+                ],
+                "order": 7,
+                "polygon_points": [
+                    [
+                        117.0,
+                        1162.0
+                    ],
+                    [
+                        1034.0,
+                        1162.0
+                    ],
+                    [
+                        1034.0,
+                        1394.0
+                    ],
+                    [
+                        117.0,
+                        1394.0
+                    ]
+                ]
+            },
+            {
+                "cls_id": 16,
+                "label": "number",
+                "score": 0.7515802979469299,
+                "coordinate": [
+                    154,
+                    1410,
+                    207,
+                    1434
+                ],
+                "order": 8,
+                "polygon_points": [
+                    [
+                        154.0,
+                        1410.0
+                    ],
+                    [
+                        206.0,
+                        1410.0
+                    ],
+                    [
+                        206.0,
+                        1433.0
+                    ],
+                    [
+                        154.0,
+                        1433.0
+                    ]
+                ]
+            }
+        ]
+    }
+}
