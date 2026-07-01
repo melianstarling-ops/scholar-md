@@ -1,6 +1,18 @@
 """parsing_res_list(PaddleOCR-VL) → Markdown 的确定性重组。"""
 from __future__ import annotations
 
+import re
+
+_NUM_RE = re.compile(r"^\(?([\w.\-]+)\)?$")   # (5.30) / 5.30 → 5.30
+
+
+def _formula_body(content: str) -> str:
+    """去掉外层 $$ 包裹,取纯公式体。"""
+    s = content.strip()
+    if s.startswith("$$") and s.endswith("$$"):
+        s = s[2:-2].strip()
+    return s
+
 
 def reconstruct_markdown(blocks: list[dict]) -> str:
     """按 block_order 排序、剔除 order=None(页眉页脚页码)、逐块转 Markdown。"""
@@ -9,14 +21,29 @@ def reconstruct_markdown(blocks: list[dict]) -> str:
         key=lambda b: b["block_order"],
     )
     parts: list[str] = []
-    for b in ordered:
+    i = 0
+    while i < len(ordered):
+        b = ordered[i]
         label = b.get("block_label", "")
         content = (b.get("block_content") or "").strip()
         if not content:
+            i += 1
             continue
         if label == "paragraph_title":
             parts.append(f"## {content}")
         elif label == "text":
             parts.append(content)
-        # display_formula / formula_number 在 Task 5 处理
+        elif label == "display_formula":
+            body = _formula_body(content)
+            nxt = ordered[i + 1] if i + 1 < len(ordered) else None
+            if nxt and nxt.get("block_label") == "formula_number":
+                m = _NUM_RE.match((nxt.get("block_content") or "").strip())
+                tag = m.group(1) if m else (nxt.get("block_content") or "").strip()
+                parts.append(f"$$ {body} \\tag{{{tag}}} $$")
+                i += 1                      # 吸收编号块
+            else:
+                parts.append(f"$$ {body} $$")
+        elif label == "formula_number":
+            parts.append(content)           # 落单编号,保留不丢
+        i += 1
     return "\n\n".join(parts) + "\n"
