@@ -1,5 +1,17 @@
 import fitz
-from scripts.pipelines.textbooks.triage import sample_text_coverage, text_badness, triage
+from scripts.pipelines.textbooks.triage import _is_bad_char, sample_text_coverage, text_badness, triage
+
+
+def test_is_bad_char_detects_pua_and_replacement():
+    # 私用区(PUA)字符 → 坏
+    assert _is_bad_char("")        # BMP PUA 起点
+    assert _is_bad_char("")        # BMP PUA 终点
+    assert _is_bad_char("\U000F0000")    # Plane-15 PUA
+    assert _is_bad_char("�")             # 替换符
+    # 普通字符 → 不坏
+    assert not _is_bad_char("A")
+    assert not _is_bad_char("中")
+    assert not _is_bad_char("5")
 
 
 def _make_pdf(tmp_path, texts):
