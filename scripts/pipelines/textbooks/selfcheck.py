@@ -16,7 +16,11 @@ def block_coverage(blocks: list[dict], md: str) -> dict:
     missing = []
     in_md = 0
     for b in ordered:
-        probe = _probe(b.get("block_content", ""))
+        content = b.get("block_content", "")
+        # 对 formula_number 块去括号再探(reconstruct 把编号吸收成 \tag{5.31},无括号)
+        if b.get("block_label") == "formula_number":
+            content = content.strip().strip("()")
+        probe = _probe(content)
         if probe and probe in md_flat:
             in_md += 1
         else:
