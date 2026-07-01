@@ -1,5 +1,5 @@
 import fitz
-from scripts.pipelines.textbooks.triage import sample_text_coverage
+from scripts.pipelines.textbooks.triage import sample_text_coverage, text_badness, triage
 
 
 def _make_pdf(tmp_path, texts):
@@ -21,3 +21,28 @@ def test_coverage_zero_for_blank(tmp_path):
 def test_coverage_high_for_text(tmp_path):
     pdf = _make_pdf(tmp_path, ["hello world " * 20] * 3)
     assert sample_text_coverage(pdf) > 100
+
+
+def test_badness_low_for_clean(tmp_path):
+    pdf = _make_pdf(tmp_path, ["the quick brown fox jumps over the lazy dog " * 10] * 3)
+    assert text_badness(pdf) < 0.2
+
+
+def test_badness_high_for_garbled(tmp_path):
+    # 大量替换符/私用区字符 → 高坏度
+    junk = "�CaSOS ringS �� " * 30
+    pdf = _make_pdf(tmp_path, [junk] * 3)
+    assert text_badness(pdf) > 0.3
+
+
+def test_triage_A_for_blank(tmp_path):
+    assert triage(_make_pdf(tmp_path, ["", "", ""])) == "A"
+
+
+def test_triage_B_for_clean(tmp_path):
+    assert triage(_make_pdf(tmp_path, ["the quick brown fox jumps " * 20] * 3)) == "B"
+
+
+def test_triage_C_for_garbled(tmp_path):
+    junk = "�� CaSOS " * 40
+    assert triage(_make_pdf(tmp_path, [junk] * 3)) == "C"
