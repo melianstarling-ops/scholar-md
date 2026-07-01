@@ -29,8 +29,8 @@ def test_badness_low_for_clean(tmp_path):
 
 
 def test_badness_high_for_garbled(tmp_path):
-    # 大量替换符/私用区字符 → 高坏度
-    junk = "�CaSOS ringS �� " * 30
+    # 高替换符密度(U+FFFD) → PyMuPDF 提取为·,坏度 >0.3
+    junk = "████ ab " * 30
     pdf = _make_pdf(tmp_path, [junk] * 3)
     assert text_badness(pdf) > 0.3
 
