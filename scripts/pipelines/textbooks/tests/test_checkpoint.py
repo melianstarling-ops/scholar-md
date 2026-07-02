@@ -66,3 +66,53 @@ def test_reset_work_dir(tmp_path):
     cp.reset_work_dir(work)
     assert os.path.isdir(work)
     assert os.listdir(work) == []
+
+
+def test_page_stem_and_res_path(tmp_path):
+    assert cp.page_stem(7) == "page_0007"
+    assert cp.page_res_path("/w", 7).endswith(os.path.join("/w", "page_0007_res.json").replace("/", os.sep))
+
+
+def _write_res(work, page, blocks):
+    os.makedirs(work, exist_ok=True)
+    with open(cp.page_res_path(work, page), "w", encoding="utf-8") as f:
+        json.dump({"parsing_res_list": blocks}, f)
+
+
+def test_is_page_done_true_false(tmp_path):
+    work = str(tmp_path / "_work")
+    _write_res(work, 1, [{"block_order": 0}])
+    assert cp.is_page_done(work, 1) is True
+    assert cp.is_page_done(work, 2) is False
+
+
+def test_is_page_done_corrupt_json(tmp_path):
+    work = str(tmp_path / "_work")
+    os.makedirs(work)
+    with open(cp.page_res_path(work, 1), "w", encoding="utf-8") as f:
+        f.write('{"parsing_res_list": [')   # 半截
+    assert cp.is_page_done(work, 1) is False   # 损坏 → 未完成
+
+
+def test_write_empty_page_marks_done(tmp_path):
+    work = str(tmp_path / "_work")
+    cp.write_empty_page(work, 3)
+    assert cp.is_page_done(work, 3) is True
+    assert cp.load_page_blocks(work, 3) == []
+
+
+def test_load_page_blocks(tmp_path):
+    work = str(tmp_path / "_work")
+    _write_res(work, 1, [{"block_order": 0, "block_content": "hi"}])
+    assert cp.load_page_blocks(work, 1) == [{"block_order": 0, "block_content": "hi"}]
+    assert cp.load_page_blocks(work, 9) == []          # 缺失
+    with open(cp.page_res_path(work, 2), "w") as f:
+        f.write("broken")
+    assert cp.load_page_blocks(work, 2) == []          # 损坏
+
+
+def test_pages_todo(tmp_path):
+    work = str(tmp_path / "_work")
+    _write_res(work, 1, [])
+    _write_res(work, 3, [])
+    assert cp.pages_todo(work, 4) == [2, 4]

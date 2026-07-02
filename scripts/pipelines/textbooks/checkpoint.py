@@ -66,3 +66,44 @@ def reset_work_dir(work_dir: str) -> None:
     if os.path.isdir(work_dir):
         shutil.rmtree(work_dir)
     os.makedirs(work_dir, exist_ok=True)
+
+
+def page_stem(page: int) -> str:
+    return f"page_{page:04d}"
+
+
+def page_res_path(work_dir: str, page: int) -> str:
+    return os.path.normpath(os.path.join(work_dir, f"{page_stem(page)}_res.json"))
+
+
+def is_page_done(work_dir: str, page: int) -> bool:
+    p = page_res_path(work_dir, page)
+    if not os.path.exists(p):
+        return False
+    try:
+        with open(p, encoding="utf-8") as f:
+            json.load(f)
+        return True
+    except (ValueError, OSError):
+        return False
+
+
+def write_empty_page(work_dir: str, page: int) -> None:
+    os.makedirs(work_dir, exist_ok=True)
+    with open(page_res_path(work_dir, page), "w", encoding="utf-8") as f:
+        json.dump({"parsing_res_list": []}, f, ensure_ascii=False)
+
+
+def load_page_blocks(work_dir: str, page: int) -> list[dict]:
+    p = page_res_path(work_dir, page)
+    if not os.path.exists(p):
+        return []
+    try:
+        with open(p, encoding="utf-8") as f:
+            return json.load(f).get("parsing_res_list", [])
+    except (ValueError, OSError, AttributeError):
+        return []
+
+
+def pages_todo(work_dir: str, total: int) -> list[int]:
+    return [i for i in range(1, total + 1) if not is_page_done(work_dir, i)]
