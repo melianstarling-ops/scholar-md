@@ -76,30 +76,55 @@ python -m scripts.pipelines.textbooks.batch
 
 `discover(src_paths)`：把 `--src`（文件/目录/多个）展开成去重排序的 PDF 路径列表——
 接受目录自动扫 `*.pdf`，接受单文件直接收录，两者可混用（对齐 H.5 §5 与 `general/batch.py:collect_jobs` 的展开逻辑，
-但输出根统一用 `--out`/默认根，不做 per-PDF 就地）。
+但输出根统一用 `--out`/默认根，不做 per-PDF 就地）。**跨目录同名 stem 检出即硬失败**：多 `--src` 混用时，
+两个不同目录下的同名 `A.pdf`（不同内容）会撞到同一个 `out_root/A/`，指纹失配会互相清空对方的 `_work`
+断点、批跑互相打架——这是正确性问题，不是该警告后继续跑的事。`discover()` 检出重复 stem 时列出冲突路径，
+`main()` 直接返回非零、不处理任何一本书。
 
-## 6. `--resume` 判断（含 B 路边界情况）
+## 6. `--resume` 判断（B 路不设短路 + 指纹校验 + 毒页感知）
 
 `convert_pdf()` 无论有无 `--resume` 都会按页断点自动续跑（看 manifest 指纹）；但它**每次运行都会写出部分
-`<stem>.md`**（哪怕还没跑完），所以不能像 patents 那样用"md 文件存在"判断跳过。同时**路由 B 的书完全不经过
-checkpoint 系统**——`_register_deferred` 只在 `out_dir/_deferred_born_digital/<stem>.txt` 留一个登记标记，
-不创建 `<stem>/_work/manifest.json`。`--resume` 的跳过判断要覆盖两条路径：
+`<stem>.md`**（哪怕还没跑完），所以不能像 patents 那样用"md 文件存在"判断跳过。判断逻辑有三处需要与
+`convert_pdf()`/`triage()` 自身语义对齐，否则会误判：
+
+**B 路不设跳过短路。** 路由 B 的书完全不经过 checkpoint 系统——`_register_deferred` 只在
+`out_dir/_deferred_born_digital/<stem>.txt` 留一个登记标记，不存指纹，源文件被同名替换后标记也不会失效。
+与其给 `_register_deferred` 加指纹存储（要动已测过的 B 路文件格式），不如直接不把这个标记当跳过信号：
+`triage()`（`triage.py`）只做 5 页 PyMuPDF 文本采样，无 GPU、毫秒级，每次 `--resume` 重新 triage+登记是
+幂等且便宜的，顺带自动解决"源文件被替换"的过期问题。
+
+**A/C 路必须校验指纹/DPI。** 只看 `pages_todo` 为空不够——用户 `--dpi 200` 重跑，或同名源文件被替换内容，
+manifest 会显示"全部完成"但按 `convert_pdf()` 自己的重置条件（`convert.py:50`）其实该整本重转。跳过判断要
+用同一条件（`cp.fingerprint_ok`），失配即不算 done（代价是多开一次 fitz，和 `convert_pdf()` 本来就要做的一样）。
+
+**毒页与瞬时失败页要分别处理。** `manifest["failed_pages"]` 混了两种：`kind=page-exception`（页级瞬时异常，
+没写 res.json，留在 `pages_todo()` 里，`convert_pdf()` 每轮都会重试——这是特性）和 `kind=process-killed`
+（毒页，`convert.py:70-72` 显式从 `todo` 里过滤掉，`convert_pdf()` 自己都不会再碰它）。跳过判断要照抄
+`convert.py:70-72` 同一段过滤逻辑，**不能**再要求 `not manifest["failed_pages"]`——一本"跑完但有 1 个毒页"
+的书，`convert_pdf()` 重跑时对它什么也不会做（只是白白重新 assemble 一遍），应判定为 done（SUSPECT）而不是
+永远判"未完成"、每轮 `--resume` 都重新起 watchdog 子进程。
 
 ```python
-def _already_done(out_root: Path, stem: str) -> bool:
-    if (out_root / "_deferred_born_digital" / f"{stem}.txt").exists():
-        return True                          # 路由 B：已登记，无需重跑
-    work_dir = out_root / stem / "_work"
+def _already_done(out_root: Path, pdf_path: Path, dpi: int) -> bool:
+    work_dir = out_root / pdf_path.stem / "_work"
     manifest = cp.load_manifest(str(work_dir))
     if manifest is None:
         return False
+    if not cp.fingerprint_ok(manifest, str(pdf_path), dpi):
+        return False                         # 源变了或 DPI 变了：不算 done
     total = manifest["fingerprint"]["page_count"]
-    todo = cp.pages_todo(str(work_dir), total)
-    return not todo and not manifest["failed_pages"]
+    poisoned = {f["page"] for f in manifest["failed_pages"] if f["kind"] == "process-killed"}
+    todo = [p for p in cp.pages_todo(str(work_dir), total) if p not in poisoned]
+    return not todo                          # 毒页不算"未完成"；瞬时失败页仍算（允许重试）
 ```
 
-复用 `checkpoint.py` 现成的 `load_manifest`/`pages_todo`，不重新手撸 JSON 解析。
-`--resume` 触发跳过时只打印 `[SKIP] stem`，不起 watchdog 子进程——省掉整趟 triage + 子进程开销。
+复用 `checkpoint.py` 现成的 `load_manifest`/`fingerprint_ok`/`pages_todo`，不重新手撸判定逻辑。
+`--resume` 触发跳过时只打印 `[SKIP] stem`，不起 watchdog 子进程——省掉整趟子进程开销（B 路书不跳过，
+但它的重新登记本身就很便宜，见上）。
+
+`--limit` 在 `--resume` 过滤**之前**应用于原始发现列表（对齐 patents/general 惯例：先截断再逐个判断跳过）。
+已知行为、非 bug：`--resume --limit 100` 若前 100 本都已跳过，不会自动往后推进到第 101 本——`--limit` 是
+调试/小样验证用的截断，不是"处理接下来 N 本未完成的书"的游标，需要手动加大 `--limit` 才能推进。
 
 ## 7. 汇总报告
 
@@ -111,7 +136,10 @@ def _already_done(out_root: Path, stem: str) -> bool:
   打印 `[OK/SUSPECT] stem — route=A/C failed_pages=N coverage=...`（若有 selfcheck）。
 - `rc!=0`（watchdog 达 `--max-restarts` 仍未跑完）→ 打印 `[GIVEUP] stem`，计入失败计数。
 
-结尾打印总计（OK/SUSPECT/GIVEUP/SKIP 计数 + 输出根路径），返回码：全部成功→0，否则→1（对齐 patents 惯例）。
+结尾打印总计（OK/SUSPECT/GIVEUP/SKIP 计数 + 输出根路径）。返回码语义明确：**仅 GIVEUP（watchdog 达
+`--max-restarts` 仍未跑完）计入失败、返回 1**；SUSPECT（有 `failed_pages` 但 `rc==0` 跑完）不影响返回码，
+对齐 patents（`return 0 if failed == 0 else 1`，`failed` 指异常/崩溃而非自检不通过）——SUSPECT 是需要人工
+复核的产物，不是批处理本身失败。
 
 ## 8. 测试策略
 
@@ -121,8 +149,9 @@ def _already_done(out_root: Path, stem: str) -> bool:
 - `batch.py` 自身单测：像 `test_watchdog.py` 一样给 `watchdog.run_until_done` 注入假 `runner`
   ——`batch.py` 里驱动每本书的函数接受可选 `runner` 参数并透传给 `wd.run_until_done(argv, max_restarts=..., runner=runner)`，
   默认 `None`（真实场景走真子进程）。单测用假 `runner` + 临时目录预置 `manifest.json`/`_deferred_born_digital` 标记，
-  验证：`discover()` 展开逻辑（文件/目录/多个/去重）、`--resume` 跳过判断（两条路径）、`--limit` 截断、
-  汇总计数正确、返回码正确。全程无真子进程、无真 GPU。
+  验证：`discover()` 展开逻辑（文件/目录/多个/去重/跨目录同名 stem 硬失败）、`--resume` 跳过判断
+  （指纹/DPI 失配不跳、毒页豁免但瞬时失败页不豁免）、`--limit` 截断顺序、汇总计数正确、返回码正确
+  （仅 GIVEUP 记失败）。全程无真子进程、无真 GPU。
 
 ## 9. 范围外（已确认）
 
