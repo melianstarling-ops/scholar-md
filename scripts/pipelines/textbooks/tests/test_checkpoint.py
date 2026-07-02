@@ -31,6 +31,7 @@ def test_manifest_roundtrip(tmp_path):
     assert loaded["route"] == "A"
     assert loaded["failed_pages"] == []
     assert loaded["in_progress"] is None
+    assert loaded["attempts_by_page"] == {}
     assert loaded["restarts"] == 0
     assert "updated" in loaded
 
@@ -124,55 +125,68 @@ def test_record_failure(tmp_path):
     assert m["failed_pages"] == [{"page": 5, "error": "CUDA oom", "kind": "page-exception"}]
 
 
-def test_set_in_progress_first_and_retry(tmp_path):
+def test_set_in_progress_sets_page():
     m = cp.new_manifest("b.pdf", {"page_count": 3, "size_bytes": 1}, 150, "A")
     cp.set_in_progress(m, 7)
-    assert m["in_progress"] == {"page": 7, "attempts": 1}
-    cp.set_in_progress(m, 7)                       # 同页重试
-    assert m["in_progress"] == {"page": 7, "attempts": 2}
-    cp.set_in_progress(m, 8)                       # 换页 → 重置
-    assert m["in_progress"] == {"page": 8, "attempts": 1}
+    assert m["in_progress"] == 7
+    cp.set_in_progress(m, 8)
+    assert m["in_progress"] == 8
 
 
-def test_clear_in_progress(tmp_path):
+def test_clear_in_progress():
     m = cp.new_manifest("b.pdf", {"page_count": 3, "size_bytes": 1}, 150, "A")
     cp.set_in_progress(m, 7)
     cp.clear_in_progress(m)
     assert m["in_progress"] is None
 
 
-def test_resolve_poison_marks_failed_over_threshold(tmp_path):
-    work = str(tmp_path / "_work")
-    os.makedirs(work)
+def test_resolve_poison_marks_failed_at_threshold(tmp_path):
+    work = str(tmp_path / "_work"); os.makedirs(work)
     m = cp.new_manifest("b.pdf", {"page_count": 3, "size_bytes": 1}, 150, "A")
-    m["in_progress"] = {"page": 2, "attempts": cp.MAX_HARD_ATTEMPTS}   # 该页无 res.json
-    cp.resolve_poison(m, work)
+    m["in_progress"] = 2
+    m["attempts_by_page"] = {"2": cp.MAX_HARD_ATTEMPTS - 1}   # 差一次到阈值
+    cp.resolve_poison(m, work)                                # 这次再崩 → 达阈值
     assert m["in_progress"] is None
+    assert m["attempts_by_page"]["2"] == cp.MAX_HARD_ATTEMPTS
     assert m["failed_pages"] == [{"page": 2, "error": "process killed repeatedly",
                                   "kind": "process-killed"}]
 
 
-def test_resolve_poison_keeps_under_threshold(tmp_path):
-    work = str(tmp_path / "_work")
-    os.makedirs(work)
+def test_resolve_poison_increments_under_threshold(tmp_path):
+    work = str(tmp_path / "_work"); os.makedirs(work)
     m = cp.new_manifest("b.pdf", {"page_count": 3, "size_bytes": 1}, 150, "A")
-    m["in_progress"] = {"page": 2, "attempts": 1}
+    m["in_progress"] = 2                                      # attempts_by_page 为空
     cp.resolve_poison(m, work)
-    assert m["in_progress"] == {"page": 2, "attempts": 1}   # 保留待重试
+    assert m["attempts_by_page"]["2"] == 1
+    assert m["in_progress"] is None                          # 清除,循环会重试
     assert m["failed_pages"] == []
 
 
 def test_resolve_poison_page_actually_done(tmp_path):
     work = str(tmp_path / "_work")
-    _write_res(work, 2, [])                                 # 崩在写完之后
+    _write_res(work, 2, [])                                   # 崩在写完之后
     m = cp.new_manifest("b.pdf", {"page_count": 3, "size_bytes": 1}, 150, "A")
-    m["in_progress"] = {"page": 2, "attempts": 1}
+    m["in_progress"] = 2
     cp.resolve_poison(m, work)
-    assert m["in_progress"] is None                        # 已完成 → 仅清标记
+    assert m["in_progress"] is None                          # 已完成 → 仅清标记
     assert m["failed_pages"] == []
+    assert m["attempts_by_page"].get("2") is None            # 未计数
 
 
 def test_resolve_poison_noop_when_none(tmp_path):
     m = cp.new_manifest("b.pdf", {"page_count": 3, "size_bytes": 1}, 150, "A")
     cp.resolve_poison(m, str(tmp_path))
     assert m["in_progress"] is None
+
+
+def test_resolve_poison_accumulates_across_runs(tmp_path):
+    # 关键回归:跨轮累积到阈值,不被其它页的 set_in_progress 重置
+    work = str(tmp_path / "_work"); os.makedirs(work)
+    m = cp.new_manifest("b.pdf", {"page_count": 3, "size_bytes": 1}, 150, "A")
+    m["in_progress"] = 2
+    cp.resolve_poison(m, work)                    # run1 崩残留 → n=1 <阈值
+    assert m["attempts_by_page"]["2"] == 1 and m["failed_pages"] == []
+    cp.set_in_progress(m, 2)                      # run2 循环重试该页(breadcrumb)
+    cp.resolve_poison(m, work)                    # 又崩 → n=2 达阈值 → 毒页
+    assert m["attempts_by_page"]["2"] == cp.MAX_HARD_ATTEMPTS
+    assert [f["page"] for f in m["failed_pages"]] == [2]

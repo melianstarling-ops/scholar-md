@@ -181,9 +181,11 @@ def test_convert_poison_page_skipped_on_startup(tmp_path, monkeypatch):
     out = str(tmp_path / "out")
     work = os.path.join(out, "scan", "_work")
     os.makedirs(work, exist_ok=True)
-    # 模拟:第 2 页已硬崩进程 MAX 次(in_progress 残留、该页无 res.json)
+    # 模拟:第 2 页已硬崩进程 MAX-1 次,残留 in_progress(该页无 res.json);
+    # 本次 startup resolve_poison 再记一次 → 达阈值判毒页
     m = cp.new_manifest(pdf, cp.pdf_fingerprint(pdf), 100, "A")
-    m["in_progress"] = {"page": 2, "attempts": cp.MAX_HARD_ATTEMPTS}
+    m["in_progress"] = 2
+    m["attempts_by_page"] = {"2": cp.MAX_HARD_ATTEMPTS - 1}
     cp.save_manifest(work, m)
     res = cv.convert_pdf(pdf, out, dpi=100)
     # 第 2 页被判毒页跳过,进 failed_pages(process-killed),1、3 正常
@@ -215,3 +217,26 @@ def test_convert_failed_pages_deduped_across_runs(tmp_path, monkeypatch):
     res = cv.convert_pdf(pdf, out, dpi=100)           # run2: p1 再次失败
     pages = [f["page"] for f in res["failed_pages"]]
     assert pages.count(1) == 1                        # 只留一条,不累积
+
+
+def test_convert_poison_not_reset_by_earlier_failing_page(tmp_path, monkeypatch):
+    # 更靠前的持续失败页不重置毒页计数;毒页之后的页仍被转换
+    pdf = _make_scan_pdf(tmp_path, 3)
+    def behavior(page):
+        if page == 1:
+            raise RuntimeError("p1 always fails")
+        return _one_text_block(page)
+    _stub_engine(monkeypatch, behavior)
+    out = str(tmp_path / "out")
+    work = os.path.join(out, "scan", "_work")
+    os.makedirs(work, exist_ok=True)
+    m = cp.new_manifest(pdf, cp.pdf_fingerprint(pdf), 100, "A")
+    m["in_progress"] = 2
+    m["attempts_by_page"] = {"2": cp.MAX_HARD_ATTEMPTS - 1}   # 差一次到阈值
+    cp.save_manifest(work, m)
+    res = cv.convert_pdf(pdf, out, dpi=100)                   # startup: page2 达阈值→毒页跳过
+    kinds = {f["page"]: f["kind"] for f in res["failed_pages"]}
+    assert kinds.get(2) == "process-killed"
+    assert kinds.get(1) == "page-exception"
+    md = open(res["md_path"], encoding="utf-8").read()
+    assert "page 3 content" in md                            # 毒页之后仍转换

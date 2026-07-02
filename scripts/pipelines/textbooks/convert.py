@@ -58,6 +58,14 @@ def convert_pdf(pdf_path: str, out_dir: str | None = None,
     cp.resolve_poison(manifest, work_dir)
     cp.save_manifest(work_dir, manifest)
 
+    # 清理上次崩溃残留的 PNG(磁盘有界:_work 内不应留存 PNG)
+    for fn in os.listdir(work_dir):
+        if fn.startswith("page_") and fn.endswith(".png"):
+            try:
+                os.remove(os.path.join(work_dir, fn))
+            except OSError:
+                pass
+
     total = manifest["fingerprint"]["page_count"]
     poisoned = {f["page"] for f in manifest["failed_pages"]
                 if f["kind"] == "process-killed"}
@@ -82,7 +90,8 @@ def convert_pdf(pdf_path: str, out_dir: str | None = None,
                 os.remove(png)                        # 磁盘有界:predict 后即删
         cp.clear_in_progress(manifest)
         cp.save_manifest(work_dir, manifest)
-        done += 1
+        if cp.is_page_done(work_dir, page):
+            done += 1
         durations.append(time.time() - t)
         avg = sum(durations) / len(durations)
         eta_h = avg * (total - done) / 3600

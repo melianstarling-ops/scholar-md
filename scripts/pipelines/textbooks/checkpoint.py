@@ -52,6 +52,7 @@ def new_manifest(pdf_path: str, fingerprint: dict, dpi: int, route: str) -> dict
         "route": route,
         "failed_pages": [],
         "in_progress": None,
+        "attempts_by_page": {},
         "restarts": 0,
     }
 
@@ -114,9 +115,7 @@ def record_failure(manifest: dict, page: int, error: str, kind: str) -> None:
 
 
 def set_in_progress(manifest: dict, page: int) -> None:
-    ip = manifest.get("in_progress")
-    attempts = ip["attempts"] + 1 if ip and ip.get("page") == page else 1
-    manifest["in_progress"] = {"page": page, "attempts": attempts}
+    manifest["in_progress"] = page
 
 
 def clear_in_progress(manifest: dict) -> None:
@@ -125,14 +124,16 @@ def clear_in_progress(manifest: dict) -> None:
 
 def resolve_poison(manifest: dict, work_dir: str,
                    max_hard_attempts: int = MAX_HARD_ATTEMPTS) -> None:
-    ip = manifest.get("in_progress")
-    if not ip:
+    page = manifest.get("in_progress")
+    if page is None:
         return
-    page = ip["page"]
     if is_page_done(work_dir, page):        # 崩在写完 res.json 之后 → 其实已完成
         manifest["in_progress"] = None
         return
-    if ip["attempts"] >= max_hard_attempts:  # 反复硬崩进程 → 判毒页,跳过
+    # 进程崩在该页且未完成 → 记一次硬崩(计数与页处理顺序解耦)
+    attempts = manifest.setdefault("attempts_by_page", {})
+    n = attempts.get(str(page), 0) + 1
+    attempts[str(page)] = n
+    if n >= max_hard_attempts:              # 反复硬崩进程 → 判毒页,跳过
         record_failure(manifest, page, "process killed repeatedly", "process-killed")
-        manifest["in_progress"] = None
-    # 否则保留 in_progress,循环会重试该页
+    manifest["in_progress"] = None          # 清除;未达阈值则主循环会重试该页
