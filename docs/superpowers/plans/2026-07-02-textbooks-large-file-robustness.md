@@ -906,40 +906,83 @@ def test_convert_in_progress_cleared_after_success(tmp_path, monkeypatch):
     cv.convert_pdf(pdf, out, dpi=100)
     m = cp.load_manifest(os.path.join(out, "scan", "_work"))
     assert m["in_progress"] is None      # 正常跑完不残留 in_progress
+
+
+def test_convert_failed_pages_deduped_across_runs(tmp_path, monkeypatch):
+    # 同页跨多次运行反复失败(page-exception)不应在 failed_pages 累积重复条目
+    pdf = _make_scan_pdf(tmp_path, 2)
+    def behavior(page):
+        if page == 1:
+            raise RuntimeError("always fails p1")
+        return _one_text_block(page)
+    _stub_engine(monkeypatch, behavior)
+    out = str(tmp_path / "out")
+    cv.convert_pdf(pdf, out, dpi=100)                 # run1: p1 失败
+    res = cv.convert_pdf(pdf, out, dpi=100)           # run2: p1 再次失败
+    pages = [f["page"] for f in res["failed_pages"]]
+    assert pages.count(1) == 1                        # 只留一条,不累积
 ```
 
 - [ ] **Step 2: Run tests to verify they fail**
 
-Run: `.venv-textbooks/Scripts/python -m pytest scripts/pipelines/textbooks/tests/test_convert.py -v -k poison`
-Expected: FAIL（第 2 页未被跳过 → 无 process-killed 记录）
+Run: `.venv-textbooks/Scripts/python -m pytest scripts/pipelines/textbooks/tests/test_convert.py -v -k "poison or deduped"`
+Expected: FAIL（第 2 页未被跳过 → 无 process-killed 记录；重复条目未去重）
 
 - [ ] **Step 3: Implement**
 
-在 `convert.py` 的 `convert_pdf` 中，指纹校验块之后、`total = ...` 之前插入毒页解析：
+> 注意：Task 5(含 review 修复)已把 `convert_pdf` 的循环改成 `png = None` 初始化 + `pdf_page_to_png` 在
+> try 内 + `finally: if png and os.path.exists(png)`,并在 assemble 前加了 failed_pages 清理。本任务在此
+> **已修复版**基础上增量:加毒页 startup 解析、循环包 in_progress、todo 排除毒页、把 failed_pages 清理升级为
+> 去重。为避免歧义,下面给出 `convert_pdf` 的**最终完整形态**——用它整体替换现有 `convert_pdf`
+> 函数(assemble/_register_deferred/main 不变)：
 
 ```python
+def convert_pdf(pdf_path: str, out_dir: str | None = None,
+                dpi: int = cp.DEFAULT_DPI) -> dict:
+    stem = os.path.splitext(os.path.basename(pdf_path))[0]
+    out_dir = out_dir or os.path.dirname(os.path.abspath(pdf_path))
+    route = triage(pdf_path)
+    if route == "B":
+        return _register_deferred(pdf_path, out_dir, stem)
+
+    doc_out = os.path.join(out_dir, stem)
+    work_dir = os.path.join(doc_out, "_work")
+
+    # 指纹校验:源或 DPI 变 → 清空全新跑
+    manifest = cp.load_manifest(work_dir)
+    if manifest is None or not cp.fingerprint_ok(manifest, pdf_path, dpi):
+        if manifest is not None:
+            print(f"[textbooks] 指纹失配(源或DPI变),清空 {work_dir} 全新跑")
+        cp.reset_work_dir(work_dir)
+        manifest = cp.new_manifest(pdf_path, cp.pdf_fingerprint(pdf_path), dpi, route)
+        cp.save_manifest(work_dir, manifest)
+
+    # 毒页 startup 解析:上次进程崩在某页且已达硬尝试上限 → 标 process-killed
     cp.resolve_poison(manifest, work_dir)
     cp.save_manifest(work_dir, manifest)
-```
 
-并把主循环体改为（predict 前写 in_progress、成功/捕获后清）：
-
-```python
+    total = manifest["fingerprint"]["page_count"]
+    poisoned = {f["page"] for f in manifest["failed_pages"]
+                if f["kind"] == "process-killed"}
+    todo = [p for p in cp.pages_todo(work_dir, total) if p not in poisoned]
+    done = sum(1 for i in range(1, total + 1) if cp.is_page_done(work_dir, i))
+    durations: list[float] = []
     for page in todo:
         t = time.time()
-        cp.set_in_progress(manifest, page)
+        cp.set_in_progress(manifest, page)   # predict 前留痕:进程硬崩后可检出毒页
         cp.save_manifest(work_dir, manifest)
-        png = pdf_page_to_png(pdf_path, page, work_dir, dpi=dpi)
+        png = None
         try:
-            blocks = predict_page(png, work_dir)
+            png = pdf_page_to_png(pdf_path, page, work_dir, dpi=dpi)
+            blocks = predict_page(png, work_dir)   # 非空时 engine 已落 res.json
             if not blocks and not cp.is_page_done(work_dir, page):
-                cp.write_empty_page(work_dir, page)
+                cp.write_empty_page(work_dir, page)   # 空白页显式标记完成
         except Exception as e:                        # noqa: BLE001 坏页隔离
             cp.record_failure(manifest, page, f"{type(e).__name__}: {e}",
                               "page-exception")
         finally:
-            if os.path.exists(png):
-                os.remove(png)
+            if png and os.path.exists(png):
+                os.remove(png)                        # 磁盘有界:predict 后即删
         cp.clear_in_progress(manifest)
         cp.save_manifest(work_dir, manifest)
         done += 1
@@ -949,20 +992,31 @@ Expected: FAIL（第 2 页未被跳过 → 无 process-killed 记录）
         nfail = len(manifest["failed_pages"])
         print(f"[page {page}/{total}] {durations[-1]:.0f}s "
               f"(完成 {done} 失败 {nfail} ETA {eta_h:.1f}h)")
-```
 
-> 注意：`todo` 在 `resolve_poison` 之后计算——毒页被移入 failed_pages 但其页号仍会出现在 `pages_todo`（无 res.json）。为避免重跑已判定的毒页，改 `todo` 计算为排除已记 failed 的 process-killed 页：
+    # 陈旧失败清理 + 去重:已完成的页移除;同页多次失败只留最后一条(含 process-killed)
+    dedup: dict[int, dict] = {}
+    for f in manifest["failed_pages"]:
+        if not cp.is_page_done(work_dir, f["page"]):
+            dedup[f["page"]] = f
+    manifest["failed_pages"] = list(dedup.values())
 
-```python
-    poisoned = {f["page"] for f in manifest["failed_pages"]
-                if f["kind"] == "process-killed"}
-    todo = [p for p in cp.pages_todo(work_dir, total) if p not in poisoned]
+    # 从检查点重组(每次运行都做,部分完成也产出部分 md)
+    md, all_blocks = assemble(work_dir, total)
+    os.makedirs(doc_out, exist_ok=True)
+    md_path = os.path.join(doc_out, stem + ".md")
+    with open(md_path, "w", encoding="utf-8") as f:
+        f.write(md)
+    check = block_coverage(all_blocks, md)
+    check["katex_incompat"] = katex_incompat_scan(md)
+    cp.save_manifest(work_dir, manifest)
+    return {"route": route, "md_path": md_path, "selfcheck": check,
+            "failed_pages": manifest["failed_pages"]}
 ```
 
 - [ ] **Step 4: Run tests to verify they pass**
 
 Run: `.venv-textbooks/Scripts/python -m pytest scripts/pipelines/textbooks/tests/test_convert.py -v`
-Expected: PASS（Task5 的 8 个 + 本任务 2 个）
+Expected: PASS（Task5 的 9 个 + 本任务 3 个 = 12）
 
 - [ ] **Step 5: Commit**
 
