@@ -240,3 +240,34 @@ def test_convert_poison_not_reset_by_earlier_failing_page(tmp_path, monkeypatch)
     assert kinds.get(1) == "page-exception"
     md = open(res["md_path"], encoding="utf-8").read()
     assert "page 3 content" in md                            # 毒页之后仍转换
+
+
+def test_convert_writes_selfcheck_json_by_default(tmp_path, monkeypatch):
+    pdf = _make_scan_pdf(tmp_path, 2)
+    _stub_engine(monkeypatch, _one_text_block)
+    res = cv.convert_pdf(pdf, str(tmp_path / "out"), dpi=100)
+    selfcheck_path = os.path.join(str(tmp_path / "out"), "scan", "scan_selfcheck.json")
+    assert os.path.exists(selfcheck_path)
+    with open(selfcheck_path, encoding="utf-8") as f:
+        on_disk = json.load(f)
+    assert on_disk == res["selfcheck"]
+
+
+def test_convert_no_selfcheck_json_when_disabled(tmp_path, monkeypatch):
+    pdf = _make_scan_pdf(tmp_path, 2)
+    _stub_engine(monkeypatch, _one_text_block)
+    cv.convert_pdf(pdf, str(tmp_path / "out"), dpi=100, write_selfcheck=False)
+    selfcheck_path = os.path.join(str(tmp_path / "out"), "scan", "scan_selfcheck.json")
+    assert not os.path.exists(selfcheck_path)
+
+
+def test_convert_cli_no_selfcheck_json_forwards_flag(monkeypatch):
+    captured = {}
+    def fake_convert_pdf(pdf_path, out_dir, dpi=150, write_selfcheck=True):
+        captured["write_selfcheck"] = write_selfcheck
+        return {"route": "A", "md_path": "x.md",
+                "selfcheck": {"total": 0, "in_md": 0, "missing": []}, "failed_pages": []}
+    monkeypatch.setattr(cv, "convert_pdf", fake_convert_pdf)
+    monkeypatch.setattr("sys.argv", ["convert.py", "--src", "x.pdf", "--no-selfcheck-json"])
+    cv.main()
+    assert captured["write_selfcheck"] is False

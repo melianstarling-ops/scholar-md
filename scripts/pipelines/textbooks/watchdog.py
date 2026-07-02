@@ -37,10 +37,14 @@ def main() -> None:
     ap.add_argument("--dpi", type=int, default=cp.DEFAULT_DPI, help="栅格化 DPI(默认150)")
     ap.add_argument("--max-restarts", type=int, default=cp.MAX_RESTARTS,
                     help="累计重启兜底上限")
+    ap.add_argument("--no-selfcheck-json", action="store_true",
+                    help="不写 <stem>_selfcheck.json(转发给 convert.py)")
     args = ap.parse_args()
     argv = ["--src", args.src, "--dpi", str(args.dpi)]
     if args.out:
         argv += ["--out", args.out]
+    if args.no_selfcheck_json:
+        argv.append("--no-selfcheck-json")
     rc = run_until_done(argv, max_restarts=args.max_restarts)
     sys.exit(rc)
 

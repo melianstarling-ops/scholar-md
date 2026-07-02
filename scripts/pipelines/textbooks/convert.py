@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import argparse
+import json
 import os
 import time
 
@@ -35,7 +36,7 @@ def _register_deferred(pdf_path: str, out_dir: str, stem: str) -> dict:
 
 
 def convert_pdf(pdf_path: str, out_dir: str | None = None,
-                dpi: int = cp.DEFAULT_DPI) -> dict:
+                dpi: int = cp.DEFAULT_DPI, write_selfcheck: bool = True) -> dict:
     stem = os.path.splitext(os.path.basename(pdf_path))[0]
     out_dir = out_dir or os.path.dirname(os.path.abspath(pdf_path))
     route = triage(pdf_path)
@@ -114,6 +115,10 @@ def convert_pdf(pdf_path: str, out_dir: str | None = None,
         f.write(md)
     check = block_coverage(all_blocks, md)
     check["katex_incompat"] = katex_incompat_scan(md)
+    if write_selfcheck:
+        selfcheck_path = os.path.join(doc_out, stem + "_selfcheck.json")
+        with open(selfcheck_path, "w", encoding="utf-8") as f:
+            json.dump(check, f, ensure_ascii=False, indent=2)
     cp.save_manifest(work_dir, manifest)
     return {"route": route, "md_path": md_path, "selfcheck": check,
             "failed_pages": manifest["failed_pages"]}
@@ -124,8 +129,11 @@ def main() -> None:
     ap.add_argument("--src", required=True, help="PDF 文件路径")
     ap.add_argument("--out", default=None, help="输出目录(默认就地)")
     ap.add_argument("--dpi", type=int, default=cp.DEFAULT_DPI, help="栅格化 DPI(默认150)")
+    ap.add_argument("--no-selfcheck-json", action="store_true",
+                    help="不写 <stem>_selfcheck.json(控制台摘要仍输出)")
     args = ap.parse_args()
-    res = convert_pdf(args.src, args.out, dpi=args.dpi)
+    res = convert_pdf(args.src, args.out, dpi=args.dpi,
+                      write_selfcheck=not args.no_selfcheck_json)
     print(f"[route={res['route']}] md={res['md_path']}")
     if res.get("failed_pages"):
         print(f"[textbooks] 失败页 {len(res['failed_pages'])}:",

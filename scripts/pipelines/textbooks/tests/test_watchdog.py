@@ -1,3 +1,4 @@
+import pytest
 from scripts.pipelines.textbooks import watchdog as wd
 
 
@@ -34,3 +35,28 @@ def test_counts_restarts_not_first_run():
     wd.run_until_done(["--src", "x.pdf"], max_restarts=3, runner=runner)
     # 首跑 + 3 次重启 = 4 次调用
     assert len(calls) == 4
+
+
+def test_main_forwards_no_selfcheck_json_flag(monkeypatch):
+    captured = {}
+    def fake_run_until_done(argv, max_restarts):
+        captured["argv"] = argv
+        return 0
+    monkeypatch.setattr(wd, "run_until_done", fake_run_until_done)
+    monkeypatch.setattr("sys.argv", ["watchdog.py", "--src", "x.pdf", "--no-selfcheck-json"])
+    with pytest.raises(SystemExit) as exc:
+        wd.main()
+    assert exc.value.code == 0
+    assert "--no-selfcheck-json" in captured["argv"]
+
+
+def test_main_omits_no_selfcheck_json_flag_by_default(monkeypatch):
+    captured = {}
+    def fake_run_until_done(argv, max_restarts):
+        captured["argv"] = argv
+        return 0
+    monkeypatch.setattr(wd, "run_until_done", fake_run_until_done)
+    monkeypatch.setattr("sys.argv", ["watchdog.py", "--src", "x.pdf"])
+    with pytest.raises(SystemExit):
+        wd.main()
+    assert "--no-selfcheck-json" not in captured["argv"]
