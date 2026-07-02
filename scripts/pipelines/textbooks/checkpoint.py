@@ -107,3 +107,32 @@ def load_page_blocks(work_dir: str, page: int) -> list[dict]:
 
 def pages_todo(work_dir: str, total: int) -> list[int]:
     return [i for i in range(1, total + 1) if not is_page_done(work_dir, i)]
+
+
+def record_failure(manifest: dict, page: int, error: str, kind: str) -> None:
+    manifest["failed_pages"].append({"page": page, "error": error, "kind": kind})
+
+
+def set_in_progress(manifest: dict, page: int) -> None:
+    ip = manifest.get("in_progress")
+    attempts = ip["attempts"] + 1 if ip and ip.get("page") == page else 1
+    manifest["in_progress"] = {"page": page, "attempts": attempts}
+
+
+def clear_in_progress(manifest: dict) -> None:
+    manifest["in_progress"] = None
+
+
+def resolve_poison(manifest: dict, work_dir: str,
+                   max_hard_attempts: int = MAX_HARD_ATTEMPTS) -> None:
+    ip = manifest.get("in_progress")
+    if not ip:
+        return
+    page = ip["page"]
+    if is_page_done(work_dir, page):        # 崩在写完 res.json 之后 → 其实已完成
+        manifest["in_progress"] = None
+        return
+    if ip["attempts"] >= max_hard_attempts:  # 反复硬崩进程 → 判毒页,跳过
+        record_failure(manifest, page, "process killed repeatedly", "process-killed")
+        manifest["in_progress"] = None
+    # 否则保留 in_progress,循环会重试该页
