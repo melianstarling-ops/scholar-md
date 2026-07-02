@@ -10,11 +10,14 @@
 """
 from __future__ import annotations
 
+import argparse
+import json
 import os
 import sys
 from pathlib import Path
 
 from scripts.pipelines.textbooks import checkpoint as cp
+from scripts.pipelines.textbooks.watchdog import run_until_done
 
 PROJECT_ROOT = Path(__file__).resolve().parents[3]
 DEFAULT_SOURCE_ROOT = Path(
@@ -71,3 +74,111 @@ def _already_done(out_root: Path, pdf_path: Path, dpi: int) -> bool:
     poisoned = {f["page"] for f in manifest["failed_pages"] if f["kind"] == "process-killed"}
     todo = [p for p in cp.pages_todo(str(work_dir), total) if p not in poisoned]
     return not todo
+
+
+def _job_argv(pdf: Path, out_root: Path, dpi: int, no_selfcheck_json: bool) -> list[str]:
+    argv = ["--src", str(pdf), "--out", str(out_root), "--dpi", str(dpi)]
+    if no_selfcheck_json:
+        argv.append("--no-selfcheck-json")
+    return argv
+
+
+def _read_summary(out_root: Path, pdf: Path) -> dict:
+    """跑完一本书(rc==0)后从磁盘读回结构化结果,供汇总报告用(拿不到 Python 返回值)。"""
+    deferred_marker = out_root / "_deferred_born_digital" / f"{pdf.stem}.txt"
+    if deferred_marker.exists():
+        return {"stem": pdf.stem, "status": "B", "route": "B",
+                "failed_pages": 0, "selfcheck": None}
+    work_dir = out_root / pdf.stem / "_work"
+    manifest = cp.load_manifest(str(work_dir))
+    failed_pages = manifest["failed_pages"] if manifest else []
+    route = manifest["route"] if manifest else "?"
+    selfcheck_path = out_root / pdf.stem / f"{pdf.stem}_selfcheck.json"
+    selfcheck = None
+    if selfcheck_path.exists():
+        with open(selfcheck_path, encoding="utf-8") as f:
+            selfcheck = json.load(f)
+    status = "SUSPECT" if failed_pages else "OK"
+    return {"stem": pdf.stem, "status": status, "route": route,
+            "failed_pages": len(failed_pages), "selfcheck": selfcheck}
+
+
+def run(src_paths: list[str], out: str | None = None, dpi: int = cp.DEFAULT_DPI,
+        resume: bool = False, limit: int | None = None,
+        max_restarts: int = cp.MAX_RESTARTS, no_selfcheck_json: bool = False,
+        runner=None) -> tuple[int, list[dict]]:
+    pdfs = discover(src_paths)
+    if limit:
+        pdfs = pdfs[:limit]
+    out_root = Path(out).resolve() if out else DEFAULT_OUTPUT_ROOT
+    out_root.mkdir(parents=True, exist_ok=True)
+
+    results: list[dict] = []
+    n_giveup = 0
+    for pdf in pdfs:
+        if resume and _already_done(out_root, pdf, dpi):
+            print(f"  [SKIP] {pdf.stem}")
+            results.append({"stem": pdf.stem, "status": "SKIP"})
+            continue
+        argv = _job_argv(pdf, out_root, dpi, no_selfcheck_json)
+        rc = run_until_done(argv, max_restarts=max_restarts, runner=runner)
+        if rc != 0:
+            n_giveup += 1
+            print(f"  [GIVEUP] {pdf.stem}")
+            results.append({"stem": pdf.stem, "status": "GIVEUP"})
+            continue
+        summary = _read_summary(out_root, pdf)
+        results.append(summary)
+        if summary["status"] == "B":
+            print(f"  [B] {pdf.stem} — 已登记 deferred")
+        else:
+            cov = ""
+            if summary["selfcheck"]:
+                c = summary["selfcheck"]
+                cov = f" coverage={c['in_md']}/{c['total']}"
+            print(f"  [{summary['status']}] {pdf.stem} — route={summary['route']} "
+                  f"failed_pages={summary['failed_pages']}{cov}")
+
+    n_ok = sum(1 for r in results if r["status"] in ("OK", "B"))
+    n_suspect = sum(1 for r in results if r["status"] == "SUSPECT")
+    n_skip = sum(1 for r in results if r["status"] == "SKIP")
+    print(f"\n{'=' * 56}\n批处理完成: {n_ok} OK/B / {n_suspect} SUSPECT / "
+          f"{n_giveup} GIVEUP / {n_skip} SKIP → {out_root}")
+    return (1 if n_giveup else 0), results
+
+
+def main() -> int:
+    ap = argparse.ArgumentParser(description="textbooks 批量入口(自适应 --src/--out,watchdog 子进程隔离)")
+    ap.add_argument("--src", nargs="*", default=None,
+                    help="PDF 文件/目录/多个;省略回退 env SCHOLARMD_TEXTBOOKS_SRC 或仓库 02_Source/textbooks/")
+    ap.add_argument("--out", default=None, help="产物根目录(省略=仓库 03_Output/textbooks/)")
+    ap.add_argument("--dpi", type=int, default=cp.DEFAULT_DPI, help="栅格化 DPI(默认150)")
+    ap.add_argument("--resume", action="store_true", help="跳过已全部跑完的书")
+    ap.add_argument("--limit", type=int, default=None, help="只处理发现列表的前 N 本(调试/小样验证)")
+    ap.add_argument("--max-restarts", type=int, default=cp.MAX_RESTARTS,
+                    help="透传给每本书 watchdog 的累计重启上限")
+    ap.add_argument("--no-selfcheck-json", action="store_true", help="不写 <stem>_selfcheck.json")
+    ap.add_argument("--list", action="store_true", help="只列出待处理 PDF,不转换")
+    args = ap.parse_args()
+
+    src_paths = args.src if args.src else [str(DEFAULT_SOURCE_ROOT)]
+    try:
+        if args.list:
+            pdfs = discover(src_paths)
+            if args.limit:
+                pdfs = pdfs[:args.limit]
+            for p in pdfs:
+                print(f"  {p}")
+            print(f"共 {len(pdfs)} 份 @ {src_paths}")
+            return 0
+        rc, _ = run(src_paths, out=args.out, dpi=args.dpi, resume=args.resume,
+                    limit=args.limit, max_restarts=args.max_restarts,
+                    no_selfcheck_json=args.no_selfcheck_json)
+        return rc
+    except ValueError as e:
+        print(f"[ERROR] {e}", file=sys.stderr)
+        return 1
+
+
+if __name__ == "__main__":
+    sys.exit(main())

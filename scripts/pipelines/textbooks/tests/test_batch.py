@@ -115,3 +115,86 @@ def test_already_done_false_when_page_exception_pending(tmp_path):
     cp.record_failure(m, 2, "transient", "page-exception")
     cp.save_manifest(str(work), m)
     assert bp._already_done(out_root, pdf, 150) is False    # 瞬时失败页仍算未完成,允许重试
+
+
+def test_run_calls_watchdog_once_per_book(tmp_path):
+    d = tmp_path / "src"
+    d.mkdir()
+    (d / "A.pdf").write_bytes(b"%PDF-1.4")
+    (d / "B.pdf").write_bytes(b"%PDF-1.4")
+    calls = []
+    def fake_runner(argv):
+        calls.append(argv)
+        return 0
+    rc, results = bp.run([str(d)], out=str(tmp_path / "out"), runner=fake_runner)
+    assert rc == 0
+    assert len(calls) == 2
+    assert [r["stem"] for r in results] == ["A", "B"]
+
+
+def test_run_reports_giveup_and_nonzero_rc(tmp_path):
+    d = tmp_path / "src"
+    d.mkdir()
+    (d / "A.pdf").write_bytes(b"%PDF-1.4")
+    def fake_runner(argv):
+        return 1   # 永远崩
+    rc, results = bp.run([str(d)], out=str(tmp_path / "out"), max_restarts=2, runner=fake_runner)
+    assert rc == 1
+    assert results[0]["status"] == "GIVEUP"
+
+
+def test_run_resume_skips_done_book_without_spawning(tmp_path):
+    d = tmp_path / "src"
+    d.mkdir()
+    pdf = d / "A.pdf"
+    doc = fitz.open()
+    doc.new_page()
+    doc.save(str(pdf))
+    out_root = tmp_path / "out"
+    work = out_root / "A" / "_work"
+    _mark_page_done(work, 1)
+    cp.save_manifest(str(work),
+                     cp.new_manifest(str(pdf), cp.pdf_fingerprint(str(pdf)), cp.DEFAULT_DPI, "A"))
+    calls = []
+    def fake_runner(argv):
+        calls.append(argv)
+        return 0
+    rc, results = bp.run([str(d)], out=str(out_root), resume=True, runner=fake_runner)
+    assert calls == []
+    assert results[0]["status"] == "SKIP"
+
+
+def test_run_limit_truncates_before_resume(tmp_path):
+    d = tmp_path / "src"
+    d.mkdir()
+    for name in ("A", "B", "C"):
+        (d / f"{name}.pdf").write_bytes(b"%PDF-1.4")
+    calls = []
+    def fake_runner(argv):
+        calls.append(argv)
+        return 0
+    rc, results = bp.run([str(d)], out=str(tmp_path / "out"), limit=1, runner=fake_runner)
+    assert len(results) == 1
+    assert results[0]["stem"] == "A"
+
+
+def test_main_list_flag_prints_pdfs_and_returns_zero(tmp_path, monkeypatch, capsys):
+    d = tmp_path / "src"
+    d.mkdir()
+    (d / "A.pdf").write_bytes(b"%PDF-1.4")
+    monkeypatch.setattr("sys.argv", ["batch.py", "--src", str(d), "--list"])
+    rc = bp.main()
+    assert rc == 0
+    assert "A.pdf" in capsys.readouterr().out
+
+
+def test_main_returns_nonzero_on_stem_collision(tmp_path, monkeypatch):
+    d1 = tmp_path / "s1"
+    d1.mkdir()
+    d2 = tmp_path / "s2"
+    d2.mkdir()
+    (d1 / "A.pdf").write_bytes(b"%PDF-1.4")
+    (d2 / "A.pdf").write_bytes(b"%PDF-1.4")
+    monkeypatch.setattr("sys.argv", ["batch.py", "--src", str(d1), str(d2)])
+    rc = bp.main()
+    assert rc == 1
