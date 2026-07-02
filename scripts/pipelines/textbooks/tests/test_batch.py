@@ -198,3 +198,65 @@ def test_main_returns_nonzero_on_stem_collision(tmp_path, monkeypatch):
     monkeypatch.setattr("sys.argv", ["batch.py", "--src", str(d1), str(d2)])
     rc = bp.main()
     assert rc == 1
+
+
+def test_discover_cross_dir_stem_collision_case_insensitive_raises(tmp_path):
+    d1 = tmp_path / "s1"
+    d1.mkdir()
+    d2 = tmp_path / "s2"
+    d2.mkdir()
+    (d1 / "Book.pdf").write_bytes(b"%PDF-1.4")
+    (d2 / "book.pdf").write_bytes(b"%PDF-1.4")
+    with pytest.raises(ValueError, match="跨目录同名"):
+        bp.discover([str(d1), str(d2)])
+
+
+def test_run_resume_survives_already_done_exception(tmp_path, monkeypatch):
+    d = tmp_path / "src"
+    d.mkdir()
+    (d / "A.pdf").write_bytes(b"%PDF-1.4")
+    (d / "B.pdf").write_bytes(b"%PDF-1.4")
+
+    def raising_already_done(out_root, pdf_path, dpi):
+        raise RuntimeError("simulated corrupt PDF")
+
+    monkeypatch.setattr(bp, "_already_done", raising_already_done)
+    calls = []
+    def fake_runner(argv):
+        calls.append(argv)
+        return 0
+    rc, results = bp.run([str(d)], out=str(tmp_path / "out"), resume=True, runner=fake_runner)
+    assert rc == 0
+    assert len(calls) == 2   # both books still processed, not aborted
+
+
+def test_run_limit_zero_processes_nothing(tmp_path):
+    d = tmp_path / "src"
+    d.mkdir()
+    (d / "A.pdf").write_bytes(b"%PDF-1.4")
+    (d / "B.pdf").write_bytes(b"%PDF-1.4")
+    calls = []
+    def fake_runner(argv):
+        calls.append(argv)
+        return 0
+    rc, results = bp.run([str(d)], out=str(tmp_path / "out"), limit=0, runner=fake_runner)
+    assert results == []
+    assert calls == []
+
+
+def test_run_suspect_book_keeps_rc_zero(tmp_path):
+    d = tmp_path / "src"
+    d.mkdir()
+    pdf = _make_pdf(d, 2, name="A")
+    out_root = tmp_path / "out"
+    work = out_root / "A" / "_work"
+    _mark_page_done(work, 1)
+    m = cp.new_manifest(str(pdf), cp.pdf_fingerprint(str(pdf)), cp.DEFAULT_DPI, "A")
+    cp.record_failure(m, 2, "transient", "page-exception")
+    cp.save_manifest(str(work), m)
+
+    def fake_runner(argv):
+        return 0
+    rc, results = bp.run([str(d)], out=str(out_root), runner=fake_runner)
+    assert results[0]["status"] == "SUSPECT"
+    assert rc == 0

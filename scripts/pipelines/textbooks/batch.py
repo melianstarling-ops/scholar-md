@@ -48,12 +48,13 @@ def discover(src_paths: list[str]) -> list[Path]:
             if pdf in seen:
                 continue
             seen.add(pdf)
-            if pdf.stem in stem_sources and stem_sources[pdf.stem] != pdf:
+            stem_key = pdf.stem.casefold()
+            if stem_key in stem_sources and stem_sources[stem_key] != pdf:
                 raise ValueError(
                     f"跨目录同名 stem 冲突: '{pdf.stem}' 同时来自 "
-                    f"{stem_sources[pdf.stem]} 和 {pdf}"
+                    f"{stem_sources[stem_key]} 和 {pdf}"
                 )
-            stem_sources[pdf.stem] = pdf
+            stem_sources[stem_key] = pdf
             pdfs.append(pdf)
     return pdfs
 
@@ -108,7 +109,7 @@ def run(src_paths: list[str], out: str | None = None, dpi: int = cp.DEFAULT_DPI,
         max_restarts: int = cp.MAX_RESTARTS, no_selfcheck_json: bool = False,
         runner=None) -> tuple[int, list[dict]]:
     pdfs = discover(src_paths)
-    if limit:
+    if limit is not None:
         pdfs = pdfs[:limit]
     out_root = Path(out).resolve() if out else DEFAULT_OUTPUT_ROOT
     out_root.mkdir(parents=True, exist_ok=True)
@@ -116,16 +117,25 @@ def run(src_paths: list[str], out: str | None = None, dpi: int = cp.DEFAULT_DPI,
     results: list[dict] = []
     n_giveup = 0
     for pdf in pdfs:
-        if resume and _already_done(out_root, pdf, dpi):
+        skip = False
+        if resume:
+            try:
+                skip = _already_done(out_root, pdf, dpi)
+            except Exception as e:
+                print(f"  [WARN] {pdf.stem}: --resume 指纹校验失败"
+                      f"({type(e).__name__}: {e}),按未完成处理")
+        if skip:
             print(f"  [SKIP] {pdf.stem}")
-            results.append({"stem": pdf.stem, "status": "SKIP"})
+            results.append({"stem": pdf.stem, "status": "SKIP",
+                             "route": None, "failed_pages": 0, "selfcheck": None})
             continue
         argv = _job_argv(pdf, out_root, dpi, no_selfcheck_json)
         rc = run_until_done(argv, max_restarts=max_restarts, runner=runner)
         if rc != 0:
             n_giveup += 1
             print(f"  [GIVEUP] {pdf.stem}")
-            results.append({"stem": pdf.stem, "status": "GIVEUP"})
+            results.append({"stem": pdf.stem, "status": "GIVEUP",
+                             "route": None, "failed_pages": 0, "selfcheck": None})
             continue
         summary = _read_summary(out_root, pdf)
         results.append(summary)
@@ -165,7 +175,7 @@ def main() -> int:
     try:
         if args.list:
             pdfs = discover(src_paths)
-            if args.limit:
+            if args.limit is not None:
                 pdfs = pdfs[:args.limit]
             for p in pdfs:
                 print(f"  {p}")
