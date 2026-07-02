@@ -14,6 +14,8 @@ import os
 import sys
 from pathlib import Path
 
+from scripts.pipelines.textbooks import checkpoint as cp
+
 PROJECT_ROOT = Path(__file__).resolve().parents[3]
 DEFAULT_SOURCE_ROOT = Path(
     os.environ.get("SCHOLARMD_TEXTBOOKS_SRC", str(PROJECT_ROOT / "02_Source" / "textbooks"))
@@ -51,3 +53,21 @@ def discover(src_paths: list[str]) -> list[Path]:
             stem_sources[pdf.stem] = pdf
             pdfs.append(pdf)
     return pdfs
+
+
+def _already_done(out_root: Path, pdf_path: Path, dpi: int) -> bool:
+    """--resume 跳过判断:B 路(born-digital 登记)不走这个函数,由 main 直接不做短路
+    (triage 便宜、幂等,见设计 §6)。这里只判 A/C 路:指纹/DPI 失配不算 done;
+    毒页(process-killed)不算"未完成"(convert_pdf 自己也不会再碰它),
+    但瞬时失败页(page-exception)仍算未完成,允许下次 --resume 重试。
+    """
+    work_dir = out_root / pdf_path.stem / "_work"
+    manifest = cp.load_manifest(str(work_dir))
+    if manifest is None:
+        return False
+    if not cp.fingerprint_ok(manifest, str(pdf_path), dpi):
+        return False
+    total = manifest["fingerprint"]["page_count"]
+    poisoned = {f["page"] for f in manifest["failed_pages"] if f["kind"] == "process-killed"}
+    todo = [p for p in cp.pages_todo(str(work_dir), total) if p not in poisoned]
+    return not todo
