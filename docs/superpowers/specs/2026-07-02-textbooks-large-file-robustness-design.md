@@ -129,11 +129,14 @@ loop:
 
 **(b) 毒页检测（在 `convert.py` + `checkpoint.py`，防无限重启）**：若某页每次都让**进程整体崩**（非 §3.4 能
 捕获的异常），傻重启会永远卡在这一页。对策：
-- `convert.py` 在调 `predict_page` **之前**，先把 `in_progress = {page: i, attempts: k}` 写进 manifest；
+- `convert.py` 在调 `predict_page` **之前**，先把 `in_progress = i`（**仅面包屑，页号 int**）写进 manifest；
   该页成功/被 §3.4 捕获后**清除** `in_progress`。
-- 进程被硬杀时，manifest 会残留 `in_progress = {page: i}` 且该页无 res.json ⇒ 下次启动时判定"第 i 页崩过进程"，
-  `attempts += 1`。当 `attempts >= MAX_HARD_ATTEMPTS`（如 2）⇒ 把该页移入 `failed_pages`
-  （reason: "process-killed, skipped after N attempts"）并跳过，否则再试一次。
+- 计数**与页处理顺序解耦**：硬崩次数存在独立字段 `attempts_by_page`（`{str(page): n}`），**只在启动的
+  `resolve_poison` 里自增**——进程被硬杀时 manifest 残留 `in_progress = i` 且该页无 res.json ⇒ 下次启动判定
+  "第 i 页崩过进程"，`attempts_by_page[i] += 1`。当 `>= MAX_HARD_ATTEMPTS`（如 2）⇒ 移入 `failed_pages`
+  （kind="process-killed"）并跳过，否则清 `in_progress`、循环重试该页。
+  **⚠️ 关键**：自增必须放在 `resolve_poison`（启动、每进程一次）而非 `set_in_progress`——否则更靠前的持续
+  失败页会在循环里反复覆盖/清空 `in_progress`，把毒页计数重置成 1、永远到不了阈值（此坑由全特性 review 抓出）。
 - 这样进程级毒页也会在有限次后被跳过，看门狗循环必然终止。
 
 **退出码约定**：`convert.py` 页循环正常结束 ⇒ **exit 0**（即使有 failed_pages，失败是记录不是致命）；
@@ -149,18 +152,19 @@ loop:
   "route": "A",
   "completed_pages": [1, 2, 3],
   "failed_pages": [{"page": 47, "error": "CUDA out of memory", "kind": "page-exception"}],
-  "in_progress": {"page": 201, "attempts": 1},
-  "restarts": 3,
+  "in_progress": 201,
+  "attempts_by_page": {"201": 1},
+  "restarts": 0,
   "updated": "2026-07-02T14:03:00"
 }
 ```
 
-> - `dpi` 参与失配判定（§3.3）：请求 dpi ≠ 记录 dpi ⇒ 清空重跑。`completed_pages` 为示意（实际是全部已完成页号）。
-> - `in_progress`：predict 前写、成功/捕获后清；进程被硬杀时残留，用于毒页检测（§3.7）。`kind` 区分
->   "page-exception"（§3.4 捕获）与 "process-killed"（§3.7 毒页超阈值）。`restarts`：看门狗累计重启数。
-
-> `completed_pages` 与磁盘上的 `page_{i}_res.json` 互为冗余校验；判"完成"以 res.json 实际可解析为准，
-> manifest 仅作汇总/审计（避免 manifest 与磁盘漂移时误跳）。
+> - `dpi` 参与失配判定（§3.3）：请求 dpi ≠ 记录 dpi ⇒ 清空重跑。`completed_pages` 已移除——判"完成"以
+>   磁盘 `page_{i:04d}_res.json` 可解析为准（避免 manifest 与磁盘漂移误跳）。
+> - `in_progress`：**页号 int**，predict 前写、成功/捕获后清；进程被硬杀时残留,供毒页检测（§3.7）。
+> - `attempts_by_page`：各页硬崩计数,**仅 `resolve_poison` 启动时自增**（与页序解耦,见 §3.7 关键提示）。
+> - `failed_pages[].kind`：区分 "page-exception"（§3.4 捕获）与 "process-killed"（§3.7 毒页超阈值）；
+>   收尾按页去重、并剔除已完成页。`restarts`：看门狗累计重启数（当前实现仅内存计数,未回写 manifest——审计用途,已知延后项）。
 
 ## 5. CLI / 入口
 
