@@ -54,12 +54,20 @@ def convert_pdf(pdf_path: str, out_dir: str | None = None,
         manifest = cp.new_manifest(pdf_path, cp.pdf_fingerprint(pdf_path), dpi, route)
         cp.save_manifest(work_dir, manifest)
 
+    # 毒页 startup 解析:上次进程崩在某页且已达硬尝试上限 → 标 process-killed
+    cp.resolve_poison(manifest, work_dir)
+    cp.save_manifest(work_dir, manifest)
+
     total = manifest["fingerprint"]["page_count"]
-    todo = cp.pages_todo(work_dir, total)
-    done = total - len(todo)
+    poisoned = {f["page"] for f in manifest["failed_pages"]
+                if f["kind"] == "process-killed"}
+    todo = [p for p in cp.pages_todo(work_dir, total) if p not in poisoned]
+    done = sum(1 for i in range(1, total + 1) if cp.is_page_done(work_dir, i))
     durations: list[float] = []
     for page in todo:
         t = time.time()
+        cp.set_in_progress(manifest, page)   # predict 前留痕:进程硬崩后可检出毒页
+        cp.save_manifest(work_dir, manifest)
         png = None
         try:
             png = pdf_page_to_png(pdf_path, page, work_dir, dpi=dpi)
@@ -69,10 +77,11 @@ def convert_pdf(pdf_path: str, out_dir: str | None = None,
         except Exception as e:                        # noqa: BLE001 坏页隔离
             cp.record_failure(manifest, page, f"{type(e).__name__}: {e}",
                               "page-exception")
-            cp.save_manifest(work_dir, manifest)
         finally:
             if png and os.path.exists(png):
                 os.remove(png)                        # 磁盘有界:predict 后即删
+        cp.clear_in_progress(manifest)
+        cp.save_manifest(work_dir, manifest)
         done += 1
         durations.append(time.time() - t)
         avg = sum(durations) / len(durations)
@@ -81,9 +90,12 @@ def convert_pdf(pdf_path: str, out_dir: str | None = None,
         print(f"[page {page}/{total}] {durations[-1]:.0f}s "
               f"(完成 {done} 失败 {nfail} ETA {eta_h:.1f}h)")
 
-    # 陈旧失败清理:曾失败但续跑后已完成的页,不应再挂在 failed_pages 里
-    manifest["failed_pages"] = [f for f in manifest["failed_pages"]
-                                if not cp.is_page_done(work_dir, f["page"])]
+    # 陈旧失败清理 + 去重:已完成的页移除;同页多次失败只留最后一条(含 process-killed)
+    dedup: dict[int, dict] = {}
+    for f in manifest["failed_pages"]:
+        if not cp.is_page_done(work_dir, f["page"]):
+            dedup[f["page"]] = f
+    manifest["failed_pages"] = list(dedup.values())
 
     # 从检查点重组(每次运行都做,部分完成也产出部分 md)
     md, all_blocks = assemble(work_dir, total)

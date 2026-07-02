@@ -173,3 +173,45 @@ def test_convert_route_B_registers(tmp_path, monkeypatch):
     res = cv.convert_pdf(str(pdf), str(tmp_path / "out"))
     assert res["route"] == "B"
     assert res["md_path"] is None
+
+
+def test_convert_poison_page_skipped_on_startup(tmp_path, monkeypatch):
+    pdf = _make_scan_pdf(tmp_path, 3)
+    _stub_engine(monkeypatch, _one_text_block)
+    out = str(tmp_path / "out")
+    work = os.path.join(out, "scan", "_work")
+    os.makedirs(work, exist_ok=True)
+    # 模拟:第 2 页已硬崩进程 MAX 次(in_progress 残留、该页无 res.json)
+    m = cp.new_manifest(pdf, cp.pdf_fingerprint(pdf), 100, "A")
+    m["in_progress"] = {"page": 2, "attempts": cp.MAX_HARD_ATTEMPTS}
+    cp.save_manifest(work, m)
+    res = cv.convert_pdf(pdf, out, dpi=100)
+    # 第 2 页被判毒页跳过,进 failed_pages(process-killed),1、3 正常
+    kinds = {f["page"]: f["kind"] for f in res["failed_pages"]}
+    assert kinds.get(2) == "process-killed"
+    md = open(res["md_path"], encoding="utf-8").read()
+    assert "page 1 content" in md and "page 3 content" in md
+
+
+def test_convert_in_progress_cleared_after_success(tmp_path, monkeypatch):
+    pdf = _make_scan_pdf(tmp_path, 2)
+    _stub_engine(monkeypatch, _one_text_block)
+    out = str(tmp_path / "out")
+    cv.convert_pdf(pdf, out, dpi=100)
+    m = cp.load_manifest(os.path.join(out, "scan", "_work"))
+    assert m["in_progress"] is None      # 正常跑完不残留 in_progress
+
+
+def test_convert_failed_pages_deduped_across_runs(tmp_path, monkeypatch):
+    # 同页跨多次运行反复失败(page-exception)不应在 failed_pages 累积重复条目
+    pdf = _make_scan_pdf(tmp_path, 2)
+    def behavior(page):
+        if page == 1:
+            raise RuntimeError("always fails p1")
+        return _one_text_block(page)
+    _stub_engine(monkeypatch, behavior)
+    out = str(tmp_path / "out")
+    cv.convert_pdf(pdf, out, dpi=100)                 # run1: p1 失败
+    res = cv.convert_pdf(pdf, out, dpi=100)           # run2: p1 再次失败
+    pages = [f["page"] for f in res["failed_pages"]]
+    assert pages.count(1) == 1                        # 只留一条,不累积
