@@ -21,7 +21,7 @@ def assemble(work_dir: str, total: int) -> tuple[str, list[dict]]:
         blocks = cp.load_page_blocks(work_dir, i)
         all_blocks.extend(blocks)
         page_md = reconstruct_markdown(blocks)
-        if page_md:
+        if page_md.strip():
             md_pages.append(page_md)
     return "\n\n".join(md_pages) + "\n", all_blocks
 
@@ -60,8 +60,9 @@ def convert_pdf(pdf_path: str, out_dir: str | None = None,
     durations: list[float] = []
     for page in todo:
         t = time.time()
-        png = pdf_page_to_png(pdf_path, page, work_dir, dpi=dpi)
+        png = None
         try:
+            png = pdf_page_to_png(pdf_path, page, work_dir, dpi=dpi)
             blocks = predict_page(png, work_dir)   # 非空时 engine 已落 res.json
             if not blocks and not cp.is_page_done(work_dir, page):
                 cp.write_empty_page(work_dir, page)   # 空白页显式标记完成
@@ -70,7 +71,7 @@ def convert_pdf(pdf_path: str, out_dir: str | None = None,
                               "page-exception")
             cp.save_manifest(work_dir, manifest)
         finally:
-            if os.path.exists(png):
+            if png and os.path.exists(png):
                 os.remove(png)                        # 磁盘有界:predict 后即删
         done += 1
         durations.append(time.time() - t)
@@ -79,6 +80,10 @@ def convert_pdf(pdf_path: str, out_dir: str | None = None,
         nfail = len(manifest["failed_pages"])
         print(f"[page {page}/{total}] {durations[-1]:.0f}s "
               f"(完成 {done} 失败 {nfail} ETA {eta_h:.1f}h)")
+
+    # 陈旧失败清理:曾失败但续跑后已完成的页,不应再挂在 failed_pages 里
+    manifest["failed_pages"] = [f for f in manifest["failed_pages"]
+                                if not cp.is_page_done(work_dir, f["page"])]
 
     # 从检查点重组(每次运行都做,部分完成也产出部分 md)
     md, all_blocks = assemble(work_dir, total)

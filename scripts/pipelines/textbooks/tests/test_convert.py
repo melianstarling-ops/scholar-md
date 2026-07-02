@@ -131,6 +131,37 @@ def test_convert_fingerprint_mismatch_wipes(tmp_path, monkeypatch):
     assert "STALE" not in md                            # 旧检查点被清空重跑
 
 
+def test_convert_raster_failure_isolated(tmp_path, monkeypatch):
+    pdf = _make_scan_pdf(tmp_path, 3)
+    _stub_engine(monkeypatch, _one_text_block)
+    orig = cv.pdf_page_to_png
+    def flaky(pdf_path, page, out_dir, dpi=150):
+        if page == 2:
+            raise RuntimeError("raster boom p2")
+        return orig(pdf_path, page, out_dir, dpi=dpi)
+    monkeypatch.setattr(cv, "pdf_page_to_png", flaky)
+    res = cv.convert_pdf(pdf, str(tmp_path / "out"), dpi=100)
+    md = open(res["md_path"], encoding="utf-8").read()
+    assert "page 1 content" in md and "page 3 content" in md      # 其它页照常完成
+    assert [f["page"] for f in res["failed_pages"]] == [2]
+
+
+def test_convert_stale_failure_cleared_on_resume(tmp_path, monkeypatch):
+    pdf = _make_scan_pdf(tmp_path, 2)
+    state = {"fail_p1": True}
+    def behavior(page):
+        if page == 1 and state["fail_p1"]:
+            raise RuntimeError("transient p1")
+        return _one_text_block(page)
+    _stub_engine(monkeypatch, behavior)
+    out = str(tmp_path / "out")
+    res1 = cv.convert_pdf(pdf, out, dpi=100)
+    assert [f["page"] for f in res1["failed_pages"]] == [1]     # 第1趟失败
+    state["fail_p1"] = False
+    res2 = cv.convert_pdf(pdf, out, dpi=100)                     # 续跑,第1页成功
+    assert res2["failed_pages"] == []                           # 陈旧失败被清
+
+
 def test_convert_route_B_registers(tmp_path, monkeypatch):
     # 有优质文本层 → triage 判 B,登记不转
     doc = fitz.open()
