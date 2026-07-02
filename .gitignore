@@ -42,3 +42,7 @@ TODO.md
 
 # --- 本地手工测试临时产物(patents 端到端 smoke 的输入 PDF + 页面 PNG,二进制,不入 git) ---
 _selftest/
+
+# --- pytest 本地 basetemp(本机系统临时目录 ACL 拒绝写入,--basetemp=./.pytest_tmp 兜底,
+#     见 lessons L-T22;纯测试夹具产物,含 tmp_path 生成的假 PDF/检查点,不入 git) ---
+.pytest_tmp/
