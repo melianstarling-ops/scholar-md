@@ -321,8 +321,11 @@ def test_convert_backfills_assets_for_pre_existing_checkpoint(tmp_path, monkeypa
 
 
 def test_convert_missing_assets_reported_when_backfill_impossible(tmp_path, monkeypatch):
-    # pdf_path 指向的文件在补裁时已不存在(源文件被移走等极端场景)→ 补裁失败,
-    # 但不应崩溃,应如实反映在 missing_assets 里
+    # 补裁时重新栅格化该页失败(如源文件损坏/权限问题等极端场景)→ 补裁失败,
+    # 但不应崩溃,应如实反映在 missing_assets 里。
+    # 源 PDF 保持完好(triage 正常通过),page 1 预置为"已完成"检查点,
+    # 使其不进入本次 OCR 循环(裁图钩子不会为它触发)、转而在 assemble() 的
+    # 补裁分支尝试重新栅格化 —— 这里桩掉 pdf_page_to_png 让该次调用失败。
     pdf = _make_scan_pdf(tmp_path, 1)
     _stub_engine(monkeypatch, _one_image_block)
     out = str(tmp_path / "out")
@@ -331,7 +334,11 @@ def test_convert_missing_assets_reported_when_backfill_impossible(tmp_path, monk
     with open(cp.page_res_path(work, 1), "w", encoding="utf-8") as f:
         json.dump({"parsing_res_list": _one_image_block(1)}, f)
     cp.save_manifest(work, cp.new_manifest(pdf, cp.pdf_fingerprint(pdf), 100, "A"))
-    os.remove(pdf)                                   # 源文件消失
+
+    def flaky(pdf_path, page, out_dir, dpi=150):
+        raise RuntimeError("backfill raster boom")
+    monkeypatch.setattr(cv, "pdf_page_to_png", flaky)
+
     res = cv.convert_pdf(pdf, out, dpi=100)
     assert res["selfcheck"]["missing_assets"] == ["page_0001_block_1.png"]
 
