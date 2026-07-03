@@ -86,6 +86,77 @@ def test_golden_paul_english():
     assert r"\displaylimits" not in md                  # KaTeX 不兼容命令已清洗(L-T16)
 
 
+def test_reference_content_kept():
+    blocks = [{"block_label": "reference_content",
+               "block_content": "[1] S. Ramo, Fields and Waves, Wiley, 1984.", "block_order": 1}]
+    md = reconstruct_markdown(blocks)
+    assert "[1] S. Ramo, Fields and Waves, Wiley, 1984." in md
+
+
+def test_abstract_kept():
+    blocks = [{"block_label": "abstract", "block_content": "This is the second edition.", "block_order": 1}]
+    md = reconstruct_markdown(blocks)
+    assert "This is the second edition." in md
+
+
+def test_content_preserves_line_breaks():
+    # content(目录/前言页码列表)逐行有意义,须保留换行,不能挤成一段
+    blocks = [{"block_label": "content", "block_content": "Preface xvii\nIntroduction 1", "block_order": 1}]
+    md = reconstruct_markdown(blocks)
+    assert "Preface xvii  \nIntroduction 1" in md
+
+
+def test_algorithm_wrapped_in_code_fence():
+    blocks = [{"block_label": "algorithm",
+               "block_content": "EXAMPLE\nVS 1 0 PULSE(0 5 0 1N 1N 4N 10N)\n.END", "block_order": 1}]
+    md = reconstruct_markdown(blocks)
+    assert "```\nEXAMPLE\nVS 1 0 PULSE(0 5 0 1N 1N 4N 10N)\n.END\n```" in md
+
+
+def test_doc_title_without_paragraph_title_sibling_is_cover_metadata():
+    # 无 paragraph_title 兄弟块 → 封面元信息,不当标题
+    blocks = [{"block_label": "doc_title", "block_content": "SECOND EDITION\nCLAYTON R. PAUL", "block_order": 1}]
+    md = reconstruct_markdown(blocks)
+    assert "## SECOND EDITION" not in md
+    assert "SECOND EDITION" in md
+    assert "CLAYTON R. PAUL" in md
+
+
+def test_doc_title_with_paragraph_title_sibling_becomes_heading():
+    # 同页有 paragraph_title 兄弟块(章节序号) → doc_title 是被误标的正文章节标题
+    blocks = [
+        {"block_label": "paragraph_title", "block_content": "1", "block_order": 1},
+        {"block_label": "doc_title", "block_content": "INTRODUCTION", "block_order": 2},
+    ]
+    md = reconstruct_markdown(blocks)
+    assert "## INTRODUCTION" in md
+
+
+def test_unknown_label_falls_back_to_plain_content():
+    # 兜底 else:未来出现新 label 时也不能静默丢失
+    blocks = [{"block_label": "some_future_label", "block_content": "future content", "block_order": 1}]
+    md = reconstruct_markdown(blocks)
+    assert "future content" in md
+
+
+def test_unknown_label_warns_to_stderr(capsys):
+    # 兜底分支产出的内容不受 selfcheck 校验(反正会出现在 md 里),唯一能暴露给人看的
+    # 信号只有这条告警——必须点名 label,方便定位是哪种新 label 冒出来了
+    blocks = [{"block_label": "some_future_label", "block_content": "future content", "block_order": 1}]
+    reconstruct_markdown(blocks)
+    err = capsys.readouterr().err
+    assert "some_future_label" in err
+
+
+def test_algorithm_fence_escapes_embedded_triple_backticks():
+    # content 内部若已含三个反引号(未来其他学科教材代码块可能出现),三反引号围栏
+    # 会被提前截断;围栏长度要比 content 内最长的连续反引号串多一个
+    content = "before\n```\nnested\n```\nafter"
+    blocks = [{"block_label": "algorithm", "block_content": content, "block_order": 1}]
+    md = reconstruct_markdown(blocks)
+    assert f"````\n{content}\n````" in md
+
+
 def test_sanitize_latex_strips_displaylimits():
     # \displaylimits 在 $$ 里冗余,删除;KaTeX 才能渲染
     assert sanitize_latex(r"\int\displaylimits_{a}^{b}") == r"\int_{a}^{b}"

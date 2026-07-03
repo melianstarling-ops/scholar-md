@@ -36,6 +36,31 @@ def test_formula_number_absorbed_into_tag_not_missing():
     assert rep["in_md"] == rep["total"] == 2
 
 
+def test_empty_block_content_not_counted_as_missing():
+    # block_content 为空(如 seal/装饰性 text 块)时探针恒为空字符串,不应误判为 missing(假阳性)
+    blocks = [
+        {"block_label": "text", "block_content": "present text", "block_order": 1},
+        {"block_label": "seal", "block_content": "", "block_order": 2},
+    ]
+    md = "present text\n"
+    rep = block_coverage(blocks, md)
+    assert rep["missing"] == []
+
+
+def test_skipped_empty_counted_and_totals_reconcile():
+    # skipped_empty 字段:空内容块(如 block_content='' 的 text/seal)单独计数,
+    # 使 total == in_md + len(missing) + skipped_empty 恒成立(账目自洽,不留隐藏数字)
+    blocks = [
+        {"block_label": "text", "block_content": "present text", "block_order": 1},
+        {"block_label": "text", "block_content": "", "block_order": 2},
+        {"block_label": "seal", "block_content": "", "block_order": 3},
+    ]
+    md = "present text\n"
+    rep = block_coverage(blocks, md)
+    assert rep["skipped_empty"] == 2
+    assert rep["total"] == rep["in_md"] + len(rep["missing"]) + rep["skipped_empty"]
+
+
 def test_katex_scan_detects_residual():
     # 清洗遗漏/回归时,Tier0 lint 应检出残留的不兼容命令
     hits = katex_incompat_scan(r"$$ \int\displaylimits_{S} x $$")

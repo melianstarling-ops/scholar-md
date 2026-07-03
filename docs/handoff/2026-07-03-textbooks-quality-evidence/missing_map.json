@@ -1,0 +1,398 @@
+[
+  {
+    "missing_seq": 1,
+    "page": 1,
+    "block_id": 1,
+    "block_order": 2,
+    "block_label": "doc_title",
+    "block_content_raw": "SECOND EDITION\nftp://\nSITE AVAILABLE\nCLAYTON R. PAUL",
+    "probe": "SECONDEDITIO"
+  },
+  {
+    "missing_seq": 2,
+    "page": 2,
+    "block_id": 1,
+    "block_order": 2,
+    "block_label": "text",
+    "block_content_raw": "",
+    "probe": ""
+  },
+  {
+    "missing_seq": 3,
+    "page": 2,
+    "block_id": 7,
+    "block_order": 8,
+    "block_label": "text",
+    "block_content_raw": "",
+    "probe": ""
+  },
+  {
+    "missing_seq": 4,
+    "page": 2,
+    "block_id": 8,
+    "block_order": 9,
+    "block_label": "text",
+    "block_content_raw": "",
+    "probe": ""
+  },
+  {
+    "missing_seq": 5,
+    "page": 3,
+    "block_id": 6,
+    "block_order": 7,
+    "block_label": "seal",
+    "block_content_raw": "",
+    "probe": ""
+  },
+  {
+    "missing_seq": 6,
+    "page": 6,
+    "block_id": 7,
+    "block_order": 6,
+    "block_label": "text",
+    "block_content_raw": "",
+    "probe": ""
+  },
+  {
+    "missing_seq": 7,
+    "page": 7,
+    "block_id": 5,
+    "block_order": 6,
+    "block_label": "text",
+    "block_content_raw": "",
+    "probe": ""
+  },
+  {
+    "missing_seq": 8,
+    "page": 8,
+    "block_id": 1,
+    "block_order": 2,
+    "block_label": "abstract",
+    "block_content_raw": "This is the second edition of a textbook that is intended for a senior or graduate-level course in an electrical engineering (EE) curriculum on the subject of the analysis of multiconductor transmission lines (MTLs). It will also serve as a useful reference for industry professionals. The term MTL typically refers to a set of  $ n+1 $ parallel conductors that serve to transmit electrical signals between two or more points, for example, a source and a load. The dominant mode of propagation on an MTL is the transverse electromagnetic (TEM) mode of propagation, where the electric and magnetic fields surrounding the conductors lie solely in the transverse plane orthogonal to the line axis. This structure is capable of guiding waves whose frequencies range from dc to where the line cross-sectional dimensions become a significant fraction of a wavelength. At higher frequencies, higher order modes coexist with the TEM mode, and other guiding structures such as waveguides and antennas are more practical structures for transmitting the signal between a source and a load. There are many applications for this wave-guiding structure. High-voltage power transmission lines are intended to transmit 60-Hz sinusoidal waveforms and the resulting power. In addition to this low-frequency power signal, there may exist other higher frequency components of the transmitted signal such as when a fault occurs on the line or a circuit breaker opens and recloses. The waveforms on the line associated with these events have high-frequency spectral content. Cables in modern electronic systems such as aircraft, ships, and vehicles serve to transmit power as well as signals throughout the system. These cables consist of a large number of individual wires that are packed into bundles for neatness and space conservation. The electromagnetic fields surrounding these closely spaced individual wires interact with each other and induce signals in all the other adjacent circuits. This is unintended and is referred to as crosstalk. This crosstalk can cause functional degradation of the circuits at the ends of the cable. The prediction of crosstalk will be one of the major objectives in this text.",
+    "probe": "Thisisthesec"
+  },
+  {
+    "missing_seq": 9,
+    "page": 13,
+    "block_id": 1,
+    "block_order": 2,
+    "block_label": "content",
+    "block_content_raw": "Preface xvii\nIntroduction 1\n1.1 Examples of Multiconductor Transmission-Line Structures 5\n1.2 Properties of the TEM Mode of Propagation 8\n1.3 The Transmission-Line Equations: A Preview 18\n1.3.1 Unique Definition of Voltage and Current for the TEM Mode of Propagation 19\n1.3.2 Defining the Per-Unit-Length Parameters 22\n1.3.3 Obtaining the Transmission-Line Equations from the Transverse Electromagnetic Field Equations 28\n1.3.4 Properties of the Per-Unit-Length Parameters 30\n1.4 Classification of Transmission Lines 32\n1.4.1 Uniform versus Nonuniform Lines 33\n1.4.2 Homogeneous versus Inhomogeneous Surrounding Media 35\n1.4.3 Lossless versus Lossy Lines 36\n1.5 Restrictions on the Applicability of the Transmission-Line Equation Formulation 37\n1.5.1 Higher Order Modes 38\n1.5.1.1 The Infinite, Parallel-Plate Transmission Line 38",
+    "probe": "PrefacexviiI"
+  },
+  {
+    "missing_seq": 10,
+    "page": 15,
+    "block_id": 1,
+    "block_order": 1,
+    "block_label": "content",
+    "block_content_raw": "4.2 Lines Having Conductors of Circular, Cylindrical Cross Section (Wires) 113\n4.2.1 Fundamental Subproblems for Wires 113\n4.2.1.1 The Method of Images 118\n4.2.2 Per-Unit-Length Inductance and Capacitance for Wire-Type Lines 119\n4.2.3 Per-Unit-Length Conductance and Resistance for Wire-Type Lines 130\n4.3 Lines Having Conductors of Rectangular Cross Section (PCB Lands) 144\n4.3.1 Per-Unit-Length Inductance and Capacitance for PCB-Type Lines 145\n4.3.2 Per-Unit-Length Conductance and Resistance for PCB-Type Lines 148\nProblems 156\nReferences 158\nThe Per-Unit-Length Parameters for Multiconductor Lines 160\n5.1 Definitions of the Per-Unit-Length Parameter Matrices L, C, and G 161\n5.1.1 The Generalized Capacitance Matrix 167\n5.2 Multiconductor Lines Having Conductors of Circular, Cylindrical Cross Section (Wires) 171\n5.2.1 Wide-Separation Approximations for Wires in Homogeneous Media 171\n5.2.1.1 n + 1 Wires 173\n5.2.1.2 n Wires Above an Infinite, Perfectly Conducting Plane 173\n5.2.1.3 n Wires Within a Perfectly Conducting Cylindrical Shield 174\n5.2.2 Numerical Methods for the General Case 176\n5.2.2.1 Applications to Inhomogeneous Dielectric Media 181\n5.2.3 Computed Results: Ribbon Cables 187\n5.3 Multiconductor Lines Having Conductors of Rectangular Cross Section 189\n5.3.1 Method of Moments (MoM) Techniques 190\n5.3.1.1 Applications to Printed Circuit Boards 199\n5.3.1.2 Applications to Coupled Microstrip Lines 211\n5.3.1.3 Applications to Coupled Striplines 219",
+    "probe": "4.2LinesHavi"
+  },
+  {
+    "missing_seq": 11,
+    "page": 16,
+    "block_id": 0,
+    "block_order": 1,
+    "block_label": "content",
+    "block_content_raw": "x CONTENTS\n\n5.4 Finite Difference Techniques 223\n5.5 Finite-Element Techniques 229\nProblems 237\nReferences 239\n\n6 Frequency-Domain Analysis of Two-Conductor Lines 240\n6.1 The Transmission-Line Equations in the Frequency Domain 241\n6.2 The General Solution for Lossless Lines 242\n6.2.1 The Reflection Coefficient and Input Impedance 244\n6.2.2 Solutions for the Terminal Voltages and Currents 247\n6.2.3 The SPICE (PSPICE) Solution for Lossless Lines 250\n6.2.4 Voltage and Current as a Function of Position on the Line 252\n6.2.5 Matching and VSWR 255\n6.2.6 Power Flow on a Lossless Line 256\n6.3 The General Solution for Lossy Lines 258\n6.3.1 The Low-Loss Approximation 260\n6.4 Lumped-Circuit Approximate Models of the Line 265\n6.5 Alternative Two-Port Representations of the Line 269\n6.5.1 The Chain Parameters 270\n6.5.2 Approximating Abruptly Nonuniform Lines with the Chain-Parameter Matrix 273\n6.5.3 The Z and Y Parameters 275\nProblems 278\n\n7 Frequency-Domain Analysis of Multiconductor Lines 282\n7.1 The MTL Transmission-Line Equations in the Frequency Domain 282\n7.2 The General Solution for An  $ (n+1) $-Conductor Line 284\n7.2.1 Decoupling the MTL Equations by Similarity Transformations 284\n7.2.2 Solution for Line Categories 291\n7.2.2.1 Perfect Conductors in Lossy, Homogeneous Media 292\n7.2.2.2 Lossy Conductors in Lossy, Homogeneous Media 293\n7.2.2.3 Perfect Conductors in Lossless, Inhomogeneous Media 296\n7.2.2.4 The General Case: Lossy Conductors in Lossy, Inhomogeneous Media 298\n7.2.2.5 Cyclic-Symmetric Structures 298",
+    "probe": "xCONTENTS5.4"
+  },
+  {
+    "missing_seq": 12,
+    "page": 17,
+    "block_id": 2,
+    "block_order": 1,
+    "block_label": "content",
+    "block_content_raw": "7.3 Incorporating the Terminal Conditions 305\n7.3.1 The Generalized Thevenin Equivalent 305\n7.3.2 The Generalized Norton Equivalent 308\n7.3.3 Mixed Representations 310\n7.4 Lumped-Circuit Approximate Characterizations 312\n7.5 Alternative 2n-Port Characterizations 314\n7.5.1 Analogy of the Frequency-Domain MTL Equations to State-Variable Equations 314\n7.5.2 Characterizing the Line as a 2n-Port with the Chain-Parameter Matrix 316\n7.5.3 Properties of the Chain-Parameter Matrix 318\n7.5.4 Approximating Nonuniform Lines with the Chain-Parameter Matrix 322\n7.5.5 The Impedance and Admittance Parameter Matrix Characterizations 323\n7.6 Power Flow and the Reflection Coefficient Matrix 327\n7.7 Computed and Experimental Results 332\n7.7.1 Ribbon Cables 332\n7.7.2 Printed Circuit Boards 335\nProblems 338\nReferences 342\nTime-Domain Analysis of Two-Conductor Lines 343\n8.1 The Solution for Lossless Lines 344\n8.1.1 Wave Tracing and the Reflection Coefficients 346\n8.1.2 Series Solutions and the Difference Operator 356\n8.1.3 The Method of Characteristics and a Two-Port Model of the Line 361\n8.1.4 The SPICE (PSPICE) Solution for Lossless Lines 365\n8.1.5 The Laplace Transform Solution 368\n8.1.5.1 Lines with Capacitive and Inductive Loads 370\n8.1.6 Lumped-Circuit Approximate Models of the Line 373\n8.1.6.1 When is the Line Electrically Short in the Time Domain? 374\n8.1.7 The Time-Domain to Frequency-Domain (TDFD) Transformation Method 375\n8.1.8 The Finite-Difference, Time-Domain (FDTD) Method 379\n8.1.8.1 The Magic Time Step 385",
+    "probe": "7.3Incorpora"
+  },
+  {
+    "missing_seq": 13,
+    "page": 18,
+    "block_id": 2,
+    "block_order": 1,
+    "block_label": "content",
+    "block_content_raw": "8.1.9 Matching for Signal Integrity 392\n8.1.9.1 When is Matching Required? 398\n8.1.9.2 Effects of Line Discontinuities 399\n8.2 Incorporation of Losses 406\n8.2.1 Representing Frequency-Dependent Losses 408\n8.2.1.1 Representing Losses in the Medium 408\n8.2.1.2 Representing Losses in the Conductors and Skin Effect 410\n8.2.1.3 Convolution with Frequency-Dependent Losses 415\n8.2.2 The Time-Domain to Frequency-Domain (TDFD) Transformation Method 421\n8.2.3 The Finite-Difference, Time-Domain (FDTD) Method 423\n8.2.3.1 Including Frequency-Independent Losses 423\n8.2.3.2 Including Frequency-Dependent Losses 427\n8.2.3.3 Prony's Method for Representing a Function 431\n8.2.3.4 Recursive Convolution 434\n8.2.3.5 An Example: A High-Loss Line 439\n8.2.3.6 A Correction for the FDTD Errors 443\n8.2.4 Lumped-Circuit Approximate Characterizations 447\n8.2.5 The Use of Macromodels in Modeling the Line 450\n8.2.6 Representing Frequency-Dependent Functions in the Time Domain Using Pade Methods 453\nProblems 461\nReferences 467\nTime-Domain Analysis of Multiconductor Lines 470\n9.1 The Solution for Lossless Lines 470\n9.1.1 The Recursive Solution for MTLs 471\n9.1.2 Decoupling the MTL Equations 476\n9.1.2.1 Lossless Lines in Homogeneous Media 478\n9.1.2.2 Lossless Lines in Inhomogeneous Media 479\n9.1.2.3 Incorporating the Terminal Conditions via the SPICE Program 482\n9.1.3 Lumped-Circuit Approximate Characterizations 487\n9.1.4 The Time-Domain to Frequency-Domain (TDFD) Transformation Method 488\n9.1.5 The Finite-Difference, Time-Domain (FDTD) Method 488\n9.1.5.1 Including Dynamic and/or Nonlinear Terminations in the FDTD Analysis 490\n9.2 Incorporation of Losses 496\n9.2.1 The Time-Domain to Frequency-Domain (TDFD) Method 498",
+    "probe": "8.1.9Matchin"
+  },
+  {
+    "missing_seq": 14,
+    "page": 19,
+    "block_id": 1,
+    "block_order": 1,
+    "block_label": "content",
+    "block_content_raw": "9.2.2 Lumped-Circuit Approximate Characterizations 498\n9.2.3 The Finite-Difference, Time-Domain (FDTD) Method 499\n9.2.4 Representation of the Lossy MTL with the Generalized Method of Characteristics 501\n9.2.5 Model Order Reduction (MOR) Methods 512\n9.2.5.1 Pade Approximation of the Matrix Exponential 512\n9.2.5.2 Asymptotic Waveform Evaluation (AWE) 515\n9.2.5.3 Complex Frequency Hopping (CFH) 518\n9.2.5.4 Vector Fitting 518\n9.3 Computed and Experimental Results 524\n9.3.1 Ribbon Cables 526\n9.3.2 Printed Circuit Boards 530\nProblems 537\nReferences 541\n10 Literal (Symbolic) Solutions for Three-Conductor Lines 544\n10.1 The Literal Frequency-Domain Solution for a Homogeneous Medium 548\n10.1.1 Inductive and Capacitive Coupling 554\n10.1.2 Common-Impedance Coupling 556\n10.2 The Literal Time-Domain Solution for a Homogeneous Medium 558\n10.2.1 Explicit Solution 560\n10.2.2 Weakly Coupled Lines 562\n10.2.3 Inductive and Capacitive Coupling 564\n10.2.4 Common-Impedance Coupling 567\n10.3 Computed and Experimental Results 567\n10.3.1 A Three-Wire Ribbon Cable 568\n10.3.2 A Three-Conductor Printed Circuit Board 569\nProblems 575\nReferences 576\n11 Incident Field Excitation of Two-Conductor Lines 578\n11.1 Derivation of the Transmission-Line Equations for Incident Field Excitation 578\n11.1.1 Equivalence of Source Representations 585\n11.2 The Frequency-Domain Solution 586\n11.2.1 Solution of the Transmission-Line Equations 586",
+    "probe": "9.2.2Lumped-"
+  },
+  {
+    "missing_seq": 15,
+    "page": 20,
+    "block_id": 1,
+    "block_order": 1,
+    "block_label": "content",
+    "block_content_raw": "11.2.2 Simplified Forms of the Excitations 592\n11.2.3 Incorporating the Line Terminations 594\n11.2.4 Uniform Plane-Wave Excitation of the Line 598\n11.2.4.1 Special Cases 602\n11.2.4.2 One Conductor Above a Ground Plane 606\n11.2.5 Comparison with Predictions of Method of Moments Codes 610\n11.3 The Time-Domain Solution 611\n11.3.1 The Laplace Transform Solution 611\n11.3.2 Uniform Plane-Wave Excitation of the Line 620\n11.3.3 A SPICE Equivalent Circuit 625\n11.3.4 The Time-Domain to Frequency-Domain (TDFD) Transformation 628\n11.3.5 The Finite-Difference, Time-Domain (FDTD) Solution Method 628\n11.3.6 Computed Results 635\nProblems 638\nReferences 639\n12 Incident Field Excitation of Multiconductor Lines 641\n12.1 Derivation of the MTL Equations for Incident Field Excitation 642\n12.1.1 Equivalence of Source Representations 648\n12.2 Frequency-Domain Solutions 650\n12.2.1 Solution of the MTL Equations 651\n12.2.2 Simplified Forms of the Excitations 653\n12.2.3 Incorporating the Line Terminations 655\n12.2.3.1 Lossless Lines in Homogeneous Media 658\n12.2.4 Lumped-Circuit Approximate Characterizations 660\n12.2.5 Uniform Plane-Wave Excitation of the Line 660\n12.3 The Time-Domain Solution 667\n12.3.1 Decoupling the MTL Equations 668\n12.3.2 A SPICE Equivalent Circuit 674\n12.3.3 Lumped-Circuit Approximate Characterizations 681\n12.3.4 The Time-Domain to Frequency-Domain (TDFD) Transformation 681\n12.3.5 The Finite-Difference, Time-Domain (FDTD) Solution Method 682",
+    "probe": "11.2.2Simpli"
+  },
+  {
+    "missing_seq": 16,
+    "page": 21,
+    "block_id": 1,
+    "block_order": 1,
+    "block_label": "content",
+    "block_content_raw": "12.4 Computed Results 686\nProblems 691\nReferences 692\n\n13 Transmission-Line Networks 693\n13.1 Representation of Lossless Lines with the SPICE Model 696\n13.2 Representation with Lumped-Circuit Approximate Models 699\n13.3 Representation via the Admittance or Impedance 2n-Port Parameters 699\n13.4 Representation with the BLT Equations 712\n13.5 Direct Time-Domain Solutions in Terms of Traveling Waves 721\n13.6 A Summary of Methods for Analyzing Multiconductor Transmission Lines 726\nProblems 727\nReferences 728\n\nPublications by the Author Concerning Transmission Lines 729\n\nAppendix A. Description of Computer Software 736\nA.1 Programs for the Calculation of the Per-Unit-Length Parameters 738\nA.1.1 Wide-Separation Approximations for Wires: WIDESEP. FOR 738\nA.1.2 Ribbon Cables: RIBBON. FOR 740\nA.1.3 Printed Circuit Boards: PCB. FOR 743\nA.1.4 Coupled Microstrip Structures: MSTRP. FOR 745\nA.1.5 Coupled Stripline Structures: STRPLINE. FOR 746\nA.2 Frequency-Domain Analysis 747\nA.2.1 General: MTL. FOR 747\nA.3 Time-Domain Analysis 748\nA.3.1 Time-Domain to Frequency-Domain Transformation: TIMEFREQ. FOR 748\nA.3.2 Branin's Method Extended to Multiconductor Lines: BRANIN. FOR 748\nA.3.3 Finite Difference-Time Domain Method: FINDIF. FOR 749\nA.3.4 Finite-Difference-Time-Domain Method: FDTDLOSS. FOR 749",
+    "probe": "12.4Computed"
+  },
+  {
+    "missing_seq": 17,
+    "page": 22,
+    "block_id": 2,
+    "block_order": 1,
+    "block_label": "content",
+    "block_content_raw": "A.4 SPICE/PSPICE Subcircuit Generation Programs 749\nA.4.1 General Solution, Lossless Lines: SPICEMTL.FOR 750\nA.4.2 Lumped-Pi Circuit, Lossless Lines: SPICELPI.FOR 750\nA.4.3 Inductive-Capacitive Coupling Model: SPICELC.FOR 751\nA.5 Incident Field Excitation 752\nA.5.1 Frequency-Domain Program: INCIDENT.FOR 752\nA.5.2 SPICE/PSPICE Subcircuit Model: SPICEINC.FOR 753\nA.5.3 Finite-Difference, Time-Domain (FDTD) Model: FDTDINC.FOR 754\nReferences 755\nAppendix B. A SPICE (PSPICE) Tutorial 756\nB.1 Creating the SPICE or PSPICE Program 757\nB.2 Circuit Description 758\nB.3 Execution Statements 763\nB.4 Output Statements 765\nB.5 Examples 767\nB.6 The Subcircuit Model 769\nReferences 771\nIndex 773",
+    "probe": "A.4SPICE/PSP"
+  },
+  {
+    "missing_seq": 18,
+    "page": 23,
+    "block_id": 1,
+    "block_order": 2,
+    "block_label": "doc_title",
+    "block_content_raw": "INTRODUCTION",
+    "probe": "INTRODUCTION"
+  },
+  {
+    "missing_seq": 19,
+    "page": 80,
+    "block_id": 5,
+    "block_order": 1,
+    "block_label": "algorithm",
+    "block_content_raw": "EXAMPLE\nVS 1 0 PULSE(0 5 0 1N 1N 4N 10N)\nR 1 2 1K\nC 2 0 5P\n.TRAN 0.1N 100N 0 0.1N\n.PROBE\n.PRINT TRAN V(2)\n.END",
+    "probe": "EXAMPLEVS10P"
+  },
+  {
+    "missing_seq": 20,
+    "page": 81,
+    "block_id": 3,
+    "block_order": 2,
+    "block_label": "algorithm",
+    "block_content_raw": "EXAMPLE\nVS 1 0 PWL(0 0 1N 5 5N 5 6N 0)\nR 1 2 1K\nC 2 0 5P\n.TRAN 0.05N 50N 0 0.05N\n.PROBE\n.PRINT TRAN V(2)\n.END",
+    "probe": "EXAMPLEVS10P"
+  },
+  {
+    "missing_seq": 21,
+    "page": 91,
+    "block_id": 8,
+    "block_order": 7,
+    "block_label": "reference_content",
+    "block_content_raw": "[1] S. Ramo, J.R. Whinnery, and T. VanDuzer, Fields and Waves in Communication Electronics, 2nd edition, John Wiley & Sons, New York, 1984.",
+    "probe": "[1]S.Ramo,J."
+  },
+  {
+    "missing_seq": 22,
+    "page": 91,
+    "block_id": 9,
+    "block_order": 8,
+    "block_label": "reference_content",
+    "block_content_raw": "[2] R.B. Adler, L.J. Chu, and R.M. Fano, Electromagnetic Energy Transmission and Radiation, John Wiley, New York, 1963.",
+    "probe": "[2]R.B.Adler"
+  },
+  {
+    "missing_seq": 23,
+    "page": 91,
+    "block_id": 10,
+    "block_order": 9,
+    "block_label": "reference_content",
+    "block_content_raw": "[3] S. Frankel, Multiconductor Transmission Line Analysis, Artech House, Dedham, MA, 1977.",
+    "probe": "[3]S.Frankel"
+  },
+  {
+    "missing_seq": 24,
+    "page": 91,
+    "block_id": 11,
+    "block_order": 10,
+    "block_label": "reference_content",
+    "block_content_raw": "[4] H. Uchida, Fundamentals of Coupled Lines and Multiwire Antennas, Sasaki Publishing Co, Sendai, Japan, 1967.",
+    "probe": "[4]H.Uchida,"
+  },
+  {
+    "missing_seq": 25,
+    "page": 91,
+    "block_id": 12,
+    "block_order": 11,
+    "block_label": "reference_content",
+    "block_content_raw": "[5] S. Hayashi, Surges on Transmission Systems, Denki-Shoin, Kyoto, Japan, 1955.",
+    "probe": "[5]S.Hayashi"
+  },
+  {
+    "missing_seq": 26,
+    "page": 91,
+    "block_id": 13,
+    "block_order": 12,
+    "block_label": "reference_content",
+    "block_content_raw": "[6] W.C. Johnson, Transmission Lines and Networks, McGraw-Hill, New York, 1950.",
+    "probe": "[6]W.C.Johns"
+  },
+  {
+    "missing_seq": 27,
+    "page": 91,
+    "block_id": 14,
+    "block_order": 13,
+    "block_label": "reference_content",
+    "block_content_raw": "[7] L.V. Bewley, Traveling Waves on Transmission Systems, 2nd edition, John Wiley & Sons, New York, 1951.",
+    "probe": "[7]L.V.Bewle"
+  },
+  {
+    "missing_seq": 28,
+    "page": 91,
+    "block_id": 15,
+    "block_order": 14,
+    "block_label": "reference_content",
+    "block_content_raw": "[8] P.I. Kuznetsov and R.L. Stratonovich, The Propagation of Electromagnetic Waves in Multiconductor Transmission Lines, Macmillan, New York, 1964.",
+    "probe": "[8]P.I.Kuzne"
+  },
+  {
+    "missing_seq": 29,
+    "page": 91,
+    "block_id": 16,
+    "block_order": 15,
+    "block_label": "reference_content",
+    "block_content_raw": "[9] P.C. Magnuson, Transmission Lines and Wave Propagation, Allyn & Bacon, Newton, MA, 1970.",
+    "probe": "[9]P.C.Magnu"
+  },
+  {
+    "missing_seq": 30,
+    "page": 91,
+    "block_id": 17,
+    "block_order": 16,
+    "block_label": "reference_content",
+    "block_content_raw": "[10] R.E. Collin, Field Theory of Guided Waves, 2nd edition, IEEE Press, New York, 1991.",
+    "probe": "[10]R.E.Coll"
+  },
+  {
+    "missing_seq": 31,
+    "page": 91,
+    "block_id": 18,
+    "block_order": 17,
+    "block_label": "reference_content",
+    "block_content_raw": "[11] J. Zaborsky and J.W. Rittenhouse, Electric Power Transmission, Ronald Press, New York, 1954.",
+    "probe": "[11]J.Zabors"
+  },
+  {
+    "missing_seq": 32,
+    "page": 91,
+    "block_id": 19,
+    "block_order": 18,
+    "block_label": "reference_content",
+    "block_content_raw": "[12] R.E. Matick, Transmission Lines for Digital and Communication Networks, McGraw-Hill, New York, 1969.",
+    "probe": "[12]R.E.Mati"
+  },
+  {
+    "missing_seq": 33,
+    "page": 92,
+    "block_id": 2,
+    "block_order": 1,
+    "block_label": "reference_content",
+    "block_content_raw": "[13] L. Young (ed.), Parallel Coupled Lines and Directional Couplers, Artech House, Dedham, MA, 1972.",
+    "probe": "[13]L.Young("
+  },
+  {
+    "missing_seq": 34,
+    "page": 92,
+    "block_id": 3,
+    "block_order": 2,
+    "block_label": "reference_content",
+    "block_content_raw": "[14] T. Itoh (ed.), Planar Transmission Line Structures, IEEE Press, New York, 1987.",
+    "probe": "[14]T.Itoh(e"
+  },
+  {
+    "missing_seq": 35,
+    "page": 92,
+    "block_id": 4,
+    "block_order": 3,
+    "block_label": "reference_content",
+    "block_content_raw": "[15] W.T. Weeks, Multiconductor transmission line theory in the TEM approximation, IBM Journal of Research and Development, 604–611, 1972.",
+    "probe": "[15]W.T.Week"
+  },
+  {
+    "missing_seq": 36,
+    "page": 92,
+    "block_id": 5,
+    "block_order": 4,
+    "block_label": "reference_content",
+    "block_content_raw": "[16] K.D. Marx, Propagation modes, equivalent circuits and characteristic terminations for multiconductor transmission lines with inhomogeneous dielectrics, IEEE Transactions on Microwave Theory and Techniques, 21, 450–457, 1973.",
+    "probe": "[16]K.D.Marx"
+  },
+  {
+    "missing_seq": 37,
+    "page": 92,
+    "block_id": 6,
+    "block_order": 5,
+    "block_label": "reference_content",
+    "block_content_raw": "[17] A.F. dos Santos and J.P. Figanier, The method of series expansion in the frequency domain applied to multiconductor transmission lines, IEEE Transactions on Microwave Theory and Techniques, 23(9), 753–756, 1975.",
+    "probe": "[17]A.F.dosS"
+  },
+  {
+    "missing_seq": 38,
+    "page": 92,
+    "block_id": 7,
+    "block_order": 6,
+    "block_label": "reference_content",
+    "block_content_raw": "[18] I.V. Lindell, On the quasi-TEM modes in inhomogeneous multiconductor transmission lines, IEEE Transactions on Microwave Theory and Techniques, 29(8), 812–817, 1981.",
+    "probe": "[18]I.V.Lind"
+  },
+  {
+    "missing_seq": 39,
+    "page": 92,
+    "block_id": 8,
+    "block_order": 7,
+    "block_label": "reference_content",
+    "block_content_raw": "[19] Y. Leviatan and A.T. Adams, The response of a two-wire transmission line to incident field and voltage excitation, including the effects of higher order modes, IEEE Transactions on Antennas and Propagation, 30(5), 998–1003, 1982.",
+    "probe": "[19]Y.Leviat"
+  },
+  {
+    "missing_seq": 40,
+    "page": 92,
+    "block_id": 9,
+    "block_order": 8,
+    "block_label": "reference_content",
+    "block_content_raw": "[20] K.S.H. Lee, Two parallel terminated conductors in external fields, IEEE Transactions on Electromagnetic Compatibility, 20, 288–295, 1978.",
+    "probe": "[20]K.S.H.Le"
+  },
+  {
+    "missing_seq": 41,
+    "page": 92,
+    "block_id": 10,
+    "block_order": 9,
+    "block_label": "reference_content",
+    "block_content_raw": "[21] S. Frankel, Forcing functions for externally excited transmission lines, IEEE Transactions on Electromagnetic Compatibility, 22, 210, 1980.",
+    "probe": "[21]S.Franke"
+  },
+  {
+    "missing_seq": 42,
+    "page": 92,
+    "block_id": 11,
+    "block_order": 10,
+    "block_label": "reference_content",
+    "block_content_raw": "[22] C.R. Paul and D.R. Bush, Radiated emissions from common-mode currents, Proceedings of the 1987 IEEE International Symposium on Electromagnetic Compatibility, Atlanta, GA, (September 1987).",
+    "probe": "[22]C.R.Paul"
+  },
+  {
+    "missing_seq": 43,
+    "page": 92,
+    "block_id": 12,
+    "block_order": 11,
+    "block_label": "reference_content",
+    "block_content_raw": "[23] C.R. Paul, A comparison of the contributions of common-mode and differential-mode currents in radiated emissions, IEEE Transactions on Electromagnetic Compatibility, 31, 189–193, 1989.",
+    "probe": "[23]C.R.Paul"
+  },
+  {
+    "missing_seq": 44,
+    "page": 92,
+    "block_id": 13,
+    "block_order": 12,
+    "block_label": "reference_content",
+    "block_content_raw": "[24] K.B. Hardin, Decomposition of radiating structures to directly predict asymmetric-mode radiation, PhD dissertation, University of Kentucky, 1991.",
+    "probe": "[24]K.B.Hard"
+  }
+]

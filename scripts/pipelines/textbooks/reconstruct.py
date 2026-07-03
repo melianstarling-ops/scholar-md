@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import re
+import sys
 
 _NUM_RE = re.compile(r"^\(?([\w.\-]+)\)?$")   # (5.30) / 5.30 → 5.30
 _EMPH_RE = re.compile(r"\\underset\{\\cdot\}\{([^{}]*)\}")
@@ -39,12 +40,25 @@ def _formula_body(content: str) -> str:
     return s
 
 
+def _hard_breaks(content: str) -> str:
+    """内部换行有意义(目录/封面多行信息):转 Markdown 硬换行,防止渲染时挤成一段。"""
+    return content.replace("\n", "  \n")
+
+
+def _code_fence(content: str) -> str:
+    """围栏长度比 content 内最长的连续反引号串多一个,防止内嵌 ``` 提前截断代码块。"""
+    runs = re.findall(r"`+", content)
+    fence = "`" * (max((len(r) for r in runs), default=2) + 1)
+    return f"{fence}\n{content}\n{fence}"
+
+
 def reconstruct_markdown(blocks: list[dict]) -> str:
     """按 block_order 排序、剔除 order=None(页眉页脚页码)、逐块转 Markdown。"""
     ordered = sorted(
         (b for b in blocks if b.get("block_order") is not None),
         key=lambda b: b["block_order"],
     )
+    has_paragraph_title = any(b.get("block_label") == "paragraph_title" for b in ordered)
     parts: list[str] = []
     i = 0
     while i < len(ordered):
@@ -56,11 +70,24 @@ def reconstruct_markdown(blocks: list[dict]) -> str:
             continue
         if label == "paragraph_title":
             parts.append(f"## {content}")
-        elif label == "text":
+        elif label in ("text", "abstract", "reference_content"):
             # pending: text 内联 $...$ 公式也可能夹带 KaTeX 不兼容命令,但暂无实例、
             # 且 sanitize 对纯文字的影响未验证,故此路暂不接 sanitize_latex。
             # 待出现 text 块内公式红字实例再评估接入。见 TODO / lessons L-T16。
             parts.append(restore_emphasis_dots(content))
+        elif label == "content":
+            parts.append(_hard_breaks(content))
+        elif label == "algorithm":
+            parts.append(_code_fence(content))
+        elif label == "doc_title":
+            if has_paragraph_title:
+                # 同页存在 paragraph_title 兄弟块(不一定是章节序号,可能是完整节标题,
+                # 见 L-T? 实测 p93 样本):经验规则——同页有 paragraph_title 时 doc_title
+                # 是被误标的正文标题,不是封面。100 页语料 4/4 验证成立,非因果机制。
+                parts.append(f"## {content}")
+            else:
+                # 无兄弟块:封面元信息(书名页/作者页),不当标题
+                parts.append(_hard_breaks(content))
         elif label == "display_formula":
             body = sanitize_latex(_formula_body(content))
             nxt = ordered[i + 1] if i + 1 < len(ordered) else None
@@ -73,5 +100,10 @@ def reconstruct_markdown(blocks: list[dict]) -> str:
                 parts.append(f"$$ {body} $$")
         elif label == "formula_number":
             parts.append(content)           # 落单编号,保留不丢
+        else:
+            # 兜底:未预料的 label(含未来 PaddleOCR-VL 版本升级新增的),原样落段,防止静默丢失。
+            # selfcheck 只验证"内容出现在 md 里",兜底内容必然通过,告警是唯一能暴露给人的信号。
+            print(f"[reconstruct] 未知 block_label={label!r},按纯文本兜底落段", file=sys.stderr)
+            parts.append(content)
         i += 1
     return "\n\n".join(parts) + "\n"
