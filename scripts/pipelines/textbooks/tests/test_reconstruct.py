@@ -167,6 +167,54 @@ def test_sanitize_latex_preserves_displaystyle():
     assert sanitize_latex(r"\displaystyle\int x") == r"\displaystyle\int x"
 
 
+def test_sanitize_latex_collapses_adjacent_double_subscript():
+    # 同一节点连续两个下标 _{A}_{B} 是 KaTeX 硬报错(double subscript);兜底:单行合并
+    assert sanitize_latex(r"x_{A}_{B}") == r"x_{A\ B}"
+
+
+def test_sanitize_latex_collapses_triple_subscript():
+    # 连续三下标也应全部合并进一个下标(循环直到稳定)
+    assert sanitize_latex(r"x_{A}_{B}_{C}") == r"x_{A\ B\ C}"
+
+
+def test_sanitize_latex_leaves_nested_single_subscript_untouched():
+    # §3 假阳性陷阱:多层嵌套花括号后接一个正常单下标,不是双下标,绝不能动
+    s = r"\overrightarrow{\mathcal{H}}_{\mathrm{t}}"
+    assert sanitize_latex(s) == s
+
+
+def test_sanitize_latex_leaves_sub_then_super_untouched():
+    # 下标后接上标是合法的(同一 base 的 sub+super),不得误合并
+    s = r"x_{A}^{B}"
+    assert sanitize_latex(s) == s
+
+
+def test_sanitize_latex_fixes_real_1_3a_double_subscript():
+    # 真实语料 1.3a 的畸形片段:underbrace 收尾 } 后被连下标两次
+    frag = (r"\underbrace{\nabla_{z}\times\overrightarrow{\mathcal{E}}_{\mathrm{t}}}"
+            r"_{in\text{the}}_{\substack{\text{transverse}\\ \text{plane}}}")
+    out = sanitize_latex(frag)
+    # 非法的相邻双下标 junction 已消除
+    assert r"}_{in\text{the}}_{\substack" not in out
+    # 两段下标内容都完整保留(零丢失),合并进同一个 _{...}
+    assert r"_{in\text{the}\ \substack{\text{transverse}\\ \text{plane}}}" in out
+    # underbrace 主体不受影响
+    assert r"\underbrace{\nabla_{z}\times\overrightarrow{\mathcal{E}}_{\mathrm{t}}}" in out
+
+
+def test_reconstruct_fixes_1_3a_double_subscript_end_to_end():
+    # 真实 1.3a display_formula 块经 reconstruct 后不应残留相邻双下标
+    body = (r"$$ \left(\nabla_{\mathrm{t}}+\nabla_{z}\right)\times\overrightarrow{\mathcal{E}}_{\mathrm{t}}"
+            r"=\underbrace{\nabla_{\mathrm{t}}\times\overrightarrow{\mathcal{E}}_{\mathrm{t}}}_{z\text{ directed}}"
+            r"+\underbrace{\nabla_{z}\times\overrightarrow{\mathcal{E}}_{\mathrm{t}}}"
+            r"_{in\text{the}}_{\substack{\text{transverse}\\ \text{plane}}}"
+            r"=-\mu\frac{\partial\overrightarrow{\mathcal{H}}_{\mathrm{t}}}{\partial t} $$")
+    blocks = [{"block_label": "display_formula", "block_content": body, "block_order": 1}]
+    md, _ = reconstruct_markdown(blocks)
+    assert r"}_{in\text{the}}_{\substack" not in md
+    assert r"\substack{\text{transverse}\\ \text{plane}}" in md   # 内容仍在
+
+
 def test_reconstruct_cleans_displaylimits_in_formula():
     blocks = [{"block_label": "display_formula",
                "block_content": r"$$ \int\displaylimits_{S} \mathbf{B} $$", "block_order": 1}]

@@ -21,10 +21,67 @@ _PASSTHROUGH_UNORDERED_LABELS = {"table", "footnote", "figure_title"}
 _KNOWN_NOISE_LABELS = {"header", "number", "header_image"}
 
 
+def _match_braced(s: str, i: int) -> int:
+    r"""s[i] 必须是 '{';返回其配对 '}' 之后一位的下标。花括号不配对时返回 -1。"""
+    depth = 0
+    while i < len(s):
+        c = s[i]
+        if c == "{":
+            depth += 1
+        elif c == "}":
+            depth -= 1
+            if depth == 0:
+                return i + 1
+        i += 1
+    return -1
+
+
+def _collapse_double_subscript(s: str) -> str:
+    r"""合并同一节点上相邻的多个下标 _{A}_{B}(…) → _{A\ B(…)}。
+
+    §3 已证正则区分不出"真双下标"和"多层嵌套后接单下标",故走括号配对扫描:
+    只有当一个 _{…}(花括号配对完整)后紧跟(允许中间空白)另一个 _{…} 时才合并;
+    单下标、下标后接上标(_{A}^{B})、嵌套花括号(\overrightarrow{\mathcal{H}}_{\mathrm{t}})
+    都不会误触。合并只为消除 KaTeX 硬报错(double subscript),不猜原书断行。"""
+    out: list[str] = []
+    i, n = 0, len(s)
+    while i < n:
+        if s[i] == "_" and i + 1 < n and s[i + 1] == "{":
+            end = _match_braced(s, i + 1)
+            if end == -1:                       # 花括号不配对,原样放行不改写
+                out.append(s[i])
+                i += 1
+                continue
+            inners = [s[i + 2:end - 1]]         # 第一个下标体
+            j = end
+            while True:
+                k = j
+                while k < n and s[k] in " \t":  # 跳过下标间空白
+                    k += 1
+                if not (k < n and s[k] == "_" and k + 1 < n and s[k + 1] == "{"):
+                    break
+                nxt = _match_braced(s, k + 1)
+                if nxt == -1:
+                    break
+                inners.append(s[k + 2:nxt - 1])
+                j = nxt
+            if len(inners) > 1:                 # 命中相邻双(多)下标 → 合并
+                out.append("_{" + r"\ ".join(inners) + "}")
+                i = j
+            else:                               # 仅单下标,原样保留
+                out.append(s[i:end])
+                i = end
+            continue
+        out.append(s[i])
+        i += 1
+    return "".join(out)
+
+
 def sanitize_latex(s: str) -> str:
-    r"""删除 KaTeX 不支持、但语义冗余的 LaTeX 命令(引擎方言清洗)。"""
+    r"""引擎方言清洗:删 KaTeX 不支持的冗余命令 + 合并非法相邻双下标。"""
     for pat, repl in _KATEX_SUB:
         s = pat.sub(repl, s)
+    s = _collapse_double_subscript(s)
     return s
 
 
