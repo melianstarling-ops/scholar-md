@@ -271,3 +271,78 @@ def test_convert_cli_no_selfcheck_json_forwards_flag(monkeypatch):
     monkeypatch.setattr("sys.argv", ["convert.py", "--src", "x.pdf", "--no-selfcheck-json"])
     cv.main()
     assert captured["write_selfcheck"] is False
+
+
+def _one_image_block(page):
+    return [{"block_order": None, "block_label": "image", "block_id": 1,
+             "block_content": "", "block_bbox": [5, 5, 15, 15]}]
+
+
+def test_convert_crops_images_before_png_deleted(tmp_path, monkeypatch):
+    pdf = _make_scan_pdf(tmp_path, 1)
+    _stub_engine(monkeypatch, _one_image_block)
+    out = str(tmp_path / "out")
+    res = cv.convert_pdf(pdf, out, dpi=100)
+    assets_dir = os.path.join(out, "scan", "scan.assets")
+    assert os.path.exists(os.path.join(assets_dir, "page_0001_block_1.png"))
+    md = open(res["md_path"], encoding="utf-8").read()
+    assert "scan.assets/page_0001_block_1.png" in md
+
+
+def test_convert_clears_assets_on_fingerprint_mismatch(tmp_path, monkeypatch):
+    pdf = _make_scan_pdf(tmp_path, 1)
+    _stub_engine(monkeypatch, _one_image_block)
+    out = str(tmp_path / "out")
+    cv.convert_pdf(pdf, out, dpi=100)
+    assets_dir = os.path.join(out, "scan", "scan.assets")
+    assert os.path.exists(os.path.join(assets_dir, "page_0001_block_1.png"))
+    # 换 DPI 触发指纹失配 → 全新跑,旧资产应被清空(重新裁出的文件名相同,
+    # 用一个哨兵文件验证目录整体被清过,而不仅是被覆盖)
+    sentinel = os.path.join(assets_dir, "STALE_SENTINEL.png")
+    open(sentinel, "w").close()
+    cv.convert_pdf(pdf, out, dpi=120)
+    assert not os.path.exists(sentinel)
+
+
+def test_convert_backfills_assets_for_pre_existing_checkpoint(tmp_path, monkeypatch):
+    # 模拟"图片功能上线前跑完的检查点":res.json 里有 image 块,但 assets 目录不存在
+    pdf = _make_scan_pdf(tmp_path, 1)
+    _stub_engine(monkeypatch, _one_image_block)
+    out = str(tmp_path / "out")
+    work = os.path.join(out, "scan", "_work")
+    os.makedirs(work, exist_ok=True)
+    with open(cp.page_res_path(work, 1), "w", encoding="utf-8") as f:
+        json.dump({"parsing_res_list": _one_image_block(1)}, f)
+    cp.save_manifest(work, cp.new_manifest(pdf, cp.pdf_fingerprint(pdf), 100, "A"))
+    res = cv.convert_pdf(pdf, out, dpi=100)          # 该页已"完成",不会重新进 OCR 循环
+    assets_dir = os.path.join(out, "scan", "scan.assets")
+    assert os.path.exists(os.path.join(assets_dir, "page_0001_block_1.png"))  # 补裁生效
+    assert res["selfcheck"]["missing_assets"] == []
+
+
+def test_convert_missing_assets_reported_when_backfill_impossible(tmp_path, monkeypatch):
+    # pdf_path 指向的文件在补裁时已不存在(源文件被移走等极端场景)→ 补裁失败,
+    # 但不应崩溃,应如实反映在 missing_assets 里
+    pdf = _make_scan_pdf(tmp_path, 1)
+    _stub_engine(monkeypatch, _one_image_block)
+    out = str(tmp_path / "out")
+    work = os.path.join(out, "scan", "_work")
+    os.makedirs(work, exist_ok=True)
+    with open(cp.page_res_path(work, 1), "w", encoding="utf-8") as f:
+        json.dump({"parsing_res_list": _one_image_block(1)}, f)
+    cp.save_manifest(work, cp.new_manifest(pdf, cp.pdf_fingerprint(pdf), 100, "A"))
+    os.remove(pdf)                                   # 源文件消失
+    res = cv.convert_pdf(pdf, out, dpi=100)
+    assert res["selfcheck"]["missing_assets"] == ["page_0001_block_1.png"]
+
+
+def test_convert_selfcheck_has_four_new_fields(tmp_path, monkeypatch):
+    pdf = _make_scan_pdf(tmp_path, 2)
+    _stub_engine(monkeypatch, _one_text_block)
+    res = cv.convert_pdf(pdf, str(tmp_path / "out"), dpi=100)
+    for key in ("unhandled_labels", "visual_warnings", "column_layout_suspected", "missing_assets"):
+        assert key in res["selfcheck"]
+    assert res["selfcheck"]["unhandled_labels"] == {}
+    assert res["selfcheck"]["visual_warnings"] == []
+    assert res["selfcheck"]["column_layout_suspected"] == []
+    assert res["selfcheck"]["missing_assets"] == []

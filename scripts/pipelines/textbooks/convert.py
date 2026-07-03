@@ -4,27 +4,75 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import shutil
 import time
 
 from scripts.pipelines.textbooks.triage import triage
 from scripts.pipelines.textbooks.preprocess import pdf_page_to_png
 from scripts.pipelines.textbooks.engine import predict_page
 from scripts.pipelines.textbooks.reconstruct import reconstruct_markdown
-from scripts.pipelines.textbooks.selfcheck import block_coverage, katex_incompat_scan
+from scripts.pipelines.textbooks.selfcheck import (
+    block_coverage, katex_incompat_scan, aggregate_warnings, detect_column_layout,
+)
 from scripts.pipelines.textbooks import checkpoint as cp
+from scripts.pipelines.textbooks import images
 
 
-def assemble(work_dir: str, total: int) -> tuple[str, list[dict]]:
-    """按页序读检查点 → (md, all_blocks)。缺失/失败页贡献空串。"""
+def _expected_visual_filenames(blocks: list[dict], page: int) -> list[str]:
+    return [images.crop_filename(page, b.get("block_id"))
+            for b in blocks
+            if images.is_visual_block(b.get("block_label", "")) and b.get("block_bbox")]
+
+
+def _backfill_missing_assets(blocks: list[dict], pdf_path: str, dpi: int,
+                              work_dir: str, assets_dir: str, page: int) -> None:
+    """裁图钩子只覆盖本次运行处理的页;已完成页(续跑/历史检查点)不会重新进入
+    OCR 循环,PNG 早已删除。这里对每页核对应有的裁图文件是否在盘,缺失则用
+    manifest 记录的 dpi 重新栅格化该页(同 DPI 保证 bbox 对齐)、裁图、删 PNG。"""
+    expected = _expected_visual_filenames(blocks, page)
+    if not expected:
+        return
+    if all(os.path.exists(os.path.join(assets_dir, f)) for f in expected):
+        return
+    png = None
+    try:
+        png = pdf_page_to_png(pdf_path, page, work_dir, dpi=dpi)
+        images.crop_block_images(png, blocks, assets_dir, page)
+    except Exception:                                          # noqa: BLE001 补裁失败不掀翻整批
+        pass
+    finally:
+        if png and os.path.exists(png):
+            os.remove(png)
+
+
+def assemble(work_dir: str, total: int, stem: str, assets_dir: str,
+             pdf_path: str, dpi: int) -> dict:
+    """按页序读检查点 → 重组 md + 补裁缺失资产 + 汇总告警/双栏嫌疑页/缺失资产清单。"""
     md_pages: list[str] = []
     all_blocks: list[dict] = []
+    all_warnings: list[dict] = []
+    missing_assets: list[str] = []
+    column_layout_suspected: list[int] = []
     for i in range(1, total + 1):
         blocks = cp.load_page_blocks(work_dir, i)
         all_blocks.extend(blocks)
-        page_md = reconstruct_markdown(blocks)
+        _backfill_missing_assets(blocks, pdf_path, dpi, work_dir, assets_dir, i)
+        expected = _expected_visual_filenames(blocks, i)
+        missing_assets.extend(f for f in expected
+                              if not os.path.exists(os.path.join(assets_dir, f)))
+        if detect_column_layout(blocks):
+            column_layout_suspected.append(i)
+        page_md, warnings = reconstruct_markdown(blocks, stem=stem, page=i)
+        all_warnings.extend(warnings)
         if page_md.strip():
             md_pages.append(page_md)
-    return "\n\n".join(md_pages) + "\n", all_blocks
+    return {
+        "md": "\n\n".join(md_pages) + "\n",
+        "blocks": all_blocks,
+        "warnings": all_warnings,
+        "missing_assets": missing_assets,
+        "column_layout_suspected": column_layout_suspected,
+    }
 
 
 def _register_deferred(pdf_path: str, out_dir: str, stem: str) -> dict:
@@ -45,6 +93,7 @@ def convert_pdf(pdf_path: str, out_dir: str | None = None,
 
     doc_out = os.path.join(out_dir, stem)
     work_dir = os.path.join(doc_out, "_work")
+    assets_dir = os.path.join(doc_out, stem + ".assets")
 
     # 指纹校验:源或 DPI 变 → 清空全新跑
     manifest = cp.load_manifest(work_dir)
@@ -52,6 +101,8 @@ def convert_pdf(pdf_path: str, out_dir: str | None = None,
         if manifest is not None:
             print(f"[textbooks] 指纹失配(源或DPI变),清空 {work_dir} 全新跑")
         cp.reset_work_dir(work_dir)
+        if os.path.isdir(assets_dir):                # assets 在 doc_out 不在 work_dir,
+            shutil.rmtree(assets_dir)                 # reset_work_dir 碰不到,不清会变孤儿文件
         manifest = cp.new_manifest(pdf_path, cp.pdf_fingerprint(pdf_path), dpi, route)
         cp.save_manifest(work_dir, manifest)
 
@@ -83,6 +134,8 @@ def convert_pdf(pdf_path: str, out_dir: str | None = None,
             blocks = predict_page(png, work_dir)   # 非空时 engine 已落 res.json
             if not blocks and not cp.is_page_done(work_dir, page):
                 cp.write_empty_page(work_dir, page)   # 空白页显式标记完成
+            elif blocks:
+                images.crop_block_images(png, blocks, assets_dir, page)  # PNG 删除前裁图
         except Exception as e:                        # noqa: BLE001 坏页隔离
             cp.record_failure(manifest, page, f"{type(e).__name__}: {e}",
                               "page-exception")
@@ -107,14 +160,18 @@ def convert_pdf(pdf_path: str, out_dir: str | None = None,
             dedup[f["page"]] = f
     manifest["failed_pages"] = list(dedup.values())
 
-    # 从检查点重组(每次运行都做,部分完成也产出部分 md)
-    md, all_blocks = assemble(work_dir, total)
+    # 从检查点重组(每次运行都做,部分完成也产出部分 md);顺带补裁续跑/历史检查点缺失的资产
+    result = assemble(work_dir, total, stem, assets_dir, pdf_path, dpi)
+    md, all_blocks = result["md"], result["blocks"]
     os.makedirs(doc_out, exist_ok=True)
     md_path = os.path.join(doc_out, stem + ".md")
     with open(md_path, "w", encoding="utf-8") as f:
         f.write(md)
     check = block_coverage(all_blocks, md)
     check["katex_incompat"] = katex_incompat_scan(md)
+    check.update(aggregate_warnings(result["warnings"]))
+    check["missing_assets"] = result["missing_assets"]
+    check["column_layout_suspected"] = result["column_layout_suspected"]
     if write_selfcheck:
         selfcheck_path = os.path.join(doc_out, stem + "_selfcheck.json")
         with open(selfcheck_path, "w", encoding="utf-8") as f:
