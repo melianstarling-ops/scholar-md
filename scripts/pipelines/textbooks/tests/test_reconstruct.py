@@ -17,7 +17,7 @@ def test_drops_order_none_blocks():
         {"block_label": "number", "block_content": "186", "block_order": None},
         {"block_label": "text", "block_content": "Body text.", "block_order": 1},
     ]
-    md = reconstruct_markdown(blocks)
+    md, _ = reconstruct_markdown(blocks)
     assert "PAGE HEADER" not in md
     assert "186" not in md
     assert "Body text." in md
@@ -28,13 +28,13 @@ def test_sorts_by_order():
         {"block_label": "text", "block_content": "second", "block_order": 2},
         {"block_label": "text", "block_content": "first", "block_order": 1},
     ]
-    md = reconstruct_markdown(blocks)
+    md, _ = reconstruct_markdown(blocks)
     assert md.index("first") < md.index("second")
 
 
 def test_paragraph_title_becomes_heading():
     blocks = [{"block_label": "paragraph_title", "block_content": "第五章 静磁学", "block_order": 1}]
-    md = reconstruct_markdown(blocks)
+    md, _ = reconstruct_markdown(blocks)
     assert md.strip().startswith("## 第五章 静磁学")
 
 
@@ -44,7 +44,7 @@ def test_display_formula_binds_adjacent_number():
          "block_content": r" $$ \mathbf{N}=\boldsymbol{\mu}\times\mathbf{B} $$ ", "block_order": 4},
         {"block_label": "formula_number", "block_content": "(5.1)", "block_order": 5},
     ]
-    md = reconstruct_markdown(blocks)
+    md, _ = reconstruct_markdown(blocks)
     assert r"\tag{5.1}" in md          # 编号并入公式
     assert md.count("$$") == 2         # 只一个公式块
     assert "\n(5.1)" not in md         # 编号不再单独成行
@@ -56,7 +56,7 @@ def test_formula_number_without_formula_kept_inline():
         {"block_label": "text", "block_content": "see below", "block_order": 1},
         {"block_label": "formula_number", "block_content": "(9.9)", "block_order": 2},
     ]
-    md = reconstruct_markdown(blocks)
+    md, _ = reconstruct_markdown(blocks)
     assert "(9.9)" in md
 
 
@@ -68,7 +68,7 @@ def test_restore_emphasis_dots():
 
 def test_golden_jackson_chinese():
     blocks = json.loads((FIX / "jackson_p200_res.json").read_text(encoding="utf-8"))["parsing_res_list"]
-    md = reconstruct_markdown(blocks)
+    md, _ = reconstruct_markdown(blocks)
     assert md.strip().startswith("## 第五章")          # 标题
     assert r"\mathbf{N}=\boldsymbol{\mu}\times\mathbf{B}" in md  # 公式
     assert r"\tag{5.1}" in md                          # 编号绑定
@@ -78,7 +78,7 @@ def test_golden_jackson_chinese():
 
 def test_golden_paul_english():
     blocks = json.loads((FIX / "paul_p200_res.json").read_text(encoding="utf-8"))["parsing_res_list"]
-    md = reconstruct_markdown(blocks)
+    md, _ = reconstruct_markdown(blocks)
     assert r"\tag{5.30}" in md
     assert r"\tag{5.33}" in md                          # 编号全部绑回(md 端到端曾丢失的)
     assert "THE PER-UNIT-LENGTH" not in md              # 页眉(order=None)剔除
@@ -89,34 +89,34 @@ def test_golden_paul_english():
 def test_reference_content_kept():
     blocks = [{"block_label": "reference_content",
                "block_content": "[1] S. Ramo, Fields and Waves, Wiley, 1984.", "block_order": 1}]
-    md = reconstruct_markdown(blocks)
+    md, _ = reconstruct_markdown(blocks)
     assert "[1] S. Ramo, Fields and Waves, Wiley, 1984." in md
 
 
 def test_abstract_kept():
     blocks = [{"block_label": "abstract", "block_content": "This is the second edition.", "block_order": 1}]
-    md = reconstruct_markdown(blocks)
+    md, _ = reconstruct_markdown(blocks)
     assert "This is the second edition." in md
 
 
 def test_content_preserves_line_breaks():
     # content(目录/前言页码列表)逐行有意义,须保留换行,不能挤成一段
     blocks = [{"block_label": "content", "block_content": "Preface xvii\nIntroduction 1", "block_order": 1}]
-    md = reconstruct_markdown(blocks)
+    md, _ = reconstruct_markdown(blocks)
     assert "Preface xvii  \nIntroduction 1" in md
 
 
 def test_algorithm_wrapped_in_code_fence():
     blocks = [{"block_label": "algorithm",
                "block_content": "EXAMPLE\nVS 1 0 PULSE(0 5 0 1N 1N 4N 10N)\n.END", "block_order": 1}]
-    md = reconstruct_markdown(blocks)
+    md, _ = reconstruct_markdown(blocks)
     assert "```\nEXAMPLE\nVS 1 0 PULSE(0 5 0 1N 1N 4N 10N)\n.END\n```" in md
 
 
 def test_doc_title_without_paragraph_title_sibling_is_cover_metadata():
     # 无 paragraph_title 兄弟块 → 封面元信息,不当标题
     blocks = [{"block_label": "doc_title", "block_content": "SECOND EDITION\nCLAYTON R. PAUL", "block_order": 1}]
-    md = reconstruct_markdown(blocks)
+    md, _ = reconstruct_markdown(blocks)
     assert "## SECOND EDITION" not in md
     assert "SECOND EDITION" in md
     assert "CLAYTON R. PAUL" in md
@@ -128,14 +128,14 @@ def test_doc_title_with_paragraph_title_sibling_becomes_heading():
         {"block_label": "paragraph_title", "block_content": "1", "block_order": 1},
         {"block_label": "doc_title", "block_content": "INTRODUCTION", "block_order": 2},
     ]
-    md = reconstruct_markdown(blocks)
+    md, _ = reconstruct_markdown(blocks)
     assert "## INTRODUCTION" in md
 
 
 def test_unknown_label_falls_back_to_plain_content():
     # 兜底 else:未来出现新 label 时也不能静默丢失
     blocks = [{"block_label": "some_future_label", "block_content": "future content", "block_order": 1}]
-    md = reconstruct_markdown(blocks)
+    md, _ = reconstruct_markdown(blocks)
     assert "future content" in md
 
 
@@ -153,7 +153,7 @@ def test_algorithm_fence_escapes_embedded_triple_backticks():
     # 会被提前截断;围栏长度要比 content 内最长的连续反引号串多一个
     content = "before\n```\nnested\n```\nafter"
     blocks = [{"block_label": "algorithm", "block_content": content, "block_order": 1}]
-    md = reconstruct_markdown(blocks)
+    md, _ = reconstruct_markdown(blocks)
     assert f"````\n{content}\n````" in md
 
 
@@ -170,6 +170,160 @@ def test_sanitize_latex_preserves_displaystyle():
 def test_reconstruct_cleans_displaylimits_in_formula():
     blocks = [{"block_label": "display_formula",
                "block_content": r"$$ \int\displaylimits_{S} \mathbf{B} $$", "block_order": 1}]
-    md = reconstruct_markdown(blocks)
+    md, _ = reconstruct_markdown(blocks)
     assert r"\displaylimits" not in md
     assert r"\int_{S}" in md
+
+
+def test_returns_tuple_of_md_and_warnings():
+    blocks = [{"block_label": "text", "block_content": "hi", "block_order": 1}]
+    result = reconstruct_markdown(blocks)
+    assert isinstance(result, tuple) and len(result) == 2
+    md, warnings = result
+    assert "hi" in md
+    assert warnings == []
+
+
+def test_passthrough_label_inserted_by_y0():
+    # footnote(order=None,y0=200)应插在 y0=100 的正文和 y0=300 的正文之间
+    blocks = [
+        {"block_label": "text", "block_content": "first", "block_order": 1,
+         "block_bbox": [0, 100, 10, 110]},
+        {"block_label": "footnote", "block_content": "note here", "block_order": None,
+         "block_bbox": [0, 200, 10, 210]},
+        {"block_label": "text", "block_content": "second", "block_order": 2,
+         "block_bbox": [0, 300, 10, 310]},
+    ]
+    md, warnings = reconstruct_markdown(blocks)
+    assert md.index("first") < md.index("note here") < md.index("second")
+    assert warnings == []
+
+
+def test_tie_y0_extra_goes_after_ordered_fragment():
+    # spec §3 反例:extra y0=300、ordered y0 序列 [100,300,500]
+    # 权威语义"插在第一个 y0>300 的片段之前" → extra 排在 300 之后、500 之前
+    blocks = [
+        {"block_label": "text", "block_content": "at100", "block_order": 1,
+         "block_bbox": [0, 100, 10, 110]},
+        {"block_label": "text", "block_content": "at300", "block_order": 2,
+         "block_bbox": [0, 300, 10, 310]},
+        {"block_label": "text", "block_content": "at500", "block_order": 3,
+         "block_bbox": [0, 500, 10, 510]},
+        {"block_label": "footnote", "block_content": "tied_extra", "block_order": None,
+         "block_bbox": [0, 300, 10, 305]},
+    ]
+    md, _ = reconstruct_markdown(blocks)
+    assert md.index("at300") < md.index("tied_extra") < md.index("at500")
+
+
+def test_pure_extras_page_degenerates_to_extras_only():
+    # 零 ordered 片段(纯图/纯脚注页):归并退化为全部 extra 按 y0 输出
+    blocks = [
+        {"block_label": "footnote", "block_content": "only content", "block_order": None,
+         "block_bbox": [0, 50, 10, 60]},
+    ]
+    md, warnings = reconstruct_markdown(blocks)
+    assert "only content" in md
+    assert md.strip() != ""
+    assert warnings == []
+
+
+def test_extras_without_bbox_appended_at_page_tail_in_original_order():
+    blocks = [
+        {"block_label": "text", "block_content": "body", "block_order": 1,
+         "block_bbox": [0, 100, 10, 110]},
+        {"block_label": "footnote", "block_content": "no_bbox_a", "block_order": None,
+         "block_bbox": None},
+        {"block_label": "footnote", "block_content": "no_bbox_b", "block_order": None,
+         "block_bbox": None},
+    ]
+    md, _ = reconstruct_markdown(blocks)
+    assert md.index("body") < md.index("no_bbox_a") < md.index("no_bbox_b")
+
+
+def test_passthrough_empty_content_silently_skipped():
+    blocks = [
+        {"block_label": "text", "block_content": "body", "block_order": 1,
+         "block_bbox": [0, 100, 10, 110]},
+        {"block_label": "figure_title", "block_content": "", "block_order": None,
+         "block_bbox": [0, 50, 10, 60]},
+    ]
+    md, warnings = reconstruct_markdown(blocks)
+    assert md.strip() == "body"
+    assert warnings == []
+
+
+def test_known_noise_labels_silently_dropped():
+    blocks = [
+        {"block_label": "text", "block_content": "body", "block_order": 1,
+         "block_bbox": [0, 100, 10, 110]},
+        {"block_label": "header", "block_content": "RUNNING HEADER", "block_order": None,
+         "block_bbox": [0, 0, 10, 10]},
+        {"block_label": "number", "block_content": "42", "block_order": None,
+         "block_bbox": [0, 900, 10, 910]},
+        {"block_label": "header_image", "block_content": "", "block_order": None,
+         "block_bbox": [0, 0, 10, 10]},
+    ]
+    md, warnings = reconstruct_markdown(blocks)
+    assert "RUNNING HEADER" not in md
+    assert "42" not in md
+    assert warnings == []
+
+
+def test_unknown_unordered_label_with_content_warns_and_drops():
+    blocks = [
+        {"block_label": "text", "block_content": "body", "block_order": 1,
+         "block_bbox": [0, 100, 10, 110]},
+        {"block_label": "mystery_label", "block_content": "surprise content",
+         "block_order": None, "block_bbox": [0, 50, 10, 60]},
+    ]
+    md, warnings = reconstruct_markdown(blocks)
+    assert "surprise content" not in md
+    assert len(warnings) == 1
+    assert warnings[0] == {"kind": "unhandled_label", "label": "mystery_label",
+                            "page": None, "block_id": None, "sample": "surprise content"}
+
+
+def test_visual_block_missing_bbox_warns_and_drops():
+    blocks = [
+        {"block_label": "text", "block_content": "body", "block_order": 1,
+         "block_bbox": [0, 100, 10, 110]},
+        {"block_label": "image", "block_content": "", "block_order": None,
+         "block_bbox": None, "block_id": 7},
+    ]
+    md, warnings = reconstruct_markdown(blocks, stem="doc", page=3)
+    assert ".png" not in md
+    assert warnings == [{"kind": "visual_missing_bbox", "label": "image",
+                          "page": 3, "block_id": 7, "sample": ""}]
+
+
+def test_visual_block_emits_image_link_with_stem_and_page():
+    blocks = [
+        {"block_label": "image", "block_content": "", "block_order": None,
+         "block_bbox": [0, 50, 10, 60], "block_id": 4},
+    ]
+    md, warnings = reconstruct_markdown(blocks, stem="mybook", page=6)
+    assert "![](mybook.assets/page_0006_block_4.png)" in md
+    assert warnings == []
+
+
+def test_visual_block_without_stem_page_raises():
+    blocks = [
+        {"block_label": "image", "block_content": "", "block_order": None,
+         "block_bbox": [0, 50, 10, 60], "block_id": 4},
+    ]
+    import pytest
+    with pytest.raises(ValueError):
+        reconstruct_markdown(blocks)
+
+
+def test_visual_block_unexpected_content_keeps_both_and_warns():
+    blocks = [
+        {"block_label": "chart", "block_content": "unexpected data label",
+         "block_order": None, "block_bbox": [0, 50, 10, 60], "block_id": 2},
+    ]
+    md, warnings = reconstruct_markdown(blocks, stem="doc", page=1)
+    assert "![](doc.assets/page_0001_block_2.png)" in md
+    assert "unexpected data label" in md
+    assert warnings == [{"kind": "visual_unexpected_content", "label": "chart",
+                          "page": 1, "block_id": 2, "sample": "unexpected data label"}]
