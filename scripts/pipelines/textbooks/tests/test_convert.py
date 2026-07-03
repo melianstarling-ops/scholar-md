@@ -343,6 +343,26 @@ def test_convert_missing_assets_reported_when_backfill_impossible(tmp_path, monk
     assert res["selfcheck"]["missing_assets"] == ["page_0001_block_1.png"]
 
 
+def _one_ordered_image_block(page):
+    # block_order 不为 None 的 image 块:超出 reconstruct.py 的可视块处理范围
+    # (只有 block_order is None 的可视块才会渲染成 md 图片链接),不应被裁图/计入
+    # expected assets——这是 Finding 1 的回归防护:防止"裁了但没链"式静默丢失。
+    return [{"block_order": 1, "block_label": "image", "block_id": 1,
+             "block_content": "", "block_bbox": [5, 5, 15, 15]}]
+
+
+def test_convert_ordered_image_block_not_cropped_or_missing(tmp_path, monkeypatch):
+    pdf = _make_scan_pdf(tmp_path, 1)
+    _stub_engine(monkeypatch, _one_ordered_image_block)
+    out = str(tmp_path / "out")
+    res = cv.convert_pdf(pdf, out, dpi=100)
+    assets_dir = os.path.join(out, "scan", "scan.assets")
+    assert not os.path.exists(os.path.join(assets_dir, "page_0001_block_1.png"))
+    assert res["selfcheck"]["missing_assets"] == []
+    # 显式断言目录本身不存在或为空,防止 scoping 回归时测试仍"意外"通过
+    assert not os.path.isdir(assets_dir) or os.listdir(assets_dir) == []
+
+
 def test_convert_selfcheck_has_four_new_fields(tmp_path, monkeypatch):
     pdf = _make_scan_pdf(tmp_path, 2)
     _stub_engine(monkeypatch, _one_text_block)

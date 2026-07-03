@@ -75,3 +75,17 @@ def test_crop_block_images_bad_bbox_warns_not_raises(tmp_path):
     warnings = crop_block_images(png, blocks, assets_dir, page=1)
     assert len(warnings) == 1
     assert warnings[0]["kind"] == "visual_crop_error"
+
+
+def test_crop_block_images_skips_ordered_visual_block(tmp_path):
+    # block_order 不为 None 的 image/chart 块超出 reconstruct.py 的处理范围
+    # (只有 block_order is None 的可视块才会被渲染成图片链接),裁图函数应
+    # 同步跳过,不裁不落文件,也不算错误(warnings 为空)。
+    png = str(tmp_path / "page_0001.png")
+    _make_test_png(png)
+    assets_dir = str(tmp_path / "out.assets")
+    blocks = [{"block_label": "image", "block_id": 1, "block_order": 1,
+               "block_bbox": [50, 50, 150, 150], "block_content": ""}]
+    warnings = crop_block_images(png, blocks, assets_dir, page=1)
+    assert warnings == []
+    assert not os.path.exists(assets_dir)

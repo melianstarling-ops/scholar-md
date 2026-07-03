@@ -18,7 +18,8 @@ def crop_filename(page: int, block_id) -> str:
 
 def crop_block_images(png_path: str, blocks: list[dict], assets_dir: str, page: int) -> list[dict]:
     """裁 image/chart 类块存盘。返回告警列表(缺 bbox / 裁图异常),裁图失败不抛出。"""
-    visual_blocks = [b for b in blocks if is_visual_block(b.get("block_label", ""))]
+    visual_blocks = [b for b in blocks
+                      if is_visual_block(b.get("block_label", "")) and b.get("block_order") is None]
     if not visual_blocks:
         return []
     warnings: list[dict] = []

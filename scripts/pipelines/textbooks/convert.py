@@ -21,7 +21,8 @@ from scripts.pipelines.textbooks import images
 def _expected_visual_filenames(blocks: list[dict], page: int) -> list[str]:
     return [images.crop_filename(page, b.get("block_id"))
             for b in blocks
-            if images.is_visual_block(b.get("block_label", "")) and b.get("block_bbox")]
+            if images.is_visual_block(b.get("block_label", ""))
+            and b.get("block_order") is None and b.get("block_bbox")]
 
 
 def _backfill_missing_assets(blocks: list[dict], pdf_path: str, dpi: int,
