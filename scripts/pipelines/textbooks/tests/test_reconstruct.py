@@ -202,6 +202,46 @@ def test_sanitize_latex_fixes_real_1_3a_double_subscript():
     assert r"\underbrace{\nabla_{z}\times\overrightarrow{\mathcal{E}}_{\mathrm{t}}}" in out
 
 
+def test_sanitize_latex_collapses_chained_atop_to_substack():
+    # 一个 group 里 2+ 个 \atop 是 KaTeX 硬报错(only one infix per group);合并进 \substack
+    assert sanitize_latex(r"_{in the\atop transverse\atop plane}") == \
+        r"_{\substack{in the\\transverse\\plane}}"
+
+
+def test_sanitize_latex_leaves_single_atop_untouched():
+    # 单个 \atop 是合法的 KaTeX 堆叠(一个 infix),不得误改
+    assert sanitize_latex(r"{a\atop b}") == r"{a\atop b}"
+
+
+def test_sanitize_latex_atop_does_not_touch_atopwithdelims():
+    # \atopwithdelims 是另一个命令,\atop 前缀匹配不得误伤
+    s = r"{a\atopwithdelims() b}"
+    assert sanitize_latex(s) == s
+
+
+def test_sanitize_latex_fixes_cdotd_glue():
+    # OCR 把 \cdot d(点积+微分 d) 粘成未定义控制序列 \cdotd
+    assert sanitize_latex(r"\mathcal{H}\cdotd\vec{l}") == r"\mathcal{H}\cdot d\vec{l}"
+
+
+def test_sanitize_latex_cdotd_does_not_touch_cdot():
+    # 负向边界:合法的 \cdot 不得被 \cdotd 规则误伤
+    assert sanitize_latex(r"a\cdot b") == r"a\cdot b"
+
+
+def test_reconstruct_fixes_1_3b_chained_atop_end_to_end():
+    # 真实 1.3b:下标里链式双 \atop
+    body = (r"$$ \left(\nabla_{\mathrm{t}}+\nabla_{z}\right)\times\overrightarrow{\mathcal{H}}_{\mathrm{t}}"
+            r"=\underbrace{\nabla_{\mathrm{t}}\times\overrightarrow{\mathcal{H}}_{\mathrm{t}}}_{z\text{ directed}}"
+            r"+\underbrace{\nabla_{z}\times\overrightarrow{\mathcal{H}}_{\mathrm{t}}}"
+            r"_{in the\atop transverse\atop plane}"
+            r"=\sigma\overrightarrow{\mathcal{E}}_{\mathrm{t}}+\varepsilon\frac{\partial\overrightarrow{\mathcal{E}}_{\mathrm{t}}}{\partial t} $$")
+    blocks = [{"block_label": "display_formula", "block_content": body, "block_order": 1}]
+    md, _ = reconstruct_markdown(blocks)
+    assert r"\atop" not in md                       # 链式 atop 已消除
+    assert r"\substack{in the\\transverse\\plane}" in md
+
+
 def test_reconstruct_fixes_1_3a_double_subscript_end_to_end():
     # 真实 1.3a display_formula 块经 reconstruct 后不应残留相邻双下标
     body = (r"$$ \left(\nabla_{\mathrm{t}}+\nabla_{z}\right)\times\overrightarrow{\mathcal{E}}_{\mathrm{t}}"

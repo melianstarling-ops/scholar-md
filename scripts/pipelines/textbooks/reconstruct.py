@@ -77,10 +77,68 @@ def _collapse_double_subscript(s: str) -> str:
     return "".join(out)
 
 
+def _split_top_level_atop(inner: str) -> list[str]:
+    r"""按 brace-depth 0 处的 \atop(排除 \atopwithdelims)切分 inner。"""
+    parts: list[str] = []
+    depth = last = i = 0
+    n = len(inner)
+    while i < n:
+        c = inner[i]
+        if c == "{":
+            depth += 1
+            i += 1
+        elif c == "}":
+            depth -= 1
+            i += 1
+        elif (depth == 0 and inner.startswith(r"\atop", i)
+              and not (i + 5 < n and inner[i + 5].isalpha())):
+            parts.append(inner[last:i])
+            i += 5
+            last = i
+        else:
+            i += 1
+    parts.append(inner[last:])
+    return parts
+
+
+def _collapse_chained_atop(s: str) -> str:
+    r"""一个花括号 group 里出现 2+ 个 \atop 是 KaTeX 硬报错(only one infix per
+    group)。把这种链式 {A\atop B\atop C} 归一成 {\substack{A\\B\\C}}。单个 \atop
+    合法,不动;\atopwithdelims 不误伤。仅消红,不补 \text{}(裸文字斜体属软问题)。"""
+    out: list[str] = []
+    i, n = 0, len(s)
+    while i < n:
+        if s[i] == "{":
+            end = _match_braced(s, i)
+            if end == -1:
+                out.append(s[i])
+                i += 1
+                continue
+            inner = s[i + 1:end - 1]
+            parts = _split_top_level_atop(inner)
+            if len(parts) >= 3:                 # 2+ 个 \atop → 3+ 段
+                fixed = [_collapse_chained_atop(p).strip() for p in parts]
+                out.append("{\\substack{" + "\\\\".join(fixed) + "}}")
+            else:                               # 递归进组内(可能有嵌套 group)
+                out.append("{" + _collapse_chained_atop(inner) + "}")
+            i = end
+        else:
+            out.append(s[i])
+            i += 1
+    return "".join(out)
+
+
+# OCR 把 \cdot d(点积 + 微分 d)粘成未定义控制序列 \cdotd(L-T17,p48 语料实测)。
+# (?![a-zA-Z]) 负向边界:只改 \cdotd 本身,不误伤合法 \cdot。
+_CDOTD_RE = re.compile(r"\\cdotd(?![a-zA-Z])")
+
+
 def sanitize_latex(s: str) -> str:
-    r"""引擎方言清洗:删 KaTeX 不支持的冗余命令 + 合并非法相邻双下标。"""
+    r"""引擎方言清洗:删冗余命令 + 合并非法相邻双下标 + 链式 atop→substack + \cdotd 拆合。"""
     for pat, repl in _KATEX_SUB:
         s = pat.sub(repl, s)
+    s = _CDOTD_RE.sub(r"\\cdot d", s)
+    s = _collapse_chained_atop(s)
     s = _collapse_double_subscript(s)
     return s
 
