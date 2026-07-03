@@ -1,0 +1,673 @@
+{
+    "input_path": "03_Output/textbooks/_realrun_100page_test\\Paul_p1-100_scan\\_work\\page_0006.png",
+    "page_index": null,
+    "page_count": null,
+    "width": 1241,
+    "height": 2059,
+    "model_settings": {
+        "use_doc_preprocessor": false,
+        "use_layout_detection": true,
+        "use_chart_recognition": false,
+        "use_seal_recognition": false,
+        "use_ocr_for_image_block": false,
+        "format_block_content": false,
+        "merge_layout_blocks": true,
+        "markdown_ignore_labels": [
+            "number",
+            "footnote",
+            "header",
+            "header_image",
+            "footer",
+            "footer_image",
+            "aside_text"
+        ],
+        "return_layout_polygon_points": true
+    },
+    "parsing_res_list": [
+        {
+            "block_label": "header_image",
+            "block_content": "",
+            "block_bbox": [
+                540,
+                194,
+                702,
+                355
+            ],
+            "block_id": 0,
+            "block_order": null,
+            "group_id": 0,
+            "block_polygon_points": [
+                [
+                    540.0,
+                    194.0
+                ],
+                [
+                    702.0,
+                    194.0
+                ],
+                [
+                    702.0,
+                    355.0
+                ],
+                [
+                    540.0,
+                    355.0
+                ]
+            ]
+        },
+        {
+            "block_label": "paragraph_title",
+            "block_content": "THE WILEY BICENTENNIAL-KNOWLEDGE FOR GENERATIONS",
+            "block_bbox": [
+                212,
+                409,
+                1031,
+                438
+            ],
+            "block_id": 1,
+            "block_order": 1,
+            "group_id": 1,
+            "block_polygon_points": [
+                [
+                    212.0,
+                    409.0
+                ],
+                [
+                    1031.0,
+                    409.0
+                ],
+                [
+                    1031.0,
+                    438.0
+                ],
+                [
+                    212.0,
+                    438.0
+                ]
+            ]
+        },
+        {
+            "block_label": "text",
+            "block_content": "ach generation has its unique needs and aspirations. When Charles Wiley first opened his small printing shop in lower Manhattan in 1807, it was a generation of boundless potential searching for an identity. And we were there, helping to define a new American literary tradition. Over half a century later, in the midst of the Second Industrial Revolution, it was a generation focused on building the future. Once again, we were there, supplying the critical scientific, technical, and engineering knowledge that helped frame the world. Throughout the 20th Century, and into the new millennium, nations began to reach out beyond their own borders and a new international community was born. Wiley was there, expanding its operations around the world to enable a global exchange of ideas, opinions, and know-how.",
+            "block_bbox": [
+                164,
+                482,
+                1074,
+                867
+            ],
+            "block_id": 2,
+            "block_order": 2,
+            "group_id": 2,
+            "block_polygon_points": [
+                [
+                    164.0,
+                    482.0
+                ],
+                [
+                    1074.0,
+                    482.0
+                ],
+                [
+                    1074.0,
+                    867.0
+                ],
+                [
+                    164.0,
+                    867.0
+                ]
+            ]
+        },
+        {
+            "block_label": "text",
+            "block_content": "For 200 years, Wiley has been an integral part of each generation's journey, enabling the flow of information and understanding necessary to meet their needs and fulfill their aspirations. Today, bold new technologies are changing the way we live and learn. Wiley will be there, providing you the must-have knowledge you need to imagine new worlds, new possibilities, and new opportunities.",
+            "block_bbox": [
+                176,
+                898,
+                1074,
+                1073
+            ],
+            "block_id": 3,
+            "block_order": 3,
+            "group_id": 3,
+            "block_polygon_points": [
+                [
+                    176.0,
+                    898.0
+                ],
+                [
+                    1074.0,
+                    898.0
+                ],
+                [
+                    1074.0,
+                    1073.0
+                ],
+                [
+                    176.0,
+                    1073.0
+                ]
+            ]
+        },
+        {
+            "block_label": "text",
+            "block_content": "Generations come and go, but you can always count on Wiley to provide you the knowledge you need, when and where you need it!",
+            "block_bbox": [
+                176,
+                1106,
+                1073,
+                1173
+            ],
+            "block_id": 4,
+            "block_order": 4,
+            "group_id": 4,
+            "block_polygon_points": [
+                [
+                    176.0,
+                    1106.0
+                ],
+                [
+                    1073.0,
+                    1106.0
+                ],
+                [
+                    1073.0,
+                    1173.0
+                ],
+                [
+                    176.0,
+                    1173.0
+                ]
+            ]
+        },
+        {
+            "block_label": "image",
+            "block_content": "",
+            "block_bbox": [
+                165,
+                1213,
+                655,
+                1291
+            ],
+            "block_id": 5,
+            "block_order": null,
+            "group_id": 5,
+            "block_polygon_points": [
+                [
+                    165.0,
+                    1213.0
+                ],
+                [
+                    655.0,
+                    1213.0
+                ],
+                [
+                    655.0,
+                    1291.0
+                ],
+                [
+                    165.0,
+                    1291.0
+                ]
+            ]
+        },
+        {
+            "block_label": "text",
+            "block_content": "WILLIAM J. PESCE\nPRESIDENT AND CHIEF EXECUTIVE OFFICER\nPETER BOOTH WILEY\nCHAIRMAN OF THE BOARD",
+            "block_bbox": [
+                179,
+                1307,
+                659,
+                1364
+            ],
+            "block_id": 6,
+            "block_order": 5,
+            "group_id": 6,
+            "block_polygon_points": [
+                [
+                    179.0,
+                    1307.0
+                ],
+                [
+                    659.0,
+                    1307.0
+                ],
+                [
+                    659.0,
+                    1364.0
+                ],
+                [
+                    179.0,
+                    1364.0
+                ]
+            ]
+        },
+        {
+            "block_label": "text",
+            "block_content": "",
+            "block_bbox": [
+                751,
+                1310,
+                1082,
+                1364
+            ],
+            "block_id": 7,
+            "block_order": 6,
+            "group_id": 6,
+            "block_polygon_points": [
+                [
+                    751.0,
+                    1310.0
+                ],
+                [
+                    1082.0,
+                    1310.0
+                ],
+                [
+                    1082.0,
+                    1364.0
+                ],
+                [
+                    751.0,
+                    1364.0
+                ]
+            ]
+        },
+        {
+            "block_label": "image",
+            "block_content": "",
+            "block_bbox": [
+                695,
+                1183,
+                1144,
+                1312
+            ],
+            "block_id": 8,
+            "block_order": null,
+            "group_id": 8,
+            "block_polygon_points": [
+                [
+                    695.0,
+                    1183.0
+                ],
+                [
+                    1144.0,
+                    1183.0
+                ],
+                [
+                    1144.0,
+                    1312.0
+                ],
+                [
+                    695.0,
+                    1312.0
+                ]
+            ]
+        }
+    ],
+    "layout_det_res": {
+        "input_path": null,
+        "page_index": null,
+        "boxes": [
+            {
+                "cls_id": 13,
+                "label": "header_image",
+                "score": 0.7136458158493042,
+                "coordinate": [
+                    540,
+                    194,
+                    702,
+                    355
+                ],
+                "order": null,
+                "polygon_points": [
+                    [
+                        540.0,
+                        194.0
+                    ],
+                    [
+                        702.0,
+                        194.0
+                    ],
+                    [
+                        702.0,
+                        355.0
+                    ],
+                    [
+                        540.0,
+                        355.0
+                    ]
+                ]
+            },
+            {
+                "cls_id": 17,
+                "label": "paragraph_title",
+                "score": 0.5316991806030273,
+                "coordinate": [
+                    212,
+                    409,
+                    1031,
+                    438
+                ],
+                "order": 1,
+                "polygon_points": [
+                    [
+                        212.0,
+                        409.0
+                    ],
+                    [
+                        1031.0,
+                        409.0
+                    ],
+                    [
+                        1031.0,
+                        438.0
+                    ],
+                    [
+                        212.0,
+                        438.0
+                    ]
+                ]
+            },
+            {
+                "cls_id": 22,
+                "label": "text",
+                "score": 0.9535866379737854,
+                "coordinate": [
+                    164,
+                    482,
+                    1074,
+                    867
+                ],
+                "order": 2,
+                "polygon_points": [
+                    [
+                        164.0,
+                        482.0
+                    ],
+                    [
+                        1074.0,
+                        482.0
+                    ],
+                    [
+                        1074.0,
+                        867.0
+                    ],
+                    [
+                        164.0,
+                        867.0
+                    ]
+                ]
+            },
+            {
+                "cls_id": 22,
+                "label": "text",
+                "score": 0.9507375955581665,
+                "coordinate": [
+                    176,
+                    898,
+                    1074,
+                    1073
+                ],
+                "order": 3,
+                "polygon_points": [
+                    [
+                        176.0,
+                        898.0
+                    ],
+                    [
+                        1074.0,
+                        898.0
+                    ],
+                    [
+                        1074.0,
+                        1073.0
+                    ],
+                    [
+                        176.0,
+                        1073.0
+                    ]
+                ]
+            },
+            {
+                "cls_id": 22,
+                "label": "text",
+                "score": 0.8985372185707092,
+                "coordinate": [
+                    176,
+                    1106,
+                    1073,
+                    1173
+                ],
+                "order": 4,
+                "polygon_points": [
+                    [
+                        176.0,
+                        1106.0
+                    ],
+                    [
+                        1073.0,
+                        1106.0
+                    ],
+                    [
+                        1073.0,
+                        1173.0
+                    ],
+                    [
+                        176.0,
+                        1173.0
+                    ]
+                ]
+            },
+            {
+                "cls_id": 14,
+                "label": "image",
+                "score": 0.762516975402832,
+                "coordinate": [
+                    165,
+                    1213,
+                    655,
+                    1291
+                ],
+                "order": null,
+                "polygon_points": [
+                    [
+                        165.0,
+                        1213.0
+                    ],
+                    [
+                        655.0,
+                        1213.0
+                    ],
+                    [
+                        655.0,
+                        1291.0
+                    ],
+                    [
+                        165.0,
+                        1291.0
+                    ]
+                ]
+            },
+            {
+                "cls_id": 22,
+                "label": "text",
+                "score": 0.4193528890609741,
+                "coordinate": [
+                    272,
+                    1308,
+                    577,
+                    1334
+                ],
+                "order": 5,
+                "polygon_points": [
+                    [
+                        272.0,
+                        1308.0
+                    ],
+                    [
+                        577.0,
+                        1308.0
+                    ],
+                    [
+                        577.0,
+                        1334.0
+                    ],
+                    [
+                        272.0,
+                        1334.0
+                    ]
+                ]
+            },
+            {
+                "cls_id": 22,
+                "label": "text",
+                "score": 0.4718746542930603,
+                "coordinate": [
+                    179,
+                    1307,
+                    659,
+                    1364
+                ],
+                "order": 6,
+                "polygon_points": [
+                    [
+                        179.0,
+                        1307.0
+                    ],
+                    [
+                        659.0,
+                        1307.0
+                    ],
+                    [
+                        659.0,
+                        1364.0
+                    ],
+                    [
+                        179.0,
+                        1364.0
+                    ]
+                ]
+            },
+            {
+                "cls_id": 22,
+                "label": "text",
+                "score": 0.32038167119026184,
+                "coordinate": [
+                    182,
+                    1338,
+                    658,
+                    1364
+                ],
+                "order": 7,
+                "polygon_points": [
+                    [
+                        182.0,
+                        1338.0
+                    ],
+                    [
+                        658.0,
+                        1338.0
+                    ],
+                    [
+                        658.0,
+                        1364.0
+                    ],
+                    [
+                        182.0,
+                        1364.0
+                    ]
+                ]
+            },
+            {
+                "cls_id": 14,
+                "label": "image",
+                "score": 0.8674685955047607,
+                "coordinate": [
+                    695,
+                    1183,
+                    1144,
+                    1312
+                ],
+                "order": null,
+                "polygon_points": [
+                    [
+                        695.0,
+                        1183.0
+                    ],
+                    [
+                        1144.0,
+                        1183.0
+                    ],
+                    [
+                        1144.0,
+                        1312.0
+                    ],
+                    [
+                        695.0,
+                        1312.0
+                    ]
+                ]
+            },
+            {
+                "cls_id": 22,
+                "label": "text",
+                "score": 0.3203589916229248,
+                "coordinate": [
+                    752,
+                    1310,
+                    1086,
+                    1339
+                ],
+                "order": 8,
+                "polygon_points": [
+                    [
+                        752.0,
+                        1310.0
+                    ],
+                    [
+                        1086.0,
+                        1310.0
+                    ],
+                    [
+                        1086.0,
+                        1339.0
+                    ],
+                    [
+                        752.0,
+                        1339.0
+                    ]
+                ]
+            },
+            {
+                "cls_id": 22,
+                "label": "text",
+                "score": 0.5361663103103638,
+                "coordinate": [
+                    751,
+                    1310,
+                    1082,
+                    1364
+                ],
+                "order": 9,
+                "polygon_points": [
+                    [
+                        751.0,
+                        1310.0
+                    ],
+                    [
+                        1082.0,
+                        1310.0
+                    ],
+                    [
+                        1082.0,
+                        1364.0
+                    ],
+                    [
+                        751.0,
+                        1364.0
+                    ]
+                ]
+            }
+        ]
+    }
+}

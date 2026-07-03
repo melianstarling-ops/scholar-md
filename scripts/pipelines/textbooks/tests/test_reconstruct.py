@@ -327,3 +327,24 @@ def test_visual_block_unexpected_content_keeps_both_and_warns():
     assert "unexpected data label" in md
     assert warnings == [{"kind": "visual_unexpected_content", "label": "chart",
                           "page": 1, "block_id": 2, "sample": "unexpected data label"}]
+
+
+def test_golden_p28_image_inserted_between_text_and_captions():
+    blocks = json.loads((FIX / "paul_p28_res.json").read_text(encoding="utf-8"))["parsing_res_list"]
+    md, warnings = reconstruct_markdown(blocks, stem="paul", page=28)
+    assert "paul.assets/page_0028_block_" in md
+    # image 在正文 text 之后、figure_title 说明文字之前(该页真实版面顺序)
+    text_pos = md.index("cables used to interconnect")
+    image_pos = md.index("paul.assets/")
+    caption_pos = md.index("FIGURE 1.1")
+    assert text_pos < image_pos < caption_pos
+    assert warnings == []
+
+
+def test_golden_p6_column_suspect_output_is_deterministic():
+    blocks = json.loads((FIX / "paul_p6_res.json").read_text(encoding="utf-8"))["parsing_res_list"]
+    from scripts.pipelines.textbooks.selfcheck import detect_column_layout
+    assert detect_column_layout(blocks) is True          # 该页已知是双栏嫌疑页(spec §1/§3)
+    md1, _ = reconstruct_markdown(blocks, stem="paul", page=6)
+    md2, _ = reconstruct_markdown(blocks, stem="paul", page=6)
+    assert md1 == md2                                     # 锁"确定性",不锁"正确性"
