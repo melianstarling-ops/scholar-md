@@ -1,0 +1,69 @@
+<!doctype html>
+<html lang="zh">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>{{TITLE}}</title>
+<style>/* katex */
+{{KATEX_CSS}}
+</style>
+<style>/* app */
+{{APP_CSS}}
+</style>
+</head>
+<body>
+<header id="topbar">
+  <div class="brand">📖 <b>{{STEM}}</b> <span class="muted">debug view</span></div>
+  <div class="nav">
+    <button id="prev">‹</button>
+    <input id="pageInput" type="number" min="1" value="1"> / <span id="pageTotal">?</span>
+    <button id="next">›</button>
+  </div>
+  <div class="tools">
+    <select id="errorIndex" title="跳到有渲染问题的页"><option>报错索引…</option></select>
+    <label class="layers" id="layerToggles"></label>
+    <button id="annotBtn" title="标注模式 (M)">✎ 标注</button>
+    <button id="exportBtn" title="导出标注 JSON">⭳ 导出</button>
+  </div>
+</header>
+
+<main>
+  <section id="leftPane">
+    <div id="pageStage">
+      <img id="pageImg" alt="">
+      <div id="overlayLayer"></div>
+      <div id="annotLayer"></div>
+      <div id="noImg" class="no-img" hidden>源 PDF 不可用 — 左栏页图缺省(右栏渲染不受影响)</div>
+    </div>
+  </section>
+  <section id="rightPane">
+    <div id="signals"></div>
+    <div id="mdOut" class="markdown-body"></div>
+  </section>
+</main>
+
+<div id="annotHint" class="annot-hint" hidden>标注模式:在左栏页面上拖框选中问题区域,松手后选分类</div>
+
+<script>/* katex */
+{{KATEX_JS}}
+</script>
+<script>/* markdown-it */
+{{MARKDOWNIT_JS}}
+</script>
+<script>/* CJS shim:让 @vscode/markdown-it-katex(CJS) 在浏览器里拿到 katex */
+var module = { exports: {} }, exports = module.exports;
+function require(n) { if (n === "katex") return window.katex; throw new Error("no module " + n); }
+</script>
+<script>/* markdown-it-katex 插件(数学 token 先于 markdown 强调解析,受保护,不被 _ / * 污染) */
+{{MDKATEX_JS}}
+</script>
+<script>window.mdKatexPlugin = (module.exports && module.exports.default) || module.exports;</script>
+<script>
+window.DEBUG_DATA = {{PAYLOAD_JSON}};
+window.SERVE_MODE = {{SERVE_MODE}};
+</script>
+<script>/* app */
+{{APP_JS}}
+</script>
+</body>
+</html>
