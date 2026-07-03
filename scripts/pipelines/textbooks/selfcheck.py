@@ -48,7 +48,8 @@ def detect_column_layout(blocks: list[dict]) -> bool:
     y 区间重叠比例 > 0.5(相对较矮块的高度)且 x 区间完全分离 → 判定疑似双栏。"""
     candidates = [b for b in blocks
                   if b.get("block_label") in ("text", "display_formula")
-                  and b.get("block_order") is not None and b.get("block_bbox")]
+                  and b.get("block_order") is not None
+                  and isinstance(b.get("block_bbox"), (list, tuple)) and len(b.get("block_bbox")) == 4]
     for i in range(len(candidates)):
         x0a, y0a, x1a, y1a = candidates[i]["block_bbox"]
         for j in range(i + 1, len(candidates)):

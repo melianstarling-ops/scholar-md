@@ -128,3 +128,14 @@ def test_aggregate_warnings_keeps_visual_warnings_as_list():
 
 def test_aggregate_warnings_empty_input():
     assert aggregate_warnings([]) == {"unhandled_labels": {}, "visual_warnings": []}
+
+
+def test_detect_column_layout_malformed_bbox_does_not_raise():
+    # 一个正常 4 元素 bbox + 一个畸形 2 元素 bbox 混在候选块里,不应崩溃
+    # (畸形 bbox 应被当作缺失 bbox 一样排除出候选集)
+    blocks = [
+        {"block_label": "text", "block_order": 1, "block_bbox": [0, 100, 200, 300]},
+        {"block_label": "text", "block_order": 2, "block_bbox": [400, 110]},
+    ]
+    result = detect_column_layout(blocks)
+    assert isinstance(result, bool)

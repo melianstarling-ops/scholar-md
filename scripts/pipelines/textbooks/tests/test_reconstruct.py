@@ -341,6 +341,29 @@ def test_golden_p28_image_inserted_between_text_and_captions():
     assert warnings == []
 
 
+def test_ordered_block_malformed_bbox_does_not_raise():
+    # block_bbox 存在但非 4 元素(单元素 [5],access bbox[1] 会 IndexError)应像
+    # 缺失一样降级处理(y0 默认 0),不应崩溃;内容仍须正常出现在输出里。
+    blocks = [{"block_label": "text", "block_content": "malformed bbox body",
+               "block_order": 1, "block_bbox": [5]}]
+    md, _ = reconstruct_markdown(blocks)
+    assert "malformed bbox body" in md
+
+
+def test_visual_block_malformed_bbox_warns_and_drops():
+    # 畸形 bbox([1, 2] 非 4 元素)应与缺失 bbox 一视同仁:告警 + 丢弃,不崩溃
+    blocks = [
+        {"block_label": "text", "block_content": "body", "block_order": 1,
+         "block_bbox": [0, 100, 10, 110]},
+        {"block_label": "image", "block_content": "", "block_order": None,
+         "block_bbox": [1, 2], "block_id": 7},
+    ]
+    md, warnings = reconstruct_markdown(blocks, stem="doc", page=3)
+    assert ".png" not in md
+    assert warnings == [{"kind": "visual_missing_bbox", "label": "image",
+                          "page": 3, "block_id": 7, "sample": ""}]
+
+
 def test_golden_p6_column_suspect_output_is_deterministic():
     blocks = json.loads((FIX / "paul_p6_res.json").read_text(encoding="utf-8"))["parsing_res_list"]
     from scripts.pipelines.textbooks.selfcheck import detect_column_layout

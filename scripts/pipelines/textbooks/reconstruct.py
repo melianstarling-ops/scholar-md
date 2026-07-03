@@ -67,7 +67,8 @@ def _render_ordered(ordered: list[dict]) -> list[tuple[float, str]]:
         b = ordered[i]
         label = b.get("block_label", "")
         content = (b.get("block_content") or "").strip()
-        y0 = (b.get("block_bbox") or [0, 0, 0, 0])[1]
+        bbox = b.get("block_bbox")
+        y0 = bbox[1] if isinstance(bbox, (list, tuple)) and len(bbox) == 4 else 0
         if not content:
             i += 1
             continue
@@ -119,6 +120,8 @@ def _render_unordered(blocks: list[dict], stem: str | None,
         label = b.get("block_label", "")
         content = (b.get("block_content") or "").strip()
         bbox = b.get("block_bbox")
+        if not (isinstance(bbox, (list, tuple)) and len(bbox) == 4):
+            bbox = None
         y0 = bbox[1] if bbox else None
         block_id = b.get("block_id")
 
