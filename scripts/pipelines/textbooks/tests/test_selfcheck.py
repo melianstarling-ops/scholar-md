@@ -1,4 +1,4 @@
-from scripts.pipelines.textbooks.selfcheck import block_coverage, katex_incompat_scan
+from scripts.pipelines.textbooks.selfcheck import block_coverage, katex_incompat_scan, detect_column_layout
 
 
 def test_all_ordered_blocks_covered():
@@ -69,3 +69,39 @@ def test_katex_scan_detects_residual():
 
 def test_katex_scan_clean_returns_empty():
     assert katex_incompat_scan(r"$$ \int_{S} \displaystyle x $$") == []
+
+
+def test_detect_column_layout_true_for_side_by_side_blocks():
+    # 两块 y 区间大幅重叠、x 区间完全分离(左右并排)→ 判定双栏
+    blocks = [
+        {"block_label": "text", "block_order": 1, "block_bbox": [0, 100, 200, 300]},
+        {"block_label": "text", "block_order": 2, "block_bbox": [400, 110, 600, 290]},
+    ]
+    assert detect_column_layout(blocks) is True
+
+
+def test_detect_column_layout_false_for_single_column():
+    # 正常单栏:纵向排列,x 区间重叠
+    blocks = [
+        {"block_label": "text", "block_order": 1, "block_bbox": [0, 100, 600, 300]},
+        {"block_label": "text", "block_order": 2, "block_bbox": [0, 350, 600, 550]},
+    ]
+    assert detect_column_layout(blocks) is False
+
+
+def test_detect_column_layout_ignores_order_none_blocks():
+    # header/number 等 order=None 块不参与判定(页眉页脚天然左右分布,不代表双栏正文)
+    blocks = [
+        {"block_label": "header", "block_order": None, "block_bbox": [0, 0, 100, 20]},
+        {"block_label": "number", "block_order": None, "block_bbox": [500, 0, 600, 20]},
+    ]
+    assert detect_column_layout(blocks) is False
+
+
+def test_detect_column_layout_ignores_non_text_labels():
+    # image/figure_title 等不参与判定,只看 text/display_formula
+    blocks = [
+        {"block_label": "image", "block_order": None, "block_bbox": [0, 100, 200, 300]},
+        {"block_label": "figure_title", "block_order": None, "block_bbox": [400, 110, 600, 290]},
+    ]
+    assert detect_column_layout(blocks) is False

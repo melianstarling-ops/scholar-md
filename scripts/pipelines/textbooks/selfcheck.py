@@ -41,3 +41,24 @@ def block_coverage(blocks: list[dict], md: str) -> dict:
             missing.append((b.get("block_content") or "")[:40])
     return {"total": len(ordered), "in_md": in_md, "missing": missing,
             "skipped_empty": skipped_empty}
+
+
+def detect_column_layout(blocks: list[dict]) -> bool:
+    """双栏启发式(spec §5.6):同页 ordered 的 text/display_formula 块两两比较,存在一对
+    y 区间重叠比例 > 0.5(相对较矮块的高度)且 x 区间完全分离 → 判定疑似双栏。"""
+    candidates = [b for b in blocks
+                  if b.get("block_label") in ("text", "display_formula")
+                  and b.get("block_order") is not None and b.get("block_bbox")]
+    for i in range(len(candidates)):
+        x0a, y0a, x1a, y1a = candidates[i]["block_bbox"]
+        for j in range(i + 1, len(candidates)):
+            x0b, y0b, x1b, y1b = candidates[j]["block_bbox"]
+            overlap = min(y1a, y1b) - max(y0a, y0b)
+            if overlap <= 0:
+                continue
+            shorter = min(y1a - y0a, y1b - y0b)
+            if shorter <= 0:
+                continue
+            if overlap / shorter > 0.5 and (x1a < x0b or x1b < x0a):
+                return True
+    return False
