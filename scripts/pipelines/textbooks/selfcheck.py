@@ -62,3 +62,18 @@ def detect_column_layout(blocks: list[dict]) -> bool:
             if overlap / shorter > 0.5 and (x1a < x0b or x1b < x0a):
                 return True
     return False
+
+
+def aggregate_warnings(warnings: list[dict]) -> dict:
+    """reconstruct_markdown 逐页告警汇总成 selfcheck 报告字段(spec §5.5/§5.6):
+    unhandled_labels 专指没见过的 label(按 label 分组计数);visual_warnings 是
+    "认识的 label 但行为超预期"(缺 bbox / 意外带文本),原样列出不聚合。"""
+    unhandled_labels: dict[str, dict] = {}
+    visual_warnings: list[dict] = []
+    for w in warnings:
+        if w["kind"] == "unhandled_label":
+            entry = unhandled_labels.setdefault(w["label"], {"count": 0, "sample": w["sample"]})
+            entry["count"] += 1
+        else:
+            visual_warnings.append(w)
+    return {"unhandled_labels": unhandled_labels, "visual_warnings": visual_warnings}

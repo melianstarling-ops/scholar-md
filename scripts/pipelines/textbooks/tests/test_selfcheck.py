@@ -1,4 +1,4 @@
-from scripts.pipelines.textbooks.selfcheck import block_coverage, katex_incompat_scan, detect_column_layout
+from scripts.pipelines.textbooks.selfcheck import block_coverage, katex_incompat_scan, detect_column_layout, aggregate_warnings
 
 
 def test_all_ordered_blocks_covered():
@@ -105,3 +105,26 @@ def test_detect_column_layout_ignores_non_text_labels():
         {"block_label": "figure_title", "block_order": None, "block_bbox": [400, 110, 600, 290]},
     ]
     assert detect_column_layout(blocks) is False
+
+
+def test_aggregate_warnings_groups_unhandled_labels_with_count():
+    warnings = [
+        {"kind": "unhandled_label", "label": "mystery", "page": 1, "block_id": 1, "sample": "a"},
+        {"kind": "unhandled_label", "label": "mystery", "page": 5, "block_id": 2, "sample": "b"},
+    ]
+    result = aggregate_warnings(warnings)
+    assert result["unhandled_labels"] == {"mystery": {"count": 2, "sample": "a"}}
+
+
+def test_aggregate_warnings_keeps_visual_warnings_as_list():
+    warnings = [
+        {"kind": "visual_missing_bbox", "label": "image", "page": 3, "block_id": 9, "sample": ""},
+        {"kind": "visual_unexpected_content", "label": "chart", "page": 4, "block_id": 1, "sample": "x"},
+    ]
+    result = aggregate_warnings(warnings)
+    assert result["visual_warnings"] == warnings
+    assert result["unhandled_labels"] == {}
+
+
+def test_aggregate_warnings_empty_input():
+    assert aggregate_warnings([]) == {"unhandled_labels": {}, "visual_warnings": []}
