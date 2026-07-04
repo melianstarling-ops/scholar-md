@@ -143,6 +143,9 @@ main{flex:1;display:flex;min-height:0}
 #mdOut .katex-display{overflow-x:auto;overflow-y:hidden;padding:2px 0}
 #mdOut .katex-error{color:var(--bad)!important;outline:2px solid var(--bad);outline-offset:2px;border-radius:3px}
 .err-formula{background:color-mix(in srgb,var(--bad) 8%,transparent);outline:1px dashed var(--bad);border-radius:4px;padding:3px}
+/* 片段块:左右双向联动的最小单元 */
+.mdblk{border-radius:6px;padding:2px 8px;margin:0 -8px;transition:background .12s,box-shadow .12s;cursor:default}
+.mdblk.link-hot{background:color-mix(in srgb,var(--accent) 14%,transparent);box-shadow:inset 3px 0 0 var(--accent)}
 .flash{animation:flash 1.2s ease-out}
 @keyframes flash{0%,55%{outline:2px solid var(--accent);outline-offset:2px;background:color-mix(in srgb,var(--accent) 14%,transparent)}100%{outline:0 solid transparent}}
 

@@ -362,7 +362,9 @@
       else openPop(r0, { pending: { page: d.page, bbox, block_id: el.dataset.bid ? +el.dataset.bid : null } });
       e.stopPropagation(); return;
     }
-    toast(`#${el.dataset.bid} ${el.dataset.lab}` + (el.dataset.ord === "null" ? " (order=None)" : ` (order=${el.dataset.ord})`));
+    const blk = $("mdOut").querySelector(`.mdblk[data-bids~="${el.dataset.bid}"]`);   // 点左框 → 定位右栏对应转换结果
+    if (blk) flashEl(blk);
+    else toast(`#${el.dataset.bid} ${el.dataset.lab}` + (el.dataset.ord === "null" ? " (order=None)" : ` (order=${el.dataset.ord})`) + " · 该块无对应正文(被剔除/无内容)");
   });
 
   // ---------- 右栏标记清单 ----------
@@ -439,9 +441,29 @@
     $("signals").innerHTML = badges.join("");
 
     const out = $("mdOut");
-    out.innerHTML = mdit.render(d.md || "");
+    const frags = d.frags && d.frags.length ? d.frags : [{ bids: [], md: d.md || "" }];
+    out.innerHTML = frags.map((f) => {
+      const bids = (f.bids || []).filter((x) => x != null).join(" ");
+      return `<div class="mdblk" data-bids="${bids}">${mdit.render(f.md || "")}</div>`;
+    }).join("");
     out.querySelectorAll(".katex-error").forEach((e) => { (e.closest(".katex-display") || e.closest(".katex") || e).classList.add("err-formula"); });
+    wireLink();
     if (!d.image_b64) { renderAnnList(); }
+  }
+
+  // 右栏片段 hover → 高亮左栏对应叠框(反向:见 drawBoxes 的 linkBlk)
+  function wireLink() {
+    $("mdOut").querySelectorAll(".mdblk").forEach((blk) => {
+      const bids = (blk.dataset.bids || "").split(" ").filter(Boolean);
+      if (!bids.length) return;
+      const set = (on) => bids.forEach((id) => { const b = ov.querySelector(`.box[data-bid="${id}"]`); if (b) b.classList.toggle("hot", on); });
+      blk.addEventListener("mouseenter", () => set(true));
+      blk.addEventListener("mouseleave", () => set(false));
+    });
+  }
+  function linkBlk(bid, on) {
+    if (bid == null) return;
+    $("mdOut").querySelectorAll(`.mdblk[data-bids~="${bid}"]`).forEach((blk) => blk.classList.toggle("link-hot", on));
   }
 
   function drawBoxes(d) {
@@ -454,6 +476,8 @@
       el.style.width = pct(b.bbox[2] - b.bbox[0], d.width); el.style.height = pct(b.bbox[3] - b.bbox[1], d.height);
       el.dataset.bid = b.block_id; el.dataset.lab = b.label; el.dataset.ord = b.order; el.dataset.b = b.bbox.join(",");
       el.title = `#${b.block_id} ${b.label}` + (b.order === null ? " (order=None)" : ` (order=${b.order})`) + (b.content_head ? "\n" + b.content_head : "");
+      el.addEventListener("mouseenter", () => linkBlk(b.block_id, true));   // 左框 hover → 高亮右栏对应片段
+      el.addEventListener("mouseleave", () => linkBlk(b.block_id, false));
       ov.appendChild(el);
     }
   }

@@ -44,6 +44,15 @@ def test_payload_md_is_reconstructed_and_fixed():
     assert "\\tag{1.3a}" in p["md"]
 
 
+def test_payload_frags_carry_bids_and_join_to_md():
+    p = build_page_payload(_p31(), page=31, stem="Paul_p1-100_scan")
+    assert isinstance(p["frags"], list) and p["frags"]
+    assert all("bids" in f and "md" in f for f in p["frags"])
+    assert "\n\n".join(f["md"] for f in p["frags"]) + "\n" == p["md"]
+    # 1.3a 公式块(block_id=18)应出现在某片段的 bids 里
+    assert any(18 in f["bids"] for f in p["frags"])
+
+
 def test_payload_signals_present():
     p = build_page_payload(_p31(), page=31, stem="Paul_p1-100_scan")
     assert "column_suspected" in p["signals"]

@@ -172,52 +172,58 @@ def _code_fence(content: str) -> str:
     return f"{fence}\n{content}\n{fence}"
 
 
-def _render_ordered(ordered: list[dict]) -> list[tuple[float, str]]:
-    """按 block_order 渲染,含公式吸收,逻辑与改动前完全一致。返回 [(y0, fragment), ...],
-    绝不重排——y0 只用于后续归并时判断 extra 该插在哪,不影响这里的相对顺序。"""
+def _render_ordered(ordered: list[dict]) -> list[dict]:
+    """按 block_order 渲染,含公式吸收。返回 [{"y0","bids","md"}, ...],绝不重排——
+    y0 只用于后续归并时判断 extra 该插在哪;bids 是该片段归属的块 id(公式吸收编号时
+    含两个),供 debug_view 左右双向联动。md 内容与改动前逐字节一致。"""
     has_paragraph_title = any(b.get("block_label") == "paragraph_title" for b in ordered)
-    fragments: list[tuple[float, str]] = []
+    fragments: list[dict] = []
     i = 0
+
+    def emit(y0, bids, md):
+        fragments.append({"y0": y0, "bids": bids, "md": md})
+
     while i < len(ordered):
         b = ordered[i]
         label = b.get("block_label", "")
         content = (b.get("block_content") or "").strip()
         bbox = b.get("block_bbox")
         y0 = bbox[1] if isinstance(bbox, (list, tuple)) and len(bbox) == 4 else 0
+        bid = b.get("block_id")
         if not content:
             i += 1
             continue
         if label == "paragraph_title":
-            fragments.append((y0, f"## {content}"))
+            emit(y0, [bid], f"## {content}")
         elif label in ("text", "abstract", "reference_content"):
-            fragments.append((y0, restore_emphasis_dots(content)))
+            emit(y0, [bid], restore_emphasis_dots(content))
         elif label == "content":
-            fragments.append((y0, _hard_breaks(content)))
+            emit(y0, [bid], _hard_breaks(content))
         elif label == "algorithm":
-            fragments.append((y0, _code_fence(content)))
+            emit(y0, [bid], _code_fence(content))
         elif label == "doc_title":
             if has_paragraph_title:
                 # 同页存在 paragraph_title 兄弟块(不一定是章节序号,可能是完整节标题,
                 # 实测 p93 样本):经验规则——同页有 paragraph_title 时 doc_title 是被
                 # 误标的正文标题,不是封面。100 页语料 4/4 验证成立,非因果机制。
-                fragments.append((y0, f"## {content}"))
+                emit(y0, [bid], f"## {content}")
             else:
-                fragments.append((y0, _hard_breaks(content)))
+                emit(y0, [bid], _hard_breaks(content))
         elif label == "display_formula":
             body = sanitize_latex(_formula_body(content))
             nxt = ordered[i + 1] if i + 1 < len(ordered) else None
             if nxt and nxt.get("block_label") == "formula_number":
                 m = _NUM_RE.match((nxt.get("block_content") or "").strip())
                 tag = m.group(1) if m else (nxt.get("block_content") or "").strip()
-                fragments.append((y0, f"$$ {body} \\tag{{{tag}}} $$"))
+                emit(y0, [bid, nxt.get("block_id")], f"$$ {body} \\tag{{{tag}}} $$")
                 i += 1                      # 吸收编号块
             else:
-                fragments.append((y0, f"$$ {body} $$"))
+                emit(y0, [bid], f"$$ {body} $$")
         elif label == "formula_number":
-            fragments.append((y0, content))
+            emit(y0, [bid], content)
         else:
             print(f"[reconstruct] 未知 block_label={label!r},按纯文本兜底落段", file=sys.stderr)
-            fragments.append((y0, content))
+            emit(y0, [bid], content)
         i += 1
     return fragments
 
@@ -225,7 +231,7 @@ def _render_ordered(ordered: list[dict]) -> list[tuple[float, str]]:
 def _render_unordered(blocks: list[dict], stem: str | None,
                        page: int | None) -> tuple[list[dict], list[dict]]:
     """渲染 block_order is None 的块(spec §2 三层分类)。返回 (extras, warnings)。
-    extras 未排序,元素 {"y0": float|None, "seq": int, "fragment": str};seq 是块在
+    extras 未排序,元素 {"y0": float|None, "seq": int, "bids": list, "md": str};seq 是块在
     输入 blocks 里的原始下标,用于稳定排序/页尾组顺序破 tie。"""
     extras: list[dict] = []
     warnings: list[dict] = []
@@ -254,11 +260,12 @@ def _render_unordered(blocks: list[dict], stem: str | None,
                 warnings.append({"kind": "visual_unexpected_content", "label": label,
                                   "page": page, "block_id": block_id, "sample": content[:40]})
                 fragment += "\n\n" + restore_emphasis_dots(content)
-            extras.append({"y0": y0, "seq": seq, "fragment": fragment})
+            extras.append({"y0": y0, "seq": seq, "bids": [block_id], "md": fragment})
         elif label in _PASSTHROUGH_UNORDERED_LABELS:
             if not content:
                 continue
-            extras.append({"y0": y0, "seq": seq, "fragment": restore_emphasis_dots(content)})
+            extras.append({"y0": y0, "seq": seq, "bids": [block_id],
+                           "md": restore_emphasis_dots(content)})
         elif label in _KNOWN_NOISE_LABELS:
             continue
         elif content:
@@ -268,37 +275,45 @@ def _render_unordered(blocks: list[dict], stem: str | None,
     return extras, warnings
 
 
-def _merge(ordered_fragments: list[tuple[float, str]], extras: list[dict]) -> list[str]:
+def _merge(ordered_fragments: list[dict], extras: list[dict]) -> list[dict]:
     """两阶段归并(spec §3):ordered 内部顺序绝不重排。对每个有 y0 的 extra,插在第一个
     y0 严格大于它的 ordered 片段之前;等价的共享指针实现要求 extra.y0 < 片段.y0 用严格 `<`
     (spec §3"等价性条款"——用 `<=` 会导致 y0 相等的 tie 排在错误一侧,已有单测锁死)。
-    缺 y0 的 extra 归入页尾组,按原始列表顺序(seq)排在最后。"""
+    缺 y0 的 extra 归入页尾组,按原始列表顺序(seq)排在最后。返回 [{"bids","md"}, ...]。"""
     positioned = sorted((e for e in extras if e["y0"] is not None),
                          key=lambda e: (e["y0"], e["seq"]))
     tail = sorted((e for e in extras if e["y0"] is None), key=lambda e: e["seq"])
-    parts: list[str] = []
+    parts: list[dict] = []
     ei = 0
-    for y0, fragment in ordered_fragments:
-        while ei < len(positioned) and positioned[ei]["y0"] < y0:
-            parts.append(positioned[ei]["fragment"])
+    for frag in ordered_fragments:
+        while ei < len(positioned) and positioned[ei]["y0"] < frag["y0"]:
+            parts.append({"bids": positioned[ei]["bids"], "md": positioned[ei]["md"]})
             ei += 1
-        parts.append(fragment)
+        parts.append({"bids": frag["bids"], "md": frag["md"]})
     while ei < len(positioned):
-        parts.append(positioned[ei]["fragment"])
+        parts.append({"bids": positioned[ei]["bids"], "md": positioned[ei]["md"]})
         ei += 1
-    parts.extend(e["fragment"] for e in tail)
+    parts.extend({"bids": e["bids"], "md": e["md"]} for e in tail)
     return parts
 
 
-def reconstruct_markdown(blocks: list[dict], stem: str | None = None,
-                         page: int | None = None) -> tuple[str, list[dict]]:
-    """按 block_order 排序渲染有序块(不重排);block_order is None 的块按 spec §2 三层分类,
-    真内容按 spec §3 两阶段归并按 y0 插入正文流。返回 (markdown, warnings)。"""
+def reconstruct_fragments(blocks: list[dict], stem: str | None = None,
+                          page: int | None = None) -> tuple[list[dict], list[dict]]:
+    """与 reconstruct_markdown 同逻辑,但返回带块归属的片段列表 [{"bids": [id,...],
+    "md": str}, ...](最终归并顺序)+ warnings。debug_view 用它做左右双向联动;
+    reconstruct_markdown 即在此基础上 join 出整段 md,输出逐字节等价。"""
     ordered = sorted(
         (b for b in blocks if b.get("block_order") is not None),
         key=lambda b: b["block_order"],
     )
     ordered_fragments = _render_ordered(ordered)
     extras, warnings = _render_unordered(blocks, stem, page)
-    parts = _merge(ordered_fragments, extras)
-    return "\n\n".join(parts) + "\n", warnings
+    return _merge(ordered_fragments, extras), warnings
+
+
+def reconstruct_markdown(blocks: list[dict], stem: str | None = None,
+                         page: int | None = None) -> tuple[str, list[dict]]:
+    """按 block_order 排序渲染有序块(不重排);block_order is None 的块按 spec §2 三层分类,
+    真内容按 spec §3 两阶段归并按 y0 插入正文流。返回 (markdown, warnings)。"""
+    parts, warnings = reconstruct_fragments(blocks, stem, page)
+    return "\n\n".join(p["md"] for p in parts) + "\n", warnings

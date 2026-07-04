@@ -2,6 +2,7 @@ import json
 from pathlib import Path
 
 from scripts.pipelines.textbooks.reconstruct import (
+    reconstruct_fragments,
     reconstruct_markdown,
     restore_emphasis_dots,
     sanitize_latex,
@@ -450,6 +451,49 @@ def test_visual_block_malformed_bbox_warns_and_drops():
     assert ".png" not in md
     assert warnings == [{"kind": "visual_missing_bbox", "label": "image",
                           "page": 3, "block_id": 7, "sample": ""}]
+
+
+def test_fragments_joined_equal_markdown():
+    # 片段拼回的 md 必须与 reconstruct_markdown 逐字节一致(防重构漂移)
+    blocks = json.loads((FIX / "paul_p200_res.json").read_text(encoding="utf-8"))["parsing_res_list"]
+    frags, w1 = reconstruct_fragments(blocks, stem="paul", page=200)
+    md, w2 = reconstruct_markdown(blocks, stem="paul", page=200)
+    assert "\n\n".join(f["md"] for f in frags) + "\n" == md
+    assert w1 == w2
+
+
+def test_fragments_carry_block_ids():
+    blocks = [
+        {"block_label": "text", "block_content": "body", "block_order": 1,
+         "block_bbox": [0, 10, 10, 20], "block_id": 7},
+    ]
+    frags, _ = reconstruct_fragments(blocks)
+    assert frags[0]["bids"] == [7]
+    assert frags[0]["md"] == "body"
+
+
+def test_fragments_formula_absorbs_number_carries_both_bids():
+    # 公式吸收编号 → 同一片段归属两个块(display_formula + formula_number)
+    blocks = [
+        {"block_label": "display_formula", "block_content": r"$$ x=1 $$", "block_order": 4,
+         "block_bbox": [0, 10, 10, 20], "block_id": 11},
+        {"block_label": "formula_number", "block_content": "(5.1)", "block_order": 5,
+         "block_bbox": [0, 10, 10, 20], "block_id": 12},
+    ]
+    frags, _ = reconstruct_fragments(blocks)
+    assert len(frags) == 1
+    assert sorted(frags[0]["bids"]) == [11, 12]
+    assert r"\tag{5.1}" in frags[0]["md"]
+
+
+def test_fragments_visual_block_carries_id():
+    blocks = [
+        {"block_label": "image", "block_content": "", "block_order": None,
+         "block_bbox": [0, 50, 10, 60], "block_id": 4},
+    ]
+    frags, _ = reconstruct_fragments(blocks, stem="b", page=6)
+    assert frags[0]["bids"] == [4]
+    assert "page_0006_block_4.png" in frags[0]["md"]
 
 
 def test_golden_p6_column_suspect_output_is_deterministic():

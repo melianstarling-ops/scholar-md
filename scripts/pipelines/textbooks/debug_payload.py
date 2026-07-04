@@ -7,7 +7,7 @@
 from __future__ import annotations
 
 from scripts.pipelines.textbooks.images import is_visual_block
-from scripts.pipelines.textbooks.reconstruct import reconstruct_markdown
+from scripts.pipelines.textbooks.reconstruct import reconstruct_fragments
 from scripts.pipelines.textbooks.selfcheck import detect_column_layout
 
 # 块 label → 叠框颜色。红(#ef4444)留给"渲染报错"高亮,不用于任何 label。
@@ -76,9 +76,11 @@ def build_page_signals(blocks: list[dict], warnings: list[dict]) -> dict:
 def build_page_payload(res: dict, page: int, stem: str,
                        image_b64: str | None = None,
                        page_errors: list[dict] | None = None) -> dict:
-    """把一页 res.json 加工成 HTML 模板所需的 payload dict。"""
+    """把一页 res.json 加工成 HTML 模板所需的 payload dict。frags 是带块归属的
+    md 片段列表(供左右双向联动);md 是其 join(供报错索引/整页渲染)。"""
     blocks = res.get("parsing_res_list", [])
-    md, warnings = reconstruct_markdown(blocks, stem=stem, page=page)
+    frags, warnings = reconstruct_fragments(blocks, stem=stem, page=page)
+    md = "\n\n".join(f["md"] for f in frags) + "\n"
     overlays = [o for o in (_overlay(b) for b in blocks) if o is not None]
     return {
         "page": page,
@@ -87,6 +89,7 @@ def build_page_payload(res: dict, page: int, stem: str,
         "image_b64": image_b64,
         "blocks": overlays,
         "md": md,
+        "frags": frags,
         "signals": build_page_signals(blocks, warnings),
         "render_errors": page_errors or [],
     }
