@@ -105,6 +105,7 @@ def render_html(stem: str, pages: list[dict], serve: bool, annotations=None) -> 
     repl = {
         "{{TITLE}}": f"{stem} — debug view",
         "{{STEM}}": stem,
+        "{{STAMP}}": _now(),
         "{{KATEX_CSS}}": _read(os.path.join(VENDOR, "katex.inline.css")),
         "{{APP_CSS}}": _read(os.path.join(ASSETS, "app.css")),
         "{{KATEX_JS}}": _read(os.path.join(VENDOR, "katex.min.js")),

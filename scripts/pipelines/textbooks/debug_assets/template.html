@@ -11,38 +11,55 @@
 {{APP_CSS}}
 </style>
 </head>
-<body>
-<header id="topbar">
-  <div class="brand">📖 <b>{{STEM}}</b> <span class="muted">debug view</span></div>
-  <div class="nav">
-    <button id="prev">‹</button>
-    <input id="pageInput" type="number" min="1" value="1"> / <span id="pageTotal">?</span>
-    <button id="next">›</button>
+<body data-theme="dark">
+<header>
+  <div class="row">
+    <h1>📖 {{STEM}} <span class="muted">debug</span></h1>
+    <span class="sep"></span>
+    <div class="grp">
+      <button id="prev" title="上一页 (←)">‹</button>
+      <input id="pgin" type="number" min="1" value="1" title="输入页码直跳">
+      <span id="pgtotal"></span>
+      <button id="next" title="下一页 (→)">›</button>
+      <button id="errBtn" title="只看有 KaTeX 渲染报错的页 (E)">⚠</button>
+    </div>
+    <span class="sep"></span>
+    <div class="grp">
+      <button id="zout" title="缩小">−</button>
+      <button id="zl" title="点击恢复适宽">适宽</button>
+      <button id="zin" title="放大">+</button>
+      <button id="invBtn" title="页面反色(仅暗色主题下生效)">◑</button>
+    </div>
+    <span class="sep"></span>
+    <div class="grp">
+      <select id="errIndex" class="btn" style="height:28px" title="跳到有渲染报错的页"></select>
+      <button class="btn" id="annBtn" title="标记模式 (M):点块框/拖框 → 气泡选分类">✎ 标记</button>
+      <button class="btn" id="expBtn" title="导出标记:服务模式直写 03_Output/;静态模式下载后跑 --collect 归位">导出标记</button>
+      <button class="btn" id="themeBtn" title="亮/暗切换">☀</button>
+    </div>
   </div>
-  <div class="tools">
-    <select id="errorIndex" title="跳到有渲染问题的页"><option>报错索引…</option></select>
-    <label class="layers" id="layerToggles"></label>
-    <button id="annotBtn" title="标注模式 (M)">✎ 标注</button>
-    <button id="exportBtn" title="导出标注 JSON">⭳ 导出</button>
-  </div>
+  <div class="row" id="toggles"></div>
 </header>
-
 <main>
-  <section id="leftPane">
-    <div id="pageStage">
-      <img id="pageImg" alt="">
-      <div id="overlayLayer"></div>
-      <div id="annotLayer"></div>
+  <section id="leftcol">
+    <div id="hscroll" title="横向滚动(页面宽于视口时出现)"><div></div></div>
+    <div id="leftpane">
+      <div id="stage"><img id="img" alt=""><div id="overlay"></div></div>
       <div id="noImg" class="no-img" hidden>源 PDF 不可用 — 左栏页图缺省(右栏渲染不受影响)</div>
     </div>
+    <div id="filmzone"></div>
+    <div id="film"><div id="filmtrack"></div></div>
   </section>
-  <section id="rightPane">
-    <div id="signals"></div>
-    <div id="mdOut" class="markdown-body"></div>
+  <section id="rightpane">
+    <div class="sec"><h2>页统计</h2><div id="stats"></div></div>
+    <div class="sec"><h2>信号</h2><div class="badges" id="signals"></div></div>
+    <div class="sec" id="annSec" hidden><h2 style="color:var(--accent)">本页标记</h2><div id="annList"></div></div>
+    <div class="sec"><h2>渲染结果(markdown + KaTeX,红=报错)</h2><div id="mdOut"></div></div>
   </section>
 </main>
-
-<div id="annotHint" class="annot-hint" hidden>标注模式:在左栏页面上拖框选中问题区域,松手后选分类</div>
+<footer><kbd>←</kbd><kbd>→</kbd> 翻页 · <kbd>M</kbd> 标记(点块框/拖框→气泡选分类) · <kbd>Delete</kbd> 删选中 · <kbd>Ctrl</kbd>+滚轮 指针锚点缩放 · 长按左键拖动平移 · <kbd>E</kbd> 错误页筛选 · 底缘悬停出缩略图 · 生成于 {{STAMP}}</footer>
+<div id="pop" hidden></div>
+<div id="toast"></div>
 
 <script>/* katex */
 {{KATEX_JS}}
@@ -50,11 +67,11 @@
 <script>/* markdown-it */
 {{MARKDOWNIT_JS}}
 </script>
-<script>/* CJS shim:让 @vscode/markdown-it-katex(CJS) 在浏览器里拿到 katex */
+<script>/* CJS shim:让 @vscode/markdown-it-katex(CJS) 在浏览器拿到 katex */
 var module = { exports: {} }, exports = module.exports;
 function require(n) { if (n === "katex") return window.katex; throw new Error("no module " + n); }
 </script>
-<script>/* markdown-it-katex 插件(数学 token 先于 markdown 强调解析,受保护,不被 _ / * 污染) */
+<script>/* markdown-it-katex 插件(数学 token 先于 markdown 强调解析,受保护) */
 {{MDKATEX_JS}}
 </script>
 <script>window.mdKatexPlugin = (module.exports && module.exports.default) || module.exports;</script>
