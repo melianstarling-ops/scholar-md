@@ -69,7 +69,9 @@ def test_payload_frag_suspicions_attached():
     ]}
     p = build_page_payload(res, page=1, stem="s")
     assert p["frags"][0]["suspicions"] == [r"\oint"]
-    assert p["suspicions"] == [{"op": r"\oint", "bids": [1]}]
+    assert len(p["suspicions"]) == 1
+    s = p["suspicions"][0]
+    assert s["op"] == r"\oint" and s["kind"] == "bare_op" and s["bids"] == [1] and "detail" in s
 
 
 def test_payload_signals_present():

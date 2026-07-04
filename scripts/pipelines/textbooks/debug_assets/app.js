@@ -438,7 +438,10 @@
     const errN = (d.render_errors || []).length;
     if (errN) badges.push(`<span class="badge err">KaTeX 报错 ${errN}</span>`);
     const susp = d.suspicions || [];
-    if (susp.length) badges.push(`<span class="badge warn" title="${susp.map((x) => x.op).join(" ")}">疑似漏识别 ${susp.length}(${[...new Set(susp.map((x) => x.op))].join(",")})</span>`);
+    if (susp.length) {
+      const detailTitle = [...new Set(susp.map((x) => x.detail))].join("\n");
+      badges.push(`<span class="badge warn" title="${detailTitle}">疑似识别错误 ${susp.length}(${[...new Set(susp.map((x) => x.op))].join(",")})</span>`);
+    }
     if (s.column_suspected) badges.push(`<span class="badge col">双栏嫌疑</span>`);
     (s.unhandled_labels || []).forEach((l) => badges.push(`<span class="badge warn">未知 label: ${esc(l)}</span>`));
     (s.visual_warnings || []).forEach((w) => badges.push(`<span class="badge warn">${esc(w.kind)}</span>`));
@@ -451,7 +454,7 @@
       const bids = (f.bids || []).filter((x) => x != null).join(" ");
       const sus = f.suspicions && f.suspicions.length;
       const cls = "mdblk" + (sus ? " susp" : "");
-      const ttl = sus ? ` title="疑似漏识别:${f.suspicions.join(" ")} 缺上/下标"` : "";
+      const ttl = sus ? ` title="疑似识别错误:${f.suspicions.join(" , ")}"` : "";
       return `<div class="${cls}" data-bids="${bids}"${ttl}>${mdit.render(f.md || "")}</div>`;
     }).join("");
     out.querySelectorAll(".katex-error").forEach((e) => { (e.closest(".katex-display") || e.closest(".katex") || e).classList.add("err-formula"); });

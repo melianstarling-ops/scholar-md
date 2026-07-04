@@ -13,6 +13,22 @@ def test_suspicion_flags_bare_oint():
     # 闭合积分裸用(无下标/围道) → 疑似漏识别(用户 p48 1.55 那类)
     sus = scan_formula_suspicions(r"$$ c\Delta z=\varepsilon\oint\vec{E}\cdot d s $$")
     assert [s["op"] for s in sus] == [r"\oint"]
+    assert sus[0]["kind"] == "bare_op"
+
+
+def test_suspicion_flags_frac_primed_denominator():
+    # 引擎把积分围道 c'/曲面 s' 误当 \frac 分母(p49/p50/p53 结构错)
+    sus = scan_formula_suspicions(r"c=\frac{\varepsilon\oint\vec{E}\cdot dl^{\prime}}{c^{\prime}}")
+    kinds = [s["kind"] for s in sus]
+    assert "frac_primed_denom" in kinds
+    frac = next(s for s in sus if s["kind"] == "frac_primed_denom")
+    assert "c'" in frac["detail"]          # 人可读:点名是 c'
+
+
+def test_suspicion_ignores_normal_frac_denominator():
+    # 合法分母(表达式/不带撇单字母)不得误报结构可疑
+    assert not any(s["kind"] == "frac_primed_denom"
+                   for s in scan_formula_suspicions(r"\frac{a+b}{V(z,t)} + \frac{x}{y}"))
 
 
 def test_suspicion_ignores_oint_with_subscript():

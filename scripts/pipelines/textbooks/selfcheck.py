@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import re
 
-from scripts.pipelines.textbooks.reconstruct import KATEX_INCOMPAT_COMMANDS
+from scripts.pipelines.textbooks.reconstruct import KATEX_INCOMPAT_COMMANDS, _match_braced
 
 
 def katex_incompat_scan(md: str) -> list[str]:
@@ -29,13 +29,64 @@ _BARE_OP_RES = [
 ]
 
 
+# 结构可疑:\frac 的分母是"带撇单字母"(c'、s')。撇号符号在本语料几乎总是积分
+# 围道/曲面标号,不会当除数——引擎把 \oint_{c'}…/V 误解析成 \frac{…}{c'}(把低位的
+# 围道当成了分母,还丢了真分母 V)。实测全书仅 8 处、集中 p49/p50/p53,0 误报。
+_DENOM_PRIMED = re.compile(r"^[a-zA-Z](?:\^\{?\\prime\}?|')$")
+
+
+def _denom_display(denom: str) -> str:
+    return re.sub(r"\^\{?\\prime\}?", "'", denom)
+
+
+def _frac_primed_denoms(text: str) -> list[dict]:
+    r"""找 \frac{num}{denom} 中 denom 为带撇单字母的位置(括号配对扫描,非正则)。"""
+    out: list[dict] = []
+    i, n = 0, len(text)
+    while True:
+        j = text.find(r"\frac", i)
+        if j == -1:
+            break
+        k = j + 5
+        while k < n and text[k] == " ":
+            k += 1
+        if k >= n or text[k] != "{":
+            i = j + 5
+            continue
+        ne = _match_braced(text, k)                     # 分子右括号后一位
+        if ne == -1:
+            i = j + 5
+            continue
+        m = ne
+        while m < n and text[m] == " ":
+            m += 1
+        if m >= n or text[m] != "{":
+            i = ne
+            continue
+        de = _match_braced(text, m)                     # 分母右括号后一位
+        if de == -1:
+            i = ne
+            continue
+        denom = text[m + 1:de - 1]
+        if _DENOM_PRIMED.match(denom):
+            disp = _denom_display(denom)
+            out.append({"kind": "frac_primed_denom", "op": f"frac÷{disp}", "pos": j,
+                        "detail": rf"\frac 分母是带撇标号 {disp},疑似把积分围道/曲面误当分母(应为下标)"})
+        i = de
+    return out
+
+
 def scan_formula_suspicions(text: str) -> list[dict]:
-    r"""扫描疑似漏识别:通常带上下标的大算符却裸用。返回 [{"op": "\oint", "pos": int}, ...],
-    按出现位置排序。不是硬报错,是给人工核对的候选(可能有不定积分等合法裸用)。"""
+    r"""扫描疑似识别错误,返回 [{"kind","op","detail","pos"}, ...](按位置排序)。不是硬
+    报错,是给人工核对的候选。两类:
+      bare_op         —— 通常带上下标的大算符却裸用(可能漏了积分限/围道/指标)。
+      frac_primed_denom —— \frac 分母是带撇标号(围道/曲面被误当分母,结构错)。"""
     hits: list[dict] = []
     for op, pat in _BARE_OP_RES:
         for m in pat.finditer(text):
-            hits.append({"op": op, "pos": m.start()})
+            hits.append({"kind": "bare_op", "op": op, "pos": m.start(),
+                         "detail": rf"{op} 疑似缺上/下标(积分限/围道/指标)"})
+    hits.extend(_frac_primed_denoms(text))
     hits.sort(key=lambda h: h["pos"])
     return hits
 
