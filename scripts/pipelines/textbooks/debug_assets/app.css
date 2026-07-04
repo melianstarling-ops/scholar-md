@@ -115,6 +115,7 @@ main{flex:1;display:flex;min-height:0}
 .thumb.active{transform:scale(1);border-color:var(--accent)}
 .thumb .tno{position:absolute;right:4px;bottom:4px;font-size:10px;font-weight:600;color:#fff;background:rgba(0,0,0,.55);border-radius:5px;padding:1px 5px}
 .thumb .terr{position:absolute;right:4px;top:3px;font-size:10px;color:var(--bad);text-shadow:0 0 3px rgba(0,0,0,.6)}
+.thumb .tsusp{position:absolute;right:15px;top:3px;font-size:9px;color:var(--warn);text-shadow:0 0 3px rgba(0,0,0,.6)}
 .thumb .tcol{position:absolute;left:5px;top:5px;font-size:10px;color:#818cf8;text-shadow:0 0 3px rgba(0,0,0,.6)}
 #errBtn.on{color:var(--bad);border-color:var(--bad);background:color-mix(in srgb,var(--bad) 12%,transparent)}
 .erronly #filmtrack .thumb.noerr{display:none}
@@ -146,6 +147,9 @@ main{flex:1;display:flex;min-height:0}
 /* 片段块:左右双向联动的最小单元 */
 .mdblk{border-radius:6px;padding:2px 8px;margin:0 -8px;transition:background .12s,box-shadow .12s;cursor:default}
 .mdblk.link-hot{background:color-mix(in srgb,var(--accent) 14%,transparent);box-shadow:inset 3px 0 0 var(--accent)}
+/* 疑似漏识别(裸大算符):琥珀标,区别于红色硬报错 */
+.mdblk.susp{outline:1.5px dashed var(--warn);outline-offset:2px;background:color-mix(in srgb,var(--warn) 7%,transparent)}
+.box.susp{outline:2px solid var(--warn);outline-offset:1px}
 .flash{animation:flash 1.2s ease-out}
 @keyframes flash{0%,55%{outline:2px solid var(--accent);outline-offset:2px;background:color-mix(in srgb,var(--accent) 14%,transparent)}100%{outline:0 solid transparent}}
 

@@ -11,6 +11,43 @@ def katex_incompat_scan(md: str) -> list[str]:
     return [c for c in KATEX_INCOMPAT_COMMANDS if c in md]
 
 
+# 通常必带上下标的大算符:裸用(后面没跟 _/^)高度疑似 OCR 漏识别了积分限/围道/指标。
+# 能正常渲染、不触发 KaTeX 硬报错,故只能靠这条确定性启发式标成"疑似",交人工核对。
+# 阈值按 100 页语料实测校准(裸 \oint 13、\int 6、\lim 1;\iint/\sum 裸用为 0)。
+# 新算符往这里加即可(同 KATEX_INCOMPAT_COMMANDS 的扩展方式)。
+SUSPICIOUS_BARE_OPS = [
+    r"\oint", r"\oiint", r"\oiiint",   # 闭合积分:几乎必带围道/曲面
+    r"\int", r"\iint", r"\iiint",      # 积分(不定积分为合法裸用,故属中等置信)
+    r"\sum", r"\prod", r"\coprod",     # 求和/求积:几乎必带指标
+    r"\lim",                            # 极限:必带下标
+]
+# 算符名后紧跟(允许 \limits/\nolimits + 空白)若不是 _ 或 ^ 即判裸用;(?![a-zA-Z]) 词边界
+# 防 \int 误伤 \intercal、\lim 误伤 \limits/\liminf。
+_BARE_OP_RES = [
+    (op, re.compile(re.escape(op) + r"(?![a-zA-Z])(?!\s*(?:\\limits|\\nolimits)?\s*[_^])"))
+    for op in SUSPICIOUS_BARE_OPS
+]
+
+
+def scan_formula_suspicions(text: str) -> list[dict]:
+    r"""扫描疑似漏识别:通常带上下标的大算符却裸用。返回 [{"op": "\oint", "pos": int}, ...],
+    按出现位置排序。不是硬报错,是给人工核对的候选(可能有不定积分等合法裸用)。"""
+    hits: list[dict] = []
+    for op, pat in _BARE_OP_RES:
+        for m in pat.finditer(text):
+            hits.append({"op": op, "pos": m.start()})
+    hits.sort(key=lambda h: h["pos"])
+    return hits
+
+
+def summarize_suspicions(md: str) -> list[dict]:
+    """文档级疑似漏识别汇总(供 selfcheck.json)。返回 [{"op","count"}] 按数量降序。"""
+    counts: dict[str, int] = {}
+    for s in scan_formula_suspicions(md):
+        counts[s["op"]] = counts.get(s["op"], 0) + 1
+    return [{"op": op, "count": n} for op, n in sorted(counts.items(), key=lambda x: (-x[1], x[0]))]
+
+
 def _probe(content: str) -> str:
     """取块内容一段稳定的可检子串(去 LaTeX 包裹与空白,取前 12 个非空字符)。"""
     s = re.sub(r"[\s$]", "", content or "")

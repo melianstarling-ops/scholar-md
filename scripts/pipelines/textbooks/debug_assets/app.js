@@ -35,7 +35,7 @@
   const BASE = 860;
   const ANN_KEY = "tbdbgann:" + stem, EXP_KEY = "tbdbgexp:" + stem;
   let cur = 0, zoom = 0, annMode = false, suppressClick = false, selKey = null;
-  let errPages = [];
+  let probPages = [];   // 问题页:KaTeX 硬报错(红) 或 疑似漏识别(裸大算符,琥珀)
   const ann = new Map(Object.entries(JSON.parse(localStorage.getItem(ANN_KEY) || "{}")));
 
   // 数学交给 markdown-it-katex 插件($…$ 在 inline 阶段 tokenize,先于 markdown 强调,LaTeX 不被污染)
@@ -143,32 +143,35 @@
   function applyTheme(t) { document.body.dataset.theme = t; $("themeBtn").textContent = t === "dark" ? "☀" : "☾"; localStorage.setItem("tbdbgtheme", t); }
   $("themeBtn").onclick = () => applyTheme(document.body.dataset.theme === "dark" ? "light" : "dark");
 
-  // ---------- 报错页(离屏渲染,与 headless 扫描器同源判红) ----------
-  function computeErrPages() {
+  // ---------- 问题页(离屏渲染判红,与 headless 扫描器同源;叠加 payload 里的疑似) ----------
+  function computeProblems() {
     const scratch = document.createElement("div");
     scratch.style.cssText = "position:absolute;left:-9999px;top:0;visibility:hidden;width:820px";
     document.body.appendChild(scratch);
     const rows = [];
     pages.forEach((p, i) => {
       scratch.innerHTML = mdit.render(p.md || "");
-      const n = scratch.querySelectorAll(".katex-error").length;
-      if (n > 0) rows.push({ i, page: p.page, n });
+      const nErr = scratch.querySelectorAll(".katex-error").length;
+      const nSusp = (p.suspicions || []).length;
+      if (nErr > 0 || nSusp > 0) rows.push({ i, page: p.page, nErr, nSusp });
     });
     document.body.removeChild(scratch);
     return rows;
   }
+  const probLabel = (r) => [r.nErr ? `${r.nErr} 红` : "", r.nSusp ? `疑似${r.nSusp}` : ""].filter(Boolean).join("·");
 
   // ---------- 缩略图条 ----------
   const film = $("film"), track = $("filmtrack");
   function buildFilm() {
-    const errSet = new Set(errPages.map((r) => r.i));
+    const probMap = new Map(probPages.map((r) => [r.i, r]));
     track.innerHTML = "";
     pages.forEach((p, i) => {
       const t = document.createElement("div");
-      const isErr = errSet.has(i);
-      t.className = "thumb" + (isErr ? "" : " noerr"); t.dataset.i = i;
+      const pr = probMap.get(i);
+      t.className = "thumb" + (pr ? "" : " noerr"); t.dataset.i = i;
       const img = p.image_b64 ? `<img loading="lazy" src="data:image/jpeg;base64,${p.image_b64}" alt="">` : "";
-      t.innerHTML = img + (isErr ? '<span class="terr">⚠</span>' : "") +
+      const mark = pr ? (pr.nErr ? '<span class="terr">⚠</span>' : "") + (pr.nSusp ? '<span class="tsusp">◆</span>' : "") : "";
+      t.innerHTML = img + mark +
         (p.signals && p.signals.column_suspected ? '<span class="tcol">▮▮</span>' : "") +
         `<span class="tno">${p.page}</span>`;
       t.onclick = () => render(i);
@@ -186,19 +189,19 @@
   film.addEventListener("mouseleave", () => { clearTimeout(filmT); film.classList.remove("show"); });
   film.addEventListener("wheel", (e) => { if (e.ctrlKey) return; if (Math.abs(e.deltaY) > Math.abs(e.deltaX)) { e.preventDefault(); film.scrollLeft += e.deltaY; } }, { passive: false });
 
-  // ---------- 错误页筛选 ----------
+  // ---------- 问题页筛选(红 + 疑似) ----------
   let errOnly = false;
   function updatePgTotal() {
-    const idxInErr = errPages.findIndex((r) => r.i === cur);
-    $("pgtotal").textContent = "/ " + pages.length + (errOnly ? ` · ⚠${idxInErr >= 0 ? idxInErr + 1 : "-"}/${errPages.length}` : "");
+    const idx = probPages.findIndex((r) => r.i === cur);
+    $("pgtotal").textContent = "/ " + pages.length + (errOnly ? ` · ⚠${idx >= 0 ? idx + 1 : "-"}/${probPages.length}` : "");
   }
   function setErrOnly(on) {
-    if (on && !errPages.length) { toast("本档无 KaTeX 报错页"); return; }
+    if (on && !probPages.length) { toast("本档无问题页(红/疑似)"); return; }
     errOnly = on;
     $("errBtn").classList.toggle("on", on);
     document.body.classList.toggle("erronly", on);
-    if (on && !errPages.some((r) => r.i === cur)) render(errPages[0].i); else render(cur);
-    toast(on ? `错误页筛选开:${errPages.length} 页` : "错误页筛选关");
+    if (on && !probPages.some((r) => r.i === cur)) render(probPages[0].i); else render(cur);
+    toast(on ? `问题页筛选开:${probPages.length} 页(红/疑似)` : "问题页筛选关");
   }
   $("errBtn").onclick = () => setErrOnly(!errOnly);
 
@@ -409,8 +412,8 @@
     localStorage.setItem("tbdbgpage:" + stem, i);
     closePop(); selKey = null;
     $("pgin").value = d.page;
-    const lo = errOnly && errPages.length ? errPages[0].i : 0;
-    const hi = errOnly && errPages.length ? errPages[errPages.length - 1].i : pages.length - 1;
+    const lo = errOnly && probPages.length ? probPages[0].i : 0;
+    const hi = errOnly && probPages.length ? probPages[probPages.length - 1].i : pages.length - 1;
     $("prev").disabled = i <= lo; $("next").disabled = i >= hi;
     updatePgTotal(); syncFilm();
 
@@ -434,6 +437,8 @@
     const s = d.signals || {}, badges = [];
     const errN = (d.render_errors || []).length;
     if (errN) badges.push(`<span class="badge err">KaTeX 报错 ${errN}</span>`);
+    const susp = d.suspicions || [];
+    if (susp.length) badges.push(`<span class="badge warn" title="${susp.map((x) => x.op).join(" ")}">疑似漏识别 ${susp.length}(${[...new Set(susp.map((x) => x.op))].join(",")})</span>`);
     if (s.column_suspected) badges.push(`<span class="badge col">双栏嫌疑</span>`);
     (s.unhandled_labels || []).forEach((l) => badges.push(`<span class="badge warn">未知 label: ${esc(l)}</span>`));
     (s.visual_warnings || []).forEach((w) => badges.push(`<span class="badge warn">${esc(w.kind)}</span>`));
@@ -444,7 +449,10 @@
     const frags = d.frags && d.frags.length ? d.frags : [{ bids: [], md: d.md || "" }];
     out.innerHTML = frags.map((f) => {
       const bids = (f.bids || []).filter((x) => x != null).join(" ");
-      return `<div class="mdblk" data-bids="${bids}">${mdit.render(f.md || "")}</div>`;
+      const sus = f.suspicions && f.suspicions.length;
+      const cls = "mdblk" + (sus ? " susp" : "");
+      const ttl = sus ? ` title="疑似漏识别:${f.suspicions.join(" ")} 缺上/下标"` : "";
+      return `<div class="${cls}" data-bids="${bids}"${ttl}>${mdit.render(f.md || "")}</div>`;
     }).join("");
     out.querySelectorAll(".katex-error").forEach((e) => { (e.closest(".katex-display") || e.closest(".katex") || e).classList.add("err-formula"); });
     wireLink();
@@ -469,9 +477,10 @@
   function drawBoxes(d) {
     ov.innerHTML = "";
     if (!d.width || !d.height) return;
+    const suspBids = new Set((d.suspicions || []).flatMap((x) => x.bids).filter((x) => x != null));
     for (const b of d.blocks) {
       const el = document.createElement("div");
-      el.className = "box g-" + groupOf(b.label);
+      el.className = "box g-" + groupOf(b.label) + (suspBids.has(b.block_id) ? " susp" : "");
       el.style.left = pct(b.bbox[0], d.width); el.style.top = pct(b.bbox[1], d.height);
       el.style.width = pct(b.bbox[2] - b.bbox[0], d.width); el.style.height = pct(b.bbox[3] - b.bbox[1], d.height);
       el.dataset.bid = b.block_id; el.dataset.lab = b.label; el.dataset.ord = b.order; el.dataset.b = b.bbox.join(",");
@@ -484,8 +493,8 @@
 
   // ---------- 翻页 / 快捷键 ----------
   function step(dir) {
-    if (errOnly && errPages.length) {
-      const idxs = errPages.map((r) => r.i);
+    if (errOnly && probPages.length) {
+      const idxs = probPages.map((r) => r.i);
       const nxt = dir > 0 ? idxs.find((p) => p > cur) : [...idxs].reverse().find((p) => p < cur);
       if (nxt !== undefined) render(nxt);
     } else { const t = cur + dir; if (t >= 0 && t < pages.length) render(t); }
@@ -512,10 +521,11 @@
     setInv(localStorage.getItem("tbdbginv") !== "0");
     applyZoom(); updateDirty();
 
-    errPages = computeErrPages();
+    probPages = computeProblems();
+    const nErrP = probPages.filter((r) => r.nErr).length, nSuspP = probPages.filter((r) => r.nSusp).length;
     const sel = $("errIndex");
-    sel.innerHTML = `<option value="">报错索引 (${errPages.length} 页有红)</option>` +
-      errPages.map((r) => `<option value="${r.i}">p${r.page} — ${r.n} 处红</option>`).join("");
+    sel.innerHTML = `<option value="">问题索引 (${nErrP} 红 / ${nSuspP} 疑似)</option>` +
+      probPages.map((r) => `<option value="${r.i}">p${r.page} — ${probLabel(r)}</option>`).join("");
     sel.onchange = () => { if (sel.value !== "") render(+sel.value); };
     buildFilm();
 

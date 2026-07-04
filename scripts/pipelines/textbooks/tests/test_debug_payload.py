@@ -53,6 +53,25 @@ def test_payload_frags_carry_bids_and_join_to_md():
     assert any(18 in f["bids"] for f in p["frags"])
 
 
+def test_payload_flags_bare_oint_suspicion_golden_p48():
+    # 真实 p48:1.55 公式的裸 \oint(用户实测标的漏下标) → payload.suspicions 命中
+    res = json.loads((FIX / "page_0048_res.json").read_text(encoding="utf-8"))
+    p = build_page_payload(res, page=48, stem="Paul_p1-100_scan")
+    ops = [s["op"] for s in p["suspicions"]]
+    assert r"\oint" in ops
+    assert all("op" in s and "bids" in s for s in p["suspicions"])
+
+
+def test_payload_frag_suspicions_attached():
+    res = {"width": 100, "height": 100, "parsing_res_list": [
+        {"block_label": "display_formula", "block_content": r"$$ \oint \vec E \cdot ds $$",
+         "block_order": 1, "block_bbox": [0, 0, 10, 10], "block_id": 1},
+    ]}
+    p = build_page_payload(res, page=1, stem="s")
+    assert p["frags"][0]["suspicions"] == [r"\oint"]
+    assert p["suspicions"] == [{"op": r"\oint", "bids": [1]}]
+
+
 def test_payload_signals_present():
     p = build_page_payload(_p31(), page=31, stem="Paul_p1-100_scan")
     assert "column_suspected" in p["signals"]

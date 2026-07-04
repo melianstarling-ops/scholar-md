@@ -1,4 +1,45 @@
-from scripts.pipelines.textbooks.selfcheck import block_coverage, katex_incompat_scan, detect_column_layout, aggregate_warnings
+from scripts.pipelines.textbooks.selfcheck import (
+    block_coverage, katex_incompat_scan, detect_column_layout, aggregate_warnings,
+    scan_formula_suspicions, summarize_suspicions,
+)
+
+
+def test_summarize_suspicions_counts_by_op():
+    md = r"$$ \oint A $$" + "\n" + r"$$ \oint B $$" + "\n" + r"$$ \lim C $$"
+    assert summarize_suspicions(md) == [{"op": r"\oint", "count": 2}, {"op": r"\lim", "count": 1}]
+
+
+def test_suspicion_flags_bare_oint():
+    # 闭合积分裸用(无下标/围道) → 疑似漏识别(用户 p48 1.55 那类)
+    sus = scan_formula_suspicions(r"$$ c\Delta z=\varepsilon\oint\vec{E}\cdot d s $$")
+    assert [s["op"] for s in sus] == [r"\oint"]
+
+
+def test_suspicion_ignores_oint_with_subscript():
+    assert scan_formula_suspicions(r"\oint_{c'}\vec{E}\cdot dl") == []
+
+
+def test_suspicion_ignores_oint_with_limits():
+    assert scan_formula_suspicions(r"\oint\limits_{c}\vec{E}\cdot dl") == []
+
+
+def test_suspicion_flags_bare_int_and_lim():
+    ops = [s["op"] for s in scan_formula_suspicions(r"\int f\,dx + \lim g")]
+    assert r"\int" in ops and r"\lim" in ops
+
+
+def test_suspicion_ignores_definite_int_and_sum():
+    assert scan_formula_suspicions(r"\int_a^b f\,dx + \sum_{i=1}^n a_i") == []
+
+
+def test_suspicion_word_boundary_no_false_hit():
+    # \intercal / \infty 等不得被 \int 前缀误伤
+    assert scan_formula_suspicions(r"A^\intercal + \infty") == []
+
+
+def test_suspicion_reports_each_occurrence():
+    sus = scan_formula_suspicions(r"\oint A + \oint B")
+    assert len(sus) == 2 and all(s["op"] == r"\oint" for s in sus)
 
 
 def test_all_ordered_blocks_covered():

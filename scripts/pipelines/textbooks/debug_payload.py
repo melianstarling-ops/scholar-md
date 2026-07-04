@@ -8,7 +8,7 @@ from __future__ import annotations
 
 from scripts.pipelines.textbooks.images import is_visual_block
 from scripts.pipelines.textbooks.reconstruct import reconstruct_fragments
-from scripts.pipelines.textbooks.selfcheck import detect_column_layout
+from scripts.pipelines.textbooks.selfcheck import detect_column_layout, scan_formula_suspicions
 
 # 块 label → 叠框颜色。红(#ef4444)留给"渲染报错"高亮,不用于任何 label。
 LABEL_COLORS: dict[str, str] = {
@@ -82,6 +82,13 @@ def build_page_payload(res: dict, page: int, stem: str,
     frags, warnings = reconstruct_fragments(blocks, stem=stem, page=page)
     md = "\n\n".join(f["md"] for f in frags) + "\n"
     overlays = [o for o in (_overlay(b) for b in blocks) if o is not None]
+    # 疑似漏识别(裸大算符):逐片段标注,供 debug 视图橙色标出并聚合到页级
+    suspicions: list[dict] = []
+    for f in frags:
+        ops = [s["op"] for s in scan_formula_suspicions(f["md"])]
+        f["suspicions"] = ops
+        for op in ops:
+            suspicions.append({"op": op, "bids": f["bids"]})
     return {
         "page": page,
         "width": res.get("width"),
@@ -92,4 +99,5 @@ def build_page_payload(res: dict, page: int, stem: str,
         "frags": frags,
         "signals": build_page_signals(blocks, warnings),
         "render_errors": page_errors or [],
+        "suspicions": suspicions,
     }

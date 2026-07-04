@@ -13,6 +13,7 @@ from scripts.pipelines.textbooks.engine import predict_page
 from scripts.pipelines.textbooks.reconstruct import reconstruct_markdown
 from scripts.pipelines.textbooks.selfcheck import (
     block_coverage, katex_incompat_scan, aggregate_warnings, detect_column_layout,
+    summarize_suspicions,
 )
 from scripts.pipelines.textbooks import checkpoint as cp
 from scripts.pipelines.textbooks import images
@@ -170,6 +171,7 @@ def convert_pdf(pdf_path: str, out_dir: str | None = None,
         f.write(md)
     check = block_coverage(all_blocks, md)
     check["katex_incompat"] = katex_incompat_scan(md)
+    check["formula_suspicions"] = summarize_suspicions(md)
     check.update(aggregate_warnings(result["warnings"]))
     check["missing_assets"] = result["missing_assets"]
     check["column_layout_suspected"] = result["column_layout_suspected"]
