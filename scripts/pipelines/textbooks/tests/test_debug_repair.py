@@ -148,3 +148,58 @@ def test_build_repair_worklist_crops_only_suspicious_blocks(tmp_path):
     with open(worklist_path, encoding="utf-8") as f:
         data = json.load(f)
     assert data["count"] == 1
+
+
+from scripts.pipelines.textbooks.debug_repair import blocks_from_render_errors
+
+
+def test_blocks_from_render_errors_matches_by_content_prefix():
+    # 三个都以 l 开头,但前缀不同:只有 block 6 与 latex_head 前缀互含
+    blocks = [
+        {"block_label": "display_formula", "block_id": 3, "block_bbox": [0, 0, 10, 10],
+         "block_content": r"$$ l\Delta z=-\frac{\Delta z\mu\int X} $$"},
+        {"block_label": "display_formula", "block_id": 6, "block_bbox": [0, 20, 10, 30],
+         "block_content": r"$$ l=-\frac{\mu\int\limits_{c}^{H}\cdot a\, dl $$"},
+        {"block_label": "display_formula", "block_id": 9, "block_bbox": [0, 40, 10, 50],
+         "block_content": r"$$ l=-\mu\frac{\int X} $$"},
+    ]
+    page_errors = [{"page": 48, "mode": "display",
+                    "latex_head": r"l=-\frac{\mu\int\limits_{c}^{H}\cdot a\, dl"}]
+    hits = blocks_from_render_errors(blocks, page_errors)
+    assert [h["block_id"] for h in hits] == [6]
+    assert hits[0]["kinds"] == ["render_error"]
+    assert hits[0]["bbox"] == [0, 20, 10, 30]
+
+
+def test_blocks_from_render_errors_no_match_returns_empty():
+    blocks = [{"block_label": "display_formula", "block_id": 1, "block_bbox": [0, 0, 1, 1],
+               "block_content": r"$$ E=mc^2 $$"}]
+    page_errors = [{"page": 1, "mode": "display", "latex_head": "x=y+z"}]
+    assert blocks_from_render_errors(blocks, page_errors) == []
+
+
+def test_build_repair_worklist_includes_render_error_block(tmp_path):
+    # 一个启发式不命中(干净公式)但被 KaTeX 报错的块,应经 render_errors 进入 worklist
+    doc = fitz.open()
+    doc.new_page(width=72, height=72)
+    pdf = tmp_path / "book.pdf"
+    doc.save(str(pdf))
+    doc.close()
+
+    doc_dir = tmp_path / "book"
+    work_dir = doc_dir / "_work"
+    _write_res(str(work_dir), 1, 150, 150, [
+        {"block_label": "display_formula", "block_id": 7, "block_order": 1,
+         "block_bbox": [10, 10, 60, 60], "block_content": r"$$ a=\frac{x}{y} $$"},
+    ])
+    cp.save_manifest(str(work_dir), cp.new_manifest(
+        str(pdf), {"page_count": 1, "size_bytes": os.path.getsize(pdf)}, 150, "A"))
+    with open(doc_dir / "book_render_errors.json", "w", encoding="utf-8") as f:
+        json.dump({"errors": [{"page": 1, "mode": "display",
+                               "latex_head": r"a=\frac{x}{y}"}]}, f)
+
+    result = build_repair_worklist(str(doc_dir), repair_dpi=300, pad=5)
+
+    assert result["count"] == 1
+    assert result["items"][0]["block_id"] == 7
+    assert "render_error" in result["items"][0]["kinds"]

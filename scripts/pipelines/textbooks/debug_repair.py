@@ -43,6 +43,75 @@ def find_suspicious_blocks(blocks: list[dict]) -> list[dict]:
     return out
 
 
+def _norm_latex(s: str) -> str:
+    """去 $$ 包裹 + 所有空白,供 render_error latex_head ↔ block_content 前缀匹配。"""
+    s = s.strip()
+    if s.startswith("$$"):
+        s = s[2:]
+    if s.endswith("$$"):
+        s = s[:-2]
+    return "".join(s.split())
+
+
+def blocks_from_render_errors(blocks: list[dict], page_errors: list[dict]) -> list[dict]:
+    """把该页 KaTeX 硬报错(render_errors,确定性、零假阳性)匹配回 display_formula 块,
+    转成与 find_suspicious_blocks 同构的 hit(kind="render_error")。
+
+    render_error 无 block_id、其 latex_head 是 reconstruct 后 md 公式前 90 字符(截断),
+    故靠 latex_head 与 block_content 去 $$/空白后的前缀互含来定位;匹配不到的报错跳过
+    (不误纳),一个块最多命中一次。
+    """
+    dfs = [b for b in blocks if b.get("block_label") == "display_formula"]
+    out: list[dict] = []
+    seen: set = set()
+    for e in page_errors:
+        head = _norm_latex(e.get("latex_head") or "")
+        if not head:
+            continue
+        for b in dfs:
+            bid = b.get("block_id")
+            if bid in seen:
+                continue
+            content = _norm_latex(b.get("block_content") or "")
+            if content and (content.startswith(head) or head.startswith(content)):
+                out.append({
+                    "block_id": bid,
+                    "bbox": b.get("block_bbox"),
+                    "engine_latex": b.get("block_content") or "",
+                    "kinds": ["render_error"],
+                    "ops": [],
+                })
+                seen.add(bid)
+                break
+    return out
+
+
+def _merge_hits(*groups: list[dict]) -> list[dict]:
+    """按 block_id 合并多来源 hit(启发式疑似 + render_error),同块合并 kinds、去重。"""
+    by_id: dict = {}
+    for g in groups:
+        for h in g:
+            bid = h["block_id"]
+            if bid in by_id:
+                by_id[bid] = {**by_id[bid],
+                              "kinds": sorted(set(by_id[bid]["kinds"]) | set(h["kinds"]))}
+            else:
+                by_id[bid] = dict(h)
+    return list(by_id.values())
+
+
+def _render_errors_by_page(doc_dir: str, stem: str) -> dict:
+    """读 <stem>_render_errors.json → {page: [error, ...]};文件不存在返回 {}。"""
+    path = os.path.join(doc_dir, f"{stem}_render_errors.json")
+    by_page: dict = {}
+    if os.path.exists(path):
+        with open(path, encoding="utf-8") as f:
+            data = json.load(f)
+        for e in data.get("errors", []):
+            by_page.setdefault(e.get("page"), []).append(e)
+    return by_page
+
+
 def crop_at_scale(png_path: str, bbox: list[float], scale: float, pad: int = 10) -> Image.Image:
     """按 scale 把 bbox(res.json 坐标空间)换算到 png_path 实际像素空间,加 pad 后裁剪。
 
@@ -79,6 +148,7 @@ def build_repair_worklist(doc_dir: str, pdf_path: str | None = None,
         raise ValueError("未给 pdf_path,manifest 里也没有,无法栅格化裁图")
     total = manifest["fingerprint"]["page_count"]
     stem = os.path.basename(os.path.normpath(doc_dir))
+    render_errors = _render_errors_by_page(doc_dir, stem)
     repair_dir = os.path.join(doc_dir, f"{stem}_repair")
     crops_dir = os.path.join(repair_dir, "crops")
     pages_dir = os.path.join(repair_dir, "_pages")
@@ -91,7 +161,8 @@ def build_repair_worklist(doc_dir: str, pdf_path: str | None = None,
         with open(res_path, encoding="utf-8") as f:
             res = json.load(f)
         blocks = res.get("parsing_res_list", [])
-        hits = find_suspicious_blocks(blocks)
+        hits = _merge_hits(find_suspicious_blocks(blocks),
+                           blocks_from_render_errors(blocks, render_errors.get(page, [])))
         if not hits:
             continue
         png = pdf_page_to_png(resolved_pdf, page, pages_dir, dpi=repair_dpi)
