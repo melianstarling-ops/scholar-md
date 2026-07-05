@@ -435,8 +435,9 @@
   function gotoIndex(i) {
     if (corrDirty) {
       localStorage.setItem("tbdbgpage:" + stem, i);
-      // 翻页时把已采纳修正落进 md(后端 dirty 门控:无改动则秒回、不空跑)
-      fetch("/reassemble", { method: "POST" }).catch(() => {});
+      // 翻页时把已采纳修正落进 md(后端 dirty 门控:无改动则秒回、不空跑)。
+      // keepalive:紧接 location.reload() 会卸载页面,不加则浏览器可能中止这次请求。
+      fetch("/reassemble", { method: "POST", keepalive: true }).catch(() => {});
       location.reload();
       return;
     }
@@ -570,7 +571,12 @@
       .then(() => toast("已同步到 md"))
       .catch(() => {});
   }
-  $("syncmd").onclick = syncToMd;
+  if (!SERVE) {
+    $("syncmd").disabled = true;
+    $("syncmd").title = "跑 --serve 才能同步到 md(静态导出只读)";
+  } else {
+    $("syncmd").onclick = syncToMd;
+  }
 
   // 右栏片段 hover → 高亮左栏对应叠框(反向:见 drawBoxes 的 linkBlk)
   function wireLink() {
@@ -624,7 +630,7 @@
     else if (e.key === "m" || e.key === "M") $("annBtn").click();
     else if (e.key === "e" || e.key === "E") $("errBtn").click();
     else if (e.key === "r" || e.key === "R") $("reviewBtn").click();
-    else if (e.key === "s" || e.key === "S") syncToMd();
+    else if ((e.key === "s" || e.key === "S") && SERVE) syncToMd();
     else if (e.key === "Delete" && selKey) { delAnn(selKey); closePop(); }
     else if (e.key === "Escape") { closePop(); selKey = null; drawAnn(); }
   });

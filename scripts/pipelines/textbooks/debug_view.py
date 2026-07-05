@@ -187,6 +187,8 @@ def handle_post(doc_dir: str, stem: str, path: str, body: str,
     if path == "/reassemble":
         if state is not None and state.get("dirty") and reassemble_fn is not None:
             reassemble_fn()
+            # 乐观清零:reassemble_fn(serve 注入的 _safe_reassemble)已吞异常,失败也清脏,
+            # 不重试本轮;靠下次采纳重新置脏或 serve 启动对账补偿,避免脏标记永久卡住。
             state["dirty"] = False
         return 200, b"ok"
     with open(os.path.join(doc_dir, stem + "_annotations.json"), "w", encoding="utf-8") as f:
