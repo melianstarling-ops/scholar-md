@@ -254,12 +254,19 @@ def main() -> None:
     ap.add_argument("--port", type=int, default=8078, help="服务端口(默认8078)")
     ap.add_argument("--collect", action="store_true", help="归位浏览器导出的标注")
     ap.add_argument("--no-images", action="store_true", help="不内嵌页图(快而小,只看右栏渲染)")
+    ap.add_argument("--reassemble", action="store_true",
+                    help="幂等重组:应用已采纳修正,覆盖写 <stem>.md 后退出(无 UI 收尾/回填)")
     args = ap.parse_args()
 
     doc_dir = os.path.abspath(args.doc)
     stem = os.path.basename(os.path.normpath(doc_dir))
     pdf_path, mdpi = _resolve_pdf(doc_dir, args.src)
     dpi = args.dpi or mdpi
+
+    if args.reassemble:
+        md_path = _safe_reassemble(doc_dir, pdf_path, dpi)
+        print(f"[debug_view] reassemble → {md_path}")
+        return
 
     if args.collect:
         print(f"[debug_view] 标注 {collect_annotations(doc_dir, stem)} 条 @ {stem}_annotations.json")

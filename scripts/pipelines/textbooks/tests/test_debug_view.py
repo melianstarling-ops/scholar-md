@@ -241,3 +241,19 @@ def test_safe_reassemble_returns_path_on_success(tmp_path):
         return "MD_PATH"
     out = dv._safe_reassemble(str(tmp_path), pdf_path=None, dpi=100, reassemble_fn=ok)
     assert out == "MD_PATH"
+
+
+def test_cli_reassemble_calls_reassemble(tmp_path, monkeypatch):
+    doc_dir = tmp_path / "scan"
+    os.makedirs(doc_dir, exist_ok=True)
+    captured = {}
+    def fake_reassemble(d, pdf_path, dpi):
+        captured["doc_dir"] = d
+        return str(doc_dir / "scan.md")
+    monkeypatch.setattr(dv, "reassemble_md", fake_reassemble)
+    monkeypatch.setattr(dv.cp, "load_manifest",
+                        lambda w: {"dpi": 100, "pdf_path": None})
+    monkeypatch.setattr("sys.argv",
+                        ["debug_view.py", "--doc", str(doc_dir), "--reassemble"])
+    dv.main()
+    assert captured["doc_dir"] == os.path.abspath(str(doc_dir))
