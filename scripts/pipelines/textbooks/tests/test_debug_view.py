@@ -227,3 +227,17 @@ def test_handle_post_corrections_sets_dirty(tmp_path):
         state=state)
     assert status == 200
     assert state["dirty"] is True       # 采纳成功 → 置脏
+
+
+def test_safe_reassemble_swallows_exception(tmp_path):
+    def boom(*a, **k):
+        raise RuntimeError("assemble boom")
+    out = dv._safe_reassemble(str(tmp_path), pdf_path=None, dpi=100, reassemble_fn=boom)
+    assert out is None                  # 异常被吞,返回 None、不抛
+
+
+def test_safe_reassemble_returns_path_on_success(tmp_path):
+    def ok(doc_dir, pdf_path, dpi):
+        return "MD_PATH"
+    out = dv._safe_reassemble(str(tmp_path), pdf_path=None, dpi=100, reassemble_fn=ok)
+    assert out == "MD_PATH"

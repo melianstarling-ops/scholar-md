@@ -17,12 +17,14 @@ import datetime
 import importlib
 import json
 import os
+import threading
 
 import fitz
 
 from scripts.pipelines.textbooks import checkpoint as cp
 from scripts.pipelines.textbooks import debug_payload as dp
 from scripts.pipelines.textbooks import images
+from scripts.pipelines.textbooks.convert import reassemble_md
 from scripts.pipelines.textbooks.corrections import (
     load_corrections, apply_corrections, set_correction_status,
 )
@@ -192,10 +194,28 @@ def handle_post(doc_dir: str, stem: str, path: str, body: str,
     return 200, b"ok"
 
 
+def _safe_reassemble(doc_dir: str, pdf_path: str | None, dpi: int,
+                     reassemble_fn=None) -> str | None:
+    """调 reassemble 落 md,异常只告警不抛(启动对账/后台落盘不掀翻服务)。"""
+    fn = reassemble_fn or reassemble_md
+    try:
+        return fn(doc_dir, pdf_path, dpi)
+    except Exception as e:                                     # noqa: BLE001
+        print(f"[debug_view] reassemble 失败(忽略,不影响审核):{e}", flush=True)
+        return None
+
+
 def serve(doc_dir: str, pdf_path: str | None, dpi: int, img_dpi: int, port: int) -> None:
     from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
     stem = os.path.basename(os.path.normpath(doc_dir))
     img_cache: dict = {}
+    state = {"dirty": False}
+    lock = threading.Lock()
+
+    _safe_reassemble(doc_dir, pdf_path, dpi)     # 启动即对账:打开审核界面就把 md 同步到 json
+
+    def reassemble_fn():
+        _safe_reassemble(doc_dir, pdf_path, dpi)
 
     class H(BaseHTTPRequestHandler):
         def log_message(self, *a):  # 静默
@@ -213,7 +233,9 @@ def serve(doc_dir: str, pdf_path: str | None, dpi: int, img_dpi: int, port: int)
         def do_POST(self):
             n = int(self.headers.get("Content-Length", 0))
             body = self.rfile.read(n).decode("utf-8")
-            status, resp = handle_post(doc_dir, stem, self.path, body)
+            with lock:                                # 串行化:杜绝并发写同一 stem.md 的竞态
+                status, resp = handle_post(doc_dir, stem, self.path, body,
+                                           state=state, reassemble_fn=reassemble_fn)
             self.send_response(status)
             self.end_headers()
             self.wfile.write(resp)
