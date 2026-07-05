@@ -435,10 +435,14 @@
   function gotoIndex(i) {
     if (corrDirty) {
       localStorage.setItem("tbdbgpage:" + stem, i);
+      // 翻页时把已采纳修正落进 md(后端 dirty 门控:无改动则秒回、不空跑)
+      fetch("/reassemble", { method: "POST" }).catch(() => {});
       location.reload();
       return;
     }
     render(i);
+    // 翻页时把已采纳修正落进 md(后端 dirty 门控:无改动则秒回、不空跑)
+    fetch("/reassemble", { method: "POST" }).catch(() => {});
   }
 
   // ---------- 渲染页 ----------
@@ -560,6 +564,14 @@
     $("mdOut").querySelectorAll(".corrcard").forEach((card) => wireOneCorrCard(card, frags));
   }
 
+  // ---------- 手动同步落盘(页尾兜底:停在最后一页采纳、不再翻页也能落 md) ----------
+  function syncToMd() {
+    fetch("/reassemble", { method: "POST" })
+      .then(() => toast("已同步到 md"))
+      .catch(() => {});
+  }
+  $("syncmd").onclick = syncToMd;
+
   // 右栏片段 hover → 高亮左栏对应叠框(反向:见 drawBoxes 的 linkBlk)
   function wireLink() {
     $("mdOut").querySelectorAll(".mdblk").forEach((blk) => {
@@ -612,6 +624,7 @@
     else if (e.key === "m" || e.key === "M") $("annBtn").click();
     else if (e.key === "e" || e.key === "E") $("errBtn").click();
     else if (e.key === "r" || e.key === "R") $("reviewBtn").click();
+    else if (e.key === "s" || e.key === "S") syncToMd();
     else if (e.key === "Delete" && selKey) { delAnn(selKey); closePop(); }
     else if (e.key === "Escape") { closePop(); selKey = null; drawAnn(); }
   });
