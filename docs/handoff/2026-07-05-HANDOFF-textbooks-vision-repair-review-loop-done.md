@@ -2,6 +2,12 @@
 
 > 撰写:2026-07-05。承前:[2026-07-04 视觉修复方案交接](2026-07-04-HANDOFF-textbooks-formula-vision-repair.md)定的 Phase A/B/C 顺序与叠加层设计,本会话把 Phase A 整条链路(检测→裁图→视觉修→corrections→应用)建成并接了人工确认门 + 审核 UI,在真实 100 页书上全流程跑通、逐条人工审过。**方案已验证,新会话直接执行下面的开放项,勿推翻已定决策。**
 
+> **【2026-07-05 续会话更新】** 又一轮会话补齐了"采纳→落 md"闭环并订正了两处过时/错误描述:
+> - **已建成**:debug 审核点"采纳"后,修正现在会**自动进入最终 `.md`**——新增 `convert.reassemble_md` 复用唯一的 `assemble()` 幂等重组;`debug_view` serve 加 `/reassemble` 路由 + dirty 门控 + 线程锁 + **启动即对账**;前端**翻页/`S` 键**触发、`debug_view --reassemble` **CLI** 入口。257 测试全绿。设计与计划见 `docs/superpowers/{specs,plans}/2026-07-05-textbooks-accept-reassemble-md-*`。
+> - **订正 §2**:Paul 的 corrections 现为 **13 条全部 accepted 且已全部落盘 `.md`**(原表"9 accepted + 4 待审"已过时;那 4 条已采纳并回填)。
+> - **订正 §1.2 / §3.4 打包措辞**:见下方各节的〔订正〕——"禁一切打包"是错的,只该禁 L-T31 合成图打包。
+> - **仍未修**:§3.1 滚动 bug、§3.2 p48 检测、§3.3 Phase C 生成侧调度、§3.4 多后端封装 —— 均保留为开放项。
+
 ## §0 一句话结论
 
 Phase A 闭环已建成、已用真实数据验证、AI 视觉识别效果很好(9/9 已采纳,0 驳回)。下一步:**修 2 个已知 bug**(滚动异常、p48 硬报错未纳入检测)+ **把它折进主转换管线(Phase C)** + **给视觉调用加并发与多后端切换**。
@@ -9,7 +15,12 @@ Phase A 闭环已建成、已用真实数据验证、AI 视觉识别效果很好
 ## §1 本会话已完成(全部 TDD,247 测试全绿,真实数据验证过)
 
 1. **Module 1** `scripts/pipelines/textbooks/debug_repair.py`:`find_suspicious_blocks`(扫 display_formula 块的疑似)→ `crop_at_scale`(按 DPI 比例换算 bbox + padding)→ `build_repair_worklist`(编排,只渲染真正有疑似的页,产 `<stem>_repair/{crops/,worklist.json}`)。
-2. **Module 2** `scripts/pipelines/textbooks/vision_repair.py`:无头 `claude -p` 读裁图(`_resolve_claude_bin` 绕过 Windows npm shim 坑,见 L-T28)→ `run_vision_repair` 产 `<stem>_corrections.json`。**已定论:单独调用 + 跨调用并发(`parallel=3`),不做任何形式的图片打包**(路径级打包/合成图打包都实测过,省钱不省时甚至读错内容,见 L-T30/L-T31,别重新实验)。
+2. **Module 2** `scripts/pipelines/textbooks/vision_repair.py`:无头 `claude -p` 读裁图(`_resolve_claude_bin` 绕过 Windows npm shim 坑,见 L-T28)→ `run_vision_repair` 产 `<stem>_corrections.json`。跨调用并发 `ThreadPoolExecutor(max_workers=parallel)`(默认 `parallel=3`)。
+   > **〔2026-07-05 订正〕** 原文"不做任何形式的图片打包(别重新实验)"措辞有误——把两种机制不同的打包混为一谈:
+   > - **L-T31 合成图打包**(N 图拼成一张、一次 Read,分辨率被压):实测 10/10 下标读错,**确实该禁**。
+   > - **L-T30 路径列表打包**(N 个独立文件、各自原分辨率 Read、结果按 key 归并):只测过更慢更省钱,**从未测过正确性**,无降质证据。
+   >
+   > 当前 `call_claude_vision_batch`(`run_vision_repair` 默认 `batch_size=5`)走的正是 **L-T30 路径列表打包**,真实跑 13/13 采纳是其不降质的正面证据。**结论收窄:仅禁 L-T31 合成图打包;L-T30 路径列表打包可用**,代码无需改。
 3. **Module 3** `scripts/pipelines/textbooks/corrections.py`:`load_corrections`/`apply_corrections`(按 page+block_id+content_fingerprint 匹配,**只应用 `status=="accepted"`**)/`set_correction_status`。已接入 `convert.py assemble()` 与 `debug_view.py build_payloads`——**这就是 Phase C 想要的"应用"半条腿,已经在生产路径里了,缺的是"生成"那半条腿的调度**(见 §3.3)。
 4. **人工确认门**(所有者反馈"生成即自动应用没有关卡"不符合红线后补的):`vision_repair.py` 新产出的修正一律 `status:"pending"`;`apply_corrections` 只应用 `accepted`。
 5. **debug 视图审核 UI**(`debug_assets/{app.js,app.css,template.html}` + `debug_payload.py`/`debug_view.py`):
@@ -25,10 +36,11 @@ Phase A 闭环已建成、已用真实数据验证、AI 视觉识别效果很好
 
 | page/block | 状态 |
 |---|---|
-| 44/13, 46/11, 48/12, 49/3, 49/6, 49/9, 49/12, 49/15, 49/18 | **accepted**(9 条,已应用进 `Paul_p1-100_scan.md`) |
-| 50/3, 53/20, 54/6, 54/15 | **待审**(4 条,还没人看) |
+| 44/13, 46/11, 48/12, 49/3, 49/6, 49/9, 49/12, 49/15, 49/18, 50/3, 53/20, 54/6, 54/15 | **accepted**(13 条,全部已落盘 `Paul_p1-100_scan.md`) |
 
-驳回 0 条——本会话演示时曾误点驳回 49/6(1.56b),已在本会话内改回 accepted 并重新应用生效,不是遗留问题。**AI 视觉修复质量结论:9/9 人工核对通过,无一驳回,含"曲面 s' 而非围道 c'"这种最容易被同化的 case 也读对**——这是 §3.3 建议接回主管线的实证依据。
+> **〔2026-07-05 订正〕** 原表写"9 accepted + 4 待审(还没人看)"已过时:那 4 条(50/3、53/20、54/6、54/15)后来也已采纳,共 13 条全部 accepted。且续会话建成"采纳→落 md"闭环后,对本文档跑了一次 `--reassemble` 回填,**13 条修正现已全部写进 `.md`**(此前只有前 9 条落盘)。
+
+驳回 0 条——曾演示时误点驳回 49/6(1.56b),已改回 accepted 并重新生效,非遗留问题。**AI 视觉修复质量结论:13/13 人工核对通过,无一驳回,含"曲面 s' 而非围道 c'"这种最容易被同化的 case 也读对**——这是 §3.3 建议接回主管线的实证依据。
 
 ## §3 已知问题 / 开放项(新会话按序处理)
 
@@ -70,7 +82,8 @@ Phase A 闭环已建成、已用真实数据验证、AI 视觉识别效果很好
   - `00_System/Lessons/lessons_kb_ingest.md`(K1~K16,尤其 K7 npm shim、K11 kimi 独立 exe + UTF-8 locale 两前提、K13/K15 MCP 污染、K16 进度+并发)。
   - 本仓 L-T28(Windows subprocess 调 claude 的 npm shim 坑,已复现过一次,`_resolve_claude_bin` 已经是解法)。
 - **Kimi 是否接入待定**:此前决定"暂缓,等实际调试阶段再评估"(见 `docs/handoff/2026-07-04-HANDOFF-textbooks-formula-vision-repair.md` §1.2)。现在 claude 单后端质量已验证很好,是否还需要 Kimi(省钱/限流备份)是所有者要拍板的产品决策,不是技术阻塞——新会话开工前建议先问一句,别默认就去接。
-- **"并发"这个词在视觉调用场景下的含义已经踩过一次坑**(L-T30):多图塞进一次 prompt 打包 ≠ 并发,真正的并发是"同时跑几个独立子进程"。新会话设计并发时,直接照抄 `run_vision_repair` 现有的 `ThreadPoolExecutor(max_workers=parallel)` 那层,不要退回到"打包"思路。
+- **"并发"这个词在视觉调用场景下的含义已经踩过一次坑**(L-T30):多图塞进一次 prompt 打包 ≠ 并发,真正的并发是"同时跑几个独立子进程"。新会话设计并发时,直接照抄 `run_vision_repair` 现有的 `ThreadPoolExecutor(max_workers=parallel)` 那层。
+  > **〔2026-07-05 订正〕** "不要退回到打包思路"专指别用 **L-T31 合成图打包**;**L-T30 路径列表打包**(当前默认 `batch_size=5`)与并发不冲突、可并存,是省启动开销的正当手段,无降质证据。详见 §1.2 订正。
 
 ## §4 给新会话的第一步
 
