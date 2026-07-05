@@ -164,10 +164,12 @@ def collect_annotations(doc_dir: str, stem: str) -> int:
     return 0
 
 
-def handle_post(doc_dir: str, stem: str, path: str, body: str) -> tuple[int, bytes]:
-    """POST 路由(供 serve() 的 handler 调用,抽成纯函数便于单测):`/corrections` 是
-    debug 视图的采纳/驳回按钮,走 set_correction_status;其它路径沿用既有标注流程,
-    落 `<stem>_annotations.json`。返回 (status_code, response_body)。"""
+def handle_post(doc_dir: str, stem: str, path: str, body: str,
+                state: dict | None = None, reassemble_fn=None) -> tuple[int, bytes]:
+    """POST 路由(纯函数便于单测)。
+    `/corrections`:采纳/驳回 → set_correction_status;成功则置 state["dirty"]。
+    `/reassemble`:dirty 才调 reassemble_fn 落 md、清脏(否则秒回)——落盘幂等,门控只为省。
+    其它路径:沿用标注流程落 <stem>_annotations.json。返回 (status_code, response_body)。"""
     if path == "/corrections":
         try:
             data = json.loads(body)
@@ -177,7 +179,14 @@ def handle_post(doc_dir: str, stem: str, path: str, body: str) -> tuple[int, byt
             ok = set_correction_status(doc_dir, data["page"], data["block_id"], data["status"])
         except (KeyError, ValueError) as e:
             return 400, str(e).encode("utf-8")
+        if ok and state is not None:
+            state["dirty"] = True
         return (200, b"ok") if ok else (404, b"not found")
+    if path == "/reassemble":
+        if state is not None and state.get("dirty") and reassemble_fn is not None:
+            reassemble_fn()
+            state["dirty"] = False
+        return 200, b"ok"
     with open(os.path.join(doc_dir, stem + "_annotations.json"), "w", encoding="utf-8") as f:
         f.write(body)
     return 200, b"ok"

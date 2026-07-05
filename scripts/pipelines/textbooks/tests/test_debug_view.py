@@ -187,3 +187,43 @@ def test_build_payloads_correction_has_no_crop_b64_when_file_missing(tmp_path):
 
     b = next(b for b in pages[0]["blocks"] if b["block_id"] == 5)
     assert b["correction"].get("crop_b64", "") == ""
+
+
+def test_handle_post_reassemble_runs_when_dirty(tmp_path):
+    doc_dir = tmp_path / "book"
+    os.makedirs(doc_dir, exist_ok=True)
+    calls = []
+    state = {"dirty": True}
+    status, body = dv.handle_post(
+        str(doc_dir), "book", "/reassemble", "",
+        state=state, reassemble_fn=lambda: calls.append(1))
+    assert status == 200
+    assert calls == [1]                 # dirty → 跑
+    assert state["dirty"] is False      # 跑完清脏
+
+
+def test_handle_post_reassemble_skips_when_clean(tmp_path):
+    doc_dir = tmp_path / "book"
+    os.makedirs(doc_dir, exist_ok=True)
+    calls = []
+    state = {"dirty": False}
+    status, body = dv.handle_post(
+        str(doc_dir), "book", "/reassemble", "",
+        state=state, reassemble_fn=lambda: calls.append(1))
+    assert status == 200
+    assert calls == []                  # 无脏 → 秒回不跑
+
+
+def test_handle_post_corrections_sets_dirty(tmp_path):
+    doc_dir = tmp_path / "book"
+    os.makedirs(doc_dir, exist_ok=True)
+    with open(doc_dir / "book_corrections.json", "w", encoding="utf-8") as f:
+        _json.dump({"stem": "book", "corrections": [
+            {"page": 1, "block_id": 5, "status": "pending"}]}, f)
+    state = {"dirty": False}
+    status, body = dv.handle_post(
+        str(doc_dir), "book", "/corrections",
+        _json.dumps({"page": 1, "block_id": 5, "status": "accepted"}),
+        state=state)
+    assert status == 200
+    assert state["dirty"] is True       # 采纳成功 → 置脏
