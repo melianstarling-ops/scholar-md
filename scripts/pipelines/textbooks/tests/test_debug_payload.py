@@ -103,3 +103,43 @@ def test_malformed_bbox_block_excluded_from_overlays():
     p = build_page_payload(res, page=1, stem="s")
     ids = [b["block_id"] for b in p["blocks"]]
     assert ids == [2]        # 只有合法 bbox 的入叠框
+
+
+def test_payload_attaches_pending_correction_to_block_and_frag():
+    from scripts.pipelines.textbooks.vision_repair import content_fingerprint
+    original = r"$$ \oint \vec E \cdot ds $$"
+    res = {"width": 100, "height": 100, "parsing_res_list": [
+        {"block_label": "display_formula", "block_content": original,
+         "block_order": 1, "block_bbox": [0, 0, 10, 10], "block_id": 1},
+    ]}
+    corrections = [{"page": 1, "block_id": 1, "corrected_latex": "$$ fixed $$",
+                    "confidence": "high", "kind": "bare_op",
+                    "content_fingerprint": content_fingerprint(original), "status": "pending"}]
+    p = build_page_payload(res, page=1, stem="s", corrections=corrections)
+    b = p["blocks"][0]
+    assert b["correction"]["status"] == "pending"
+    assert b["correction"]["corrected_latex"] == "$$ fixed $$"
+    assert b["correction"]["block_id"] == 1
+    assert b["correction"]["confidence"] == "high"
+    frag = p["frags"][0]
+    assert frag["correction"]["status"] == "pending"
+
+
+def test_payload_correction_not_attached_on_fingerprint_mismatch():
+    res = {"width": 100, "height": 100, "parsing_res_list": [
+        {"block_label": "display_formula", "block_content": r"$$ \oint \vec E \cdot ds $$",
+         "block_order": 1, "block_bbox": [0, 0, 10, 10], "block_id": 1},
+    ]}
+    corrections = [{"page": 1, "block_id": 1, "corrected_latex": "$$ fixed $$",
+                    "content_fingerprint": "stale-hash", "status": "pending"}]
+    p = build_page_payload(res, page=1, stem="s", corrections=corrections)
+    assert p["blocks"][0]["correction"] is None
+
+
+def test_payload_correction_none_when_not_provided():
+    res = {"width": 100, "height": 100, "parsing_res_list": [
+        {"block_label": "display_formula", "block_content": "$$ a $$",
+         "block_order": 1, "block_bbox": [0, 0, 10, 10], "block_id": 1},
+    ]}
+    p = build_page_payload(res, page=1, stem="s")
+    assert p["blocks"][0]["correction"] is None

@@ -373,3 +373,67 @@ def test_convert_selfcheck_has_four_new_fields(tmp_path, monkeypatch):
     assert res["selfcheck"]["visual_warnings"] == []
     assert res["selfcheck"]["column_layout_suspected"] == []
     assert res["selfcheck"]["missing_assets"] == []
+
+
+def _one_display_formula_block(page):
+    return [{"block_order": 0, "block_label": "display_formula", "block_id": 5,
+             "block_content": "$$ bad $$"}]
+
+
+def test_convert_applies_corrections_json(tmp_path, monkeypatch):
+    from scripts.pipelines.textbooks.vision_repair import content_fingerprint
+    pdf = _make_scan_pdf(tmp_path, 1)
+    _stub_engine(monkeypatch, _one_display_formula_block)
+    out = str(tmp_path / "out")
+    doc_dir = os.path.join(out, "scan")
+    os.makedirs(doc_dir, exist_ok=True)
+    corrections_payload = {"stem": "scan", "corrections": [
+        {"page": 1, "block_id": 5, "corrected_latex": "$$ good $$",
+         "content_fingerprint": content_fingerprint("$$ bad $$"), "status": "accepted"}]}
+    with open(os.path.join(doc_dir, "scan_corrections.json"), "w", encoding="utf-8") as f:
+        json.dump(corrections_payload, f)
+
+    res = cv.convert_pdf(pdf, out, dpi=100)
+
+    md = open(res["md_path"], encoding="utf-8").read()
+    assert "good" in md
+    assert "bad" not in md
+
+
+def test_convert_skips_correction_on_fingerprint_mismatch(tmp_path, monkeypatch):
+    pdf = _make_scan_pdf(tmp_path, 1)
+    _stub_engine(monkeypatch, _one_display_formula_block)
+    out = str(tmp_path / "out")
+    doc_dir = os.path.join(out, "scan")
+    os.makedirs(doc_dir, exist_ok=True)
+    corrections_payload = {"stem": "scan", "corrections": [
+        {"page": 1, "block_id": 5, "corrected_latex": "$$ good $$",
+         "content_fingerprint": "stale-hash-does-not-match", "status": "accepted"}]}
+    with open(os.path.join(doc_dir, "scan_corrections.json"), "w", encoding="utf-8") as f:
+        json.dump(corrections_payload, f)
+
+    res = cv.convert_pdf(pdf, out, dpi=100)
+
+    md = open(res["md_path"], encoding="utf-8").read()
+    assert "bad" in md
+    assert "good" not in md
+
+
+def test_convert_does_not_apply_pending_correction(tmp_path, monkeypatch):
+    from scripts.pipelines.textbooks.vision_repair import content_fingerprint
+    pdf = _make_scan_pdf(tmp_path, 1)
+    _stub_engine(monkeypatch, _one_display_formula_block)
+    out = str(tmp_path / "out")
+    doc_dir = os.path.join(out, "scan")
+    os.makedirs(doc_dir, exist_ok=True)
+    corrections_payload = {"stem": "scan", "corrections": [
+        {"page": 1, "block_id": 5, "corrected_latex": "$$ good $$",
+         "content_fingerprint": content_fingerprint("$$ bad $$"), "status": "pending"}]}
+    with open(os.path.join(doc_dir, "scan_corrections.json"), "w", encoding="utf-8") as f:
+        json.dump(corrections_payload, f)
+
+    res = cv.convert_pdf(pdf, out, dpi=100)
+
+    md = open(res["md_path"], encoding="utf-8").read()
+    assert "bad" in md                             # 人工确认门:待审不生效
+    assert "good" not in md

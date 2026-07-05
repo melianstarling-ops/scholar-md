@@ -36,6 +36,7 @@
   const ANN_KEY = "tbdbgann:" + stem, EXP_KEY = "tbdbgexp:" + stem;
   let cur = 0, zoom = 0, annMode = false, suppressClick = false, selKey = null;
   let probPages = [];   // 问题页:KaTeX 硬报错(红) 或 疑似漏识别(裸大算符,琥珀)
+  let corrDirty = false;   // 本页有采纳/驳回写回但还没刷新(离开本页时才刷新,省得点一次刷一次)
   const ann = new Map(Object.entries(JSON.parse(localStorage.getItem(ANN_KEY) || "{}")));
 
   // 数学交给 markdown-it-katex 插件($…$ 在 inline 阶段 tokenize,先于 markdown 强调,LaTeX 不被污染)
@@ -143,7 +144,8 @@
   function applyTheme(t) { document.body.dataset.theme = t; $("themeBtn").textContent = t === "dark" ? "☀" : "☾"; localStorage.setItem("tbdbgtheme", t); }
   $("themeBtn").onclick = () => applyTheme(document.body.dataset.theme === "dark" ? "light" : "dark");
 
-  // ---------- 问题页(离屏渲染判红,与 headless 扫描器同源;叠加 payload 里的疑似) ----------
+  // ---------- 问题页(离屏渲染判红,与 headless 扫描器同源;叠加 payload 里的疑似/待审) ----------
+  const nPendingReview = (p) => (p.blocks || []).filter((b) => b.correction && b.correction.status === "pending").length;
   function computeProblems() {
     const scratch = document.createElement("div");
     scratch.style.cssText = "position:absolute;left:-9999px;top:0;visibility:hidden;width:820px";
@@ -153,12 +155,14 @@
       scratch.innerHTML = mdit.render(p.md || "");
       const nErr = scratch.querySelectorAll(".katex-error").length;
       const nSusp = (p.suspicions || []).length;
-      if (nErr > 0 || nSusp > 0) rows.push({ i, page: p.page, nErr, nSusp });
+      const nReview = nPendingReview(p);
+      if (nErr > 0 || nSusp > 0) rows.push({ i, page: p.page, nErr, nSusp, nReview });
     });
     document.body.removeChild(scratch);
     return rows;
   }
-  const probLabel = (r) => [r.nErr ? `${r.nErr} 红` : "", r.nSusp ? `疑似${r.nSusp}` : ""].filter(Boolean).join("·");
+  const probLabel = (r) => [r.nErr ? `${r.nErr} 红` : "", r.nSusp ? `疑似${r.nSusp}` : "",
+    r.nReview ? `★待审${r.nReview}` : ""].filter(Boolean).join("·");
 
   // ---------- 缩略图条 ----------
   const film = $("film"), track = $("filmtrack");
@@ -170,11 +174,12 @@
       const pr = probMap.get(i);
       t.className = "thumb" + (pr ? "" : " noerr"); t.dataset.i = i;
       const img = p.image_b64 ? `<img loading="lazy" src="data:image/jpeg;base64,${p.image_b64}" alt="">` : "";
-      const mark = pr ? (pr.nErr ? '<span class="terr">⚠</span>' : "") + (pr.nSusp ? '<span class="tsusp">◆</span>' : "") : "";
+      const mark = pr ? (pr.nErr ? '<span class="terr">⚠</span>' : "") + (pr.nSusp ? '<span class="tsusp">◆</span>' : "")
+        + (pr.nReview ? '<span class="trev">★</span>' : "") : "";
       t.innerHTML = img + mark +
         (p.signals && p.signals.column_suspected ? '<span class="tcol">▮▮</span>' : "") +
         `<span class="tno">${p.page}</span>`;
-      t.onclick = () => render(i);
+      t.onclick = () => gotoIndex(i);
       track.appendChild(t);
     });
   }
@@ -189,21 +194,40 @@
   film.addEventListener("mouseleave", () => { clearTimeout(filmT); film.classList.remove("show"); });
   film.addEventListener("wheel", (e) => { if (e.ctrlKey) return; if (Math.abs(e.deltaY) > Math.abs(e.deltaX)) { e.preventDefault(); film.scrollLeft += e.deltaY; } }, { passive: false });
 
-  // ---------- 问题页筛选(红 + 疑似) ----------
-  let errOnly = false;
+  // ---------- 问题页筛选(红 + 疑似 / 待审修正) ----------
+  // reviewOnly 是 errOnly 的严格子集(有待审提案的页必然还带着疑似,内容未生效前不会被清)。
+  // 两个筛选互斥:开一个自动关另一个,activeFilter() 统一给 step/render/updatePgTotal 用。
+  let errOnly = false, reviewOnly = false;
+  let reviewPages = [];
+  const activeFilter = () => (reviewOnly ? reviewPages : errOnly ? probPages : null);
   function updatePgTotal() {
-    const idx = probPages.findIndex((r) => r.i === cur);
-    $("pgtotal").textContent = "/ " + pages.length + (errOnly ? ` · ⚠${idx >= 0 ? idx + 1 : "-"}/${probPages.length}` : "");
+    const af = activeFilter();
+    const idx = af ? af.findIndex((r) => r.i === cur) : -1;
+    const tag = reviewOnly ? "📝" : errOnly ? "⚠" : "";
+    $("pgtotal").textContent = "/ " + pages.length + (af ? ` · ${tag}${idx >= 0 ? idx + 1 : "-"}/${af.length}` : "");
   }
   function setErrOnly(on) {
     if (on && !probPages.length) { toast("本档无问题页(红/疑似)"); return; }
-    errOnly = on;
-    $("errBtn").classList.toggle("on", on);
-    document.body.classList.toggle("erronly", on);
-    if (on && !probPages.some((r) => r.i === cur)) render(probPages[0].i); else render(cur);
+    errOnly = on; if (on) reviewOnly = false;
+    $("errBtn").classList.toggle("on", errOnly);
+    $("reviewBtn").classList.toggle("on", reviewOnly);
+    document.body.classList.toggle("erronly", errOnly || reviewOnly);
+    const af = activeFilter();
+    if (af && !af.some((r) => r.i === cur)) gotoIndex(af[0].i); else gotoIndex(cur);
     toast(on ? `问题页筛选开:${probPages.length} 页(红/疑似)` : "问题页筛选关");
   }
+  function setReviewOnly(on) {
+    if (on && !reviewPages.length) { toast("本档无待审修正(先跑 vision_repair 生成提案)"); return; }
+    reviewOnly = on; if (on) errOnly = false;
+    $("reviewBtn").classList.toggle("on", reviewOnly);
+    $("errBtn").classList.toggle("on", errOnly);
+    document.body.classList.toggle("erronly", errOnly || reviewOnly);
+    const af = activeFilter();
+    if (af && !af.some((r) => r.i === cur)) gotoIndex(af[0].i); else gotoIndex(cur);
+    toast(on ? `待审修正筛选开:${reviewPages.length} 页,优先看这些` : "待审修正筛选关");
+  }
   $("errBtn").onclick = () => setErrOnly(!errOnly);
+  $("reviewBtn").onclick = () => setReviewOnly(!reviewOnly);
 
   // ---------- 标记存取 ----------
   const annKey = (page, bstr) => page + "|" + bstr;
@@ -406,14 +430,26 @@
   }
   $("annBtn").onclick = () => { annMode = !annMode; $("annBtn").classList.toggle("on", annMode); st.classList.toggle("annmode", annMode); toast(annMode ? "标记模式开:点块框打标 / 空白拖框画区域" : "标记模式关"); };
 
+  // ---------- 跳页(采纳/驳回是即时写盘但不即时刷新;真正离开本页时才刷新一次,
+  // 一页多处要改时不必点一次刷一次) ----------
+  function gotoIndex(i) {
+    if (corrDirty) {
+      localStorage.setItem("tbdbgpage:" + stem, i);
+      location.reload();
+      return;
+    }
+    render(i);
+  }
+
   // ---------- 渲染页 ----------
   function render(i) {
     cur = i; const d = pages[i];
     localStorage.setItem("tbdbgpage:" + stem, i);
     closePop(); selKey = null;
     $("pgin").value = d.page;
-    const lo = errOnly && probPages.length ? probPages[0].i : 0;
-    const hi = errOnly && probPages.length ? probPages[probPages.length - 1].i : pages.length - 1;
+    const af0 = activeFilter();
+    const lo = af0 && af0.length ? af0[0].i : 0;
+    const hi = af0 && af0.length ? af0[af0.length - 1].i : pages.length - 1;
     $("prev").disabled = i <= lo; $("next").disabled = i >= hi;
     updatePgTotal(); syncFilm();
 
@@ -442,6 +478,8 @@
       const detailTitle = [...new Set(susp.map((x) => x.detail))].join("\n");
       badges.push(`<span class="badge warn" title="${detailTitle}">疑似识别错误 ${susp.length}(${[...new Set(susp.map((x) => x.op))].join(",")})</span>`);
     }
+    const nRev = nPendingReview(d);
+    if (nRev) badges.push(`<span class="badge review">★ 待审修正 ${nRev}(见下方卡片,一键采纳/驳回)</span>`);
     if (s.column_suspected) badges.push(`<span class="badge col">双栏嫌疑</span>`);
     (s.unhandled_labels || []).forEach((l) => badges.push(`<span class="badge warn">未知 label: ${esc(l)}</span>`));
     (s.visual_warnings || []).forEach((w) => badges.push(`<span class="badge warn">${esc(w.kind)}</span>`));
@@ -450,16 +488,76 @@
 
     const out = $("mdOut");
     const frags = d.frags && d.frags.length ? d.frags : [{ bids: [], md: d.md || "" }];
-    out.innerHTML = frags.map((f) => {
+    out.innerHTML = frags.map((f, fi) => {
       const bids = (f.bids || []).filter((x) => x != null).join(" ");
       const sus = f.suspicions && f.suspicions.length;
       const cls = "mdblk" + (sus ? " susp" : "");
       const ttl = sus ? ` title="疑似识别错误:${f.suspicions.join(" , ")}"` : "";
-      return `<div class="${cls}" data-bids="${bids}"${ttl}>${mdit.render(f.md || "")}</div>`;
+      const card = f.correction ? renderCorrCard(f.correction, d.page, fi) : "";
+      return `<div class="${cls}" data-bids="${bids}"${ttl}>${mdit.render(f.md || "")}${card}</div>`;
     }).join("");
     out.querySelectorAll(".katex-error").forEach((e) => { (e.closest(".katex-display") || e.closest(".katex") || e).classList.add("err-formula"); });
     wireLink();
+    wireCorrCards(frags);
     if (!d.image_b64) { renderAnnList(); }
+  }
+
+  // ---------- 待审修正卡片(人工确认门:AI 提案 → 一键采纳/驳回,写回 corrections.json) ----------
+  // 采纳/驳回后卡片仍显示对照 + 两个按钮(高亮当前状态),可随时改判;写回即时落盘,
+  // 但不即时刷新整页——真正翻页/跳页时(gotoIndex)才刷新一次,一页多处要改不必点一次刷一次。
+  function renderCorrCard(c, page, fi) {
+    // 左边优先放"原图裁切"(真实来源,不是引擎转写)——比对时只看这一张图跟右边是否
+    // 一致即可,不必先在脑内确认引擎渲染有没有跟原图一致这一层。没有裁图(旧产物/被清)
+    // 才退回渲染引擎 LaTeX 兜底。
+    const orig = c.crop_b64
+      ? `<img class="corrphoto" src="data:image/png;base64,${c.crop_b64}" alt="原图裁切">`
+      : mdit.render(c.engine_latex || "");
+    const stCls = c.status === "accepted" ? "st-accepted" : c.status === "rejected" ? "st-rejected" : "st-pending";
+    const stText = c.status === "accepted" ? "✓ 已采纳" : c.status === "rejected" ? "✕ 已驳回" : "待审";
+    return `<div class="corrcard ${stCls}" data-page="${page}" data-bid="${c.block_id}" data-fi="${fi}">
+      <div class="corrhead"><span class="corrtag">AI 提案</span><span class="corrstatus">${stText}</span><span class="corrconf">置信度:${esc(c.confidence || "?")}</span></div>
+      <div class="corrcompare">
+        <div class="corrpane"><span class="corrlabel">${c.crop_b64 ? "原图裁切" : "引擎原文"}</span><div class="corrmd">${orig}</div></div>
+        <div class="corrarrow">→</div>
+        <div class="corrpane"><span class="corrlabel">AI 修正</span><div class="corrmd">${mdit.render(c.corrected_latex || "")}</div></div>
+      </div>
+      <div class="corractions">
+        <button class="corrbtn accept${c.status === "accepted" ? " active" : ""}">✓ 采纳</button>
+        <button class="corrbtn reject${c.status === "rejected" ? " active" : ""}">✕ 驳回</button>
+      </div>
+    </div>`;
+  }
+  function wireOneCorrCard(card, frags) {
+    const page = +card.dataset.page, bid = +card.dataset.bid, fi = +card.dataset.fi;
+    const accept = card.querySelector(".accept"), reject = card.querySelector(".reject");
+    if (!SERVE) {
+      [accept, reject].forEach((b) => { b.disabled = true; b.title = "跑 --serve 才能一键采纳/驳回(静态导出只读)"; });
+      return;
+    }
+    const send = async (status) => {
+      accept.disabled = reject.disabled = true;
+      try {
+        const r = await fetch("/corrections", {
+          method: "POST", headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ page, block_id: bid, status }),
+        });
+        if (!r.ok) throw new Error("HTTP " + r.status);
+        const frag = frags[fi];
+        frag.correction = { ...frag.correction, status };
+        corrDirty = true;
+        const holder = document.createElement("div");
+        holder.innerHTML = renderCorrCard(frag.correction, page, fi);
+        const fresh = holder.firstElementChild;
+        card.replaceWith(fresh);
+        wireOneCorrCard(fresh, frags);
+        toast((status === "accepted" ? "已采纳" : "已驳回") + "(翻页/跳页时刷新生效)");
+      } catch (e) { toast("写回失败: " + e.message); accept.disabled = reject.disabled = false; }
+    };
+    accept.onclick = () => send("accepted");
+    reject.onclick = () => send("rejected");
+  }
+  function wireCorrCards(frags) {
+    $("mdOut").querySelectorAll(".corrcard").forEach((card) => wireOneCorrCard(card, frags));
   }
 
   // 右栏片段 hover → 高亮左栏对应叠框(反向:见 drawBoxes 的 linkBlk)
@@ -496,15 +594,16 @@
 
   // ---------- 翻页 / 快捷键 ----------
   function step(dir) {
-    if (errOnly && probPages.length) {
-      const idxs = probPages.map((r) => r.i);
+    const af = activeFilter();
+    if (af && af.length) {
+      const idxs = af.map((r) => r.i);
       const nxt = dir > 0 ? idxs.find((p) => p > cur) : [...idxs].reverse().find((p) => p < cur);
-      if (nxt !== undefined) render(nxt);
-    } else { const t = cur + dir; if (t >= 0 && t < pages.length) render(t); }
+      if (nxt !== undefined) gotoIndex(nxt);
+    } else { const t = cur + dir; if (t >= 0 && t < pages.length) gotoIndex(t); }
   }
   $("prev").onclick = () => step(-1);
   $("next").onclick = () => step(1);
-  $("pgin").addEventListener("change", () => { const pg = +$("pgin").value; const i = pages.findIndex((p) => p.page === pg); render(i >= 0 ? i : cur); });
+  $("pgin").addEventListener("change", () => { const pg = +$("pgin").value; const i = pages.findIndex((p) => p.page === pg); gotoIndex(i >= 0 ? i : cur); });
   $("pgin").addEventListener("keydown", (e) => { if (e.key === "Enter") $("pgin").blur(); });
   document.addEventListener("keydown", (e) => {
     if (e.target.tagName === "INPUT" || e.target.tagName === "TEXTAREA") return;
@@ -512,6 +611,7 @@
     else if (e.key === "ArrowLeft") step(-1);
     else if (e.key === "m" || e.key === "M") $("annBtn").click();
     else if (e.key === "e" || e.key === "E") $("errBtn").click();
+    else if (e.key === "r" || e.key === "R") $("reviewBtn").click();
     else if (e.key === "Delete" && selKey) { delAnn(selKey); closePop(); }
     else if (e.key === "Escape") { closePop(); selKey = null; drawAnn(); }
   });
@@ -525,11 +625,15 @@
     applyZoom(); updateDirty();
 
     probPages = computeProblems();
+    reviewPages = probPages.filter((r) => r.nReview);
     const nErrP = probPages.filter((r) => r.nErr).length, nSuspP = probPages.filter((r) => r.nSusp).length;
     const sel = $("errIndex");
-    sel.innerHTML = `<option value="">问题索引 (${nErrP} 红 / ${nSuspP} 疑似)</option>` +
-      probPages.map((r) => `<option value="${r.i}">p${r.page} — ${probLabel(r)}</option>`).join("");
-    sel.onchange = () => { if (sel.value !== "") render(+sel.value); };
+    sel.innerHTML = `<option value="">问题索引 (${nErrP} 红 / ${nSuspP} 疑似 / ★${reviewPages.length} 待审)</option>` +
+      // 待审(有 AI 提案,可一键采纳/驳回)排在前面优先看,其余按页序
+      [...reviewPages, ...probPages.filter((r) => !r.nReview)]
+        .map((r) => `<option value="${r.i}">${r.nReview ? "★ " : ""}p${r.page} — ${probLabel(r)}</option>`).join("");
+    sel.onchange = () => { if (sel.value !== "") gotoIndex(+sel.value); };
+    if (!reviewPages.length) $("reviewBtn").classList.add("empty");
     buildFilm();
 
     const saved = +(localStorage.getItem("tbdbgpage:" + stem) || 0);

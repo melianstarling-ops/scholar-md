@@ -11,6 +11,7 @@ from scripts.pipelines.textbooks.triage import triage
 from scripts.pipelines.textbooks.preprocess import pdf_page_to_png
 from scripts.pipelines.textbooks.engine import predict_page
 from scripts.pipelines.textbooks.reconstruct import reconstruct_markdown
+from scripts.pipelines.textbooks.corrections import load_corrections, apply_corrections
 from scripts.pipelines.textbooks.selfcheck import (
     block_coverage, katex_incompat_scan, aggregate_warnings, detect_column_layout,
     summarize_suspicions,
@@ -49,7 +50,10 @@ def _backfill_missing_assets(blocks: list[dict], pdf_path: str, dpi: int,
 
 def assemble(work_dir: str, total: int, stem: str, assets_dir: str,
              pdf_path: str, dpi: int) -> dict:
-    """按页序读检查点 → 重组 md + 补裁缺失资产 + 汇总告警/双栏嫌疑页/缺失资产清单。"""
+    """按页序读检查点 → 应用公式修正叠加层(§2,可选,无 corrections.json 则无影响)
+    → 重组 md + 补裁缺失资产 + 汇总告警/双栏嫌疑页/缺失资产清单。"""
+    doc_dir = os.path.dirname(os.path.normpath(work_dir))
+    corrections = load_corrections(doc_dir)
     md_pages: list[str] = []
     all_blocks: list[dict] = []
     all_warnings: list[dict] = []
@@ -57,6 +61,8 @@ def assemble(work_dir: str, total: int, stem: str, assets_dir: str,
     column_layout_suspected: list[int] = []
     for i in range(1, total + 1):
         blocks = cp.load_page_blocks(work_dir, i)
+        if corrections:
+            blocks = apply_corrections(blocks, i, corrections)
         all_blocks.extend(blocks)
         _backfill_missing_assets(blocks, pdf_path, dpi, work_dir, assets_dir, i)
         expected = _expected_visual_filenames(blocks, i)

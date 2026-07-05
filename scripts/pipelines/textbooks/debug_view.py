@@ -22,6 +22,10 @@ import fitz
 
 from scripts.pipelines.textbooks import checkpoint as cp
 from scripts.pipelines.textbooks import debug_payload as dp
+from scripts.pipelines.textbooks import images
+from scripts.pipelines.textbooks.corrections import (
+    load_corrections, apply_corrections, set_correction_status,
+)
 
 ASSETS = os.path.join(os.path.dirname(os.path.abspath(__file__)), "debug_assets")
 VENDOR = os.path.join(ASSETS, "vendor")
@@ -66,6 +70,25 @@ def _page_image_b64(doc, page: int, dpi: int, cache: dict) -> str | None:
     return cache[page]
 
 
+def _attach_crop_images(corrections: list[dict], doc_dir: str, stem: str) -> list[dict]:
+    """给每条修正挂上 debug_repair 裁出的原图裁切(base64),供审核卡片把"真实源图"跟
+    AI 修正并排放在一起对照(不是重渲染引擎 LaTeX——那本身可能就是错的,起不到核对
+    作用)。读不到裁图(未跑 debug_repair / 产物已清)就不挂,前端退回渲染引擎 LaTeX。
+    返回新列表,不改传入的 dict。"""
+    crops_dir = os.path.join(doc_dir, f"{stem}_repair", "crops")
+    out = []
+    for c in corrections:
+        c = dict(c)
+        page, block_id = c.get("page"), c.get("block_id")
+        if page is not None and block_id is not None:
+            crop_path = os.path.join(crops_dir, images.crop_filename(page, block_id))
+            if os.path.exists(crop_path):
+                with open(crop_path, "rb") as f:
+                    c["crop_b64"] = base64.b64encode(f.read()).decode()
+        out.append(c)
+    return out
+
+
 def build_payloads(doc_dir: str, pdf_path: str | None, dpi: int, img_dpi: int,
                    embed_images: bool, img_cache: dict) -> tuple[str, list[dict]]:
     """逐页 res.json → payload 列表。每次调用重新 reconstruct(serve 下反映代码改动)。"""
@@ -75,6 +98,7 @@ def build_payloads(doc_dir: str, pdf_path: str | None, dpi: int, img_dpi: int,
     manifest = cp.load_manifest(work)
     total = manifest["fingerprint"]["page_count"] if manifest else 0
     render_errors = _load_render_errors(doc_dir, stem)
+    corrections = _attach_crop_images(load_corrections(doc_dir), doc_dir, stem)
     doc = None
     if embed_images and pdf_path and os.path.exists(pdf_path):
         try:
@@ -89,9 +113,13 @@ def build_payloads(doc_dir: str, pdf_path: str | None, dpi: int, img_dpi: int,
                 res = json.load(open(res_path, encoding="utf-8"))
             else:
                 res = {"parsing_res_list": [], "width": None, "height": None}
+            if corrections:
+                res = {**res, "parsing_res_list":
+                       apply_corrections(res.get("parsing_res_list", []), i, corrections)}
             img = _page_image_b64(doc, i, img_dpi, img_cache) if embed_images else None
             pages.append(dp.build_page_payload(res, page=i, stem=stem, image_b64=img,
-                                               page_errors=render_errors.get(i, [])))
+                                               page_errors=render_errors.get(i, []),
+                                               corrections=corrections))
         return stem, pages
     finally:
         if doc is not None:
@@ -136,6 +164,25 @@ def collect_annotations(doc_dir: str, stem: str) -> int:
     return 0
 
 
+def handle_post(doc_dir: str, stem: str, path: str, body: str) -> tuple[int, bytes]:
+    """POST 路由(供 serve() 的 handler 调用,抽成纯函数便于单测):`/corrections` 是
+    debug 视图的采纳/驳回按钮,走 set_correction_status;其它路径沿用既有标注流程,
+    落 `<stem>_annotations.json`。返回 (status_code, response_body)。"""
+    if path == "/corrections":
+        try:
+            data = json.loads(body)
+        except json.JSONDecodeError:
+            return 400, b"bad json"
+        try:
+            ok = set_correction_status(doc_dir, data["page"], data["block_id"], data["status"])
+        except (KeyError, ValueError) as e:
+            return 400, str(e).encode("utf-8")
+        return (200, b"ok") if ok else (404, b"not found")
+    with open(os.path.join(doc_dir, stem + "_annotations.json"), "w", encoding="utf-8") as f:
+        f.write(body)
+    return 200, b"ok"
+
+
 def serve(doc_dir: str, pdf_path: str | None, dpi: int, img_dpi: int, port: int) -> None:
     from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
     stem = os.path.basename(os.path.normpath(doc_dir))
@@ -157,11 +204,10 @@ def serve(doc_dir: str, pdf_path: str | None, dpi: int, img_dpi: int, port: int)
         def do_POST(self):
             n = int(self.headers.get("Content-Length", 0))
             body = self.rfile.read(n).decode("utf-8")
-            with open(os.path.join(doc_dir, stem + "_annotations.json"), "w", encoding="utf-8") as f:
-                f.write(body)
-            self.send_response(200)
+            status, resp = handle_post(doc_dir, stem, self.path, body)
+            self.send_response(status)
             self.end_headers()
-            self.wfile.write(b"ok")
+            self.wfile.write(resp)
 
     print(f"[debug_view] serve http://127.0.0.1:{port}/  (Ctrl-C 停)")
     ThreadingHTTPServer(("127.0.0.1", port), H).serve_forever()

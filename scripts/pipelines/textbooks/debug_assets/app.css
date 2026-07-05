@@ -13,8 +13,12 @@
   --line:#e8e8ed; --accent:#D97757; --shadow:rgba(0,0,0,.10);
 }
 *{box-sizing:border-box;margin:0}
+/* 只在 body 上 overflow:hidden 挡不住整页滚动——html 没被约束高度时,只要内容比视口
+   高哪怕 1px,浏览器/内嵌 webview 就会让 <html> 本身滚动(顶栏跟着滚出视口、底部
+   露出空白),body 的 overflow:hidden 对这层"外层"滚动不起作用。html/body 都要锁。 */
+html{height:100%;overflow:hidden}
 body{font-family:"Inter",-apple-system,BlinkMacSystemFont,"Segoe UI","Noto Sans SC","Microsoft YaHei",sans-serif;
-     background:var(--bg);color:var(--ink);height:100vh;display:flex;flex-direction:column;overflow:hidden}
+     background:var(--bg);color:var(--ink);height:100%;display:flex;flex-direction:column;overflow:hidden}
 
 /* ---- 顶栏:两行,分组+分隔线 ---- */
 header{display:flex;flex-direction:column;gap:8px;padding:10px 16px 8px;background:var(--panel);border-bottom:1px solid var(--line)}
@@ -117,7 +121,10 @@ main{flex:1;display:flex;min-height:0}
 .thumb .terr{position:absolute;right:4px;top:3px;font-size:10px;color:var(--bad);text-shadow:0 0 3px rgba(0,0,0,.6)}
 .thumb .tsusp{position:absolute;right:15px;top:3px;font-size:9px;color:var(--warn);text-shadow:0 0 3px rgba(0,0,0,.6)}
 .thumb .tcol{position:absolute;left:5px;top:5px;font-size:10px;color:#818cf8;text-shadow:0 0 3px rgba(0,0,0,.6)}
+.thumb .trev{position:absolute;left:5px;bottom:4px;font-size:10px;color:var(--accent);text-shadow:0 0 3px rgba(0,0,0,.6)}
 #errBtn.on{color:var(--bad);border-color:var(--bad);background:color-mix(in srgb,var(--bad) 12%,transparent)}
+#reviewBtn.on{color:var(--accent);border-color:var(--accent);background:color-mix(in srgb,var(--accent) 14%,transparent)}
+#reviewBtn.empty{opacity:.4}
 .erronly #filmtrack .thumb.noerr{display:none}
 
 /* ---- 右栏 ---- */
@@ -132,6 +139,7 @@ main{flex:1;display:flex;min-height:0}
 .badge.warn{background:color-mix(in srgb,var(--warn) 14%,var(--card));color:var(--warn);border-color:color-mix(in srgb,var(--warn) 40%,transparent)}
 .badge.col{background:color-mix(in srgb,#6366f1 16%,var(--card));color:#818cf8;border-color:color-mix(in srgb,#6366f1 40%,transparent)}
 .badge.ok{background:color-mix(in srgb,var(--pass) 14%,var(--card));color:var(--pass);border-color:color-mix(in srgb,var(--pass) 36%,transparent)}
+.badge.review{background:color-mix(in srgb,var(--accent) 15%,var(--card));color:var(--accent);border-color:color-mix(in srgb,var(--accent) 40%,transparent);font-weight:600}
 
 /* markdown 正文(右栏核心) */
 #mdOut{max-width:860px;font-size:14px;line-height:1.65}
@@ -150,6 +158,38 @@ main{flex:1;display:flex;min-height:0}
 /* 疑似漏识别(裸大算符):琥珀标,区别于红色硬报错 */
 .mdblk.susp{outline:1.5px dashed var(--warn);outline-offset:2px;background:color-mix(in srgb,var(--warn) 7%,transparent)}
 .box.susp{outline:2px solid var(--warn);outline-offset:1px}
+/* 待审修正卡片(人工确认门 UI):片段内嵌,原文/AI 修正 双栏对照 + 采纳/驳回 */
+.corrcard{margin:8px 0 4px;border:1px solid color-mix(in srgb,var(--accent) 45%,var(--line));
+          border-radius:8px;background:color-mix(in srgb,var(--accent) 6%,var(--card));padding:10px 12px;font-size:12.5px}
+.corrhead{display:flex;align-items:center;justify-content:space-between;margin-bottom:8px}
+.corrtag{font-weight:700;color:var(--accent);font-size:11px;text-transform:uppercase;letter-spacing:.04em}
+.corrconf{color:var(--sub);font-size:11px}
+/* 原图裁切 / AI 修正 左右并排,视觉路径最短——不用在"引擎渲染对不对"上先绕一圈 */
+.corrcompare{display:flex;align-items:stretch;gap:10px}
+.corrpane{flex:1;min-width:0;display:flex;flex-direction:column;gap:4px}
+.corrarrow{flex:0 0 auto;align-self:center;color:var(--sub);font-size:15px;padding-top:14px}
+.corrlabel{color:var(--sub);font-size:11px}
+.corrmd{flex:1;min-width:0;background:var(--bg);border:1px solid var(--line);border-radius:6px;padding:6px 10px;overflow-x:auto;display:flex;align-items:center;justify-content:center}
+.corrmd .katex-display{margin:0}
+.corrphoto{max-width:100%;max-height:140px;display:block;background:#fff;border-radius:4px}
+.corractions{display:flex;gap:8px;margin-top:8px}
+.corrbtn{border:1px solid var(--line);background:var(--panel);border-radius:6px;height:26px;padding:0 12px;
+         cursor:pointer;font-size:12px;font-family:inherit;color:var(--ink)}
+.corrbtn:hover{border-color:var(--accent)}
+.corrbtn:disabled{opacity:.4;cursor:default}
+.corrbtn.accept{color:var(--pass);border-color:color-mix(in srgb,var(--pass) 50%,var(--line))}
+.corrbtn.accept:hover{background:color-mix(in srgb,var(--pass) 14%,transparent)}
+.corrbtn.reject{color:var(--bad);border-color:color-mix(in srgb,var(--bad) 50%,var(--line))}
+.corrbtn.reject:hover{background:color-mix(in srgb,var(--bad) 14%,transparent)}
+.corrbtn.active{color:#fff}
+.corrbtn.accept.active{background:var(--pass);border-color:var(--pass)}
+.corrbtn.reject.active{background:var(--bad);border-color:var(--bad)}
+/* 状态:采纳/驳回后卡片改色但仍留对照+按钮,方便随时改判(点另一个按钮即可) */
+.corrstatus{font-size:11px;font-weight:600;color:var(--sub)}
+.corrcard.st-accepted{border-color:color-mix(in srgb,var(--pass) 45%,var(--line));background:color-mix(in srgb,var(--pass) 6%,var(--card))}
+.corrcard.st-accepted .corrstatus{color:var(--pass)}
+.corrcard.st-rejected{border-color:color-mix(in srgb,var(--bad) 45%,var(--line));background:color-mix(in srgb,var(--bad) 6%,var(--card))}
+.corrcard.st-rejected .corrstatus{color:var(--bad)}
 .flash{animation:flash 1.2s ease-out}
 @keyframes flash{0%,55%{outline:2px solid var(--accent);outline-offset:2px;background:color-mix(in srgb,var(--accent) 14%,transparent)}100%{outline:0 solid transparent}}
 

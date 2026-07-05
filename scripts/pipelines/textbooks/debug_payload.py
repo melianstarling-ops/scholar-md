@@ -9,6 +9,7 @@ from __future__ import annotations
 from scripts.pipelines.textbooks.images import is_visual_block
 from scripts.pipelines.textbooks.reconstruct import reconstruct_fragments
 from scripts.pipelines.textbooks.selfcheck import detect_column_layout, scan_formula_suspicions
+from scripts.pipelines.textbooks.vision_repair import content_fingerprint
 
 # 块 label → 叠框颜色。红(#ef4444)留给"渲染报错"高亮,不用于任何 label。
 LABEL_COLORS: dict[str, str] = {
@@ -45,7 +46,27 @@ def _valid_bbox(b: dict):
     return None
 
 
-def _overlay(b: dict) -> dict | None:
+def _correction_preview(b: dict, corrections_by_id: dict) -> dict | None:
+    """待审提案预览(供 debug 视图卡片展示):(page,block_id) 命中且 fingerprint 与当前
+    block_content 一致才返回,否则 None——不展示可能贴错块的陈旧提案。不管 status 是
+    pending/accepted/rejected 都返回(前端按 status 分别渲染:待审卡片/已采纳标记/已驳回标记)。"""
+    c = corrections_by_id.get(b.get("block_id"))
+    if not c:
+        return None
+    if content_fingerprint(b.get("block_content") or "") != c.get("content_fingerprint"):
+        return None
+    return {
+        "block_id": b.get("block_id"),
+        "status": c.get("status", "pending"),
+        "corrected_latex": c.get("corrected_latex", ""),
+        "confidence": c.get("confidence", ""),
+        "kind": c.get("kind", ""),
+        "engine_latex": c.get("engine_latex", ""),
+        "crop_b64": c.get("crop_b64", ""),
+    }
+
+
+def _overlay(b: dict, corrections_by_id: dict) -> dict | None:
     bbox = _valid_bbox(b)
     if bbox is None:
         return None
@@ -59,6 +80,7 @@ def _overlay(b: dict) -> dict | None:
         "is_noise": label in _NOISE_LABELS,
         "color": label_color(label),
         "content_head": (b.get("block_content") or "")[:120],
+        "correction": _correction_preview(b, corrections_by_id),
     }
 
 
@@ -75,13 +97,27 @@ def build_page_signals(blocks: list[dict], warnings: list[dict]) -> dict:
 
 def build_page_payload(res: dict, page: int, stem: str,
                        image_b64: str | None = None,
-                       page_errors: list[dict] | None = None) -> dict:
+                       page_errors: list[dict] | None = None,
+                       corrections: list[dict] | None = None) -> dict:
     """把一页 res.json 加工成 HTML 模板所需的 payload dict。frags 是带块归属的
-    md 片段列表(供左右双向联动);md 是其 join(供报错索引/整页渲染)。"""
+    md 片段列表(供左右双向联动);md 是其 join(供报错索引/整页渲染)。corrections
+    是该文档全部修正记录(任意 status),按 (page, block_id) 匹配后挂到对应块/片段的
+    "correction" 字段,供 debug 视图渲染待审卡片/一键采纳驳回——不在这里过滤 status
+    (那是 apply_corrections 的应用侧红线),这里只负责"展示有什么提案"。"""
     blocks = res.get("parsing_res_list", [])
+    corrections_by_id = {c["block_id"]: c for c in (corrections or []) if c.get("page") == page}
     frags, warnings = reconstruct_fragments(blocks, stem=stem, page=page)
     md = "\n\n".join(f["md"] for f in frags) + "\n"
-    overlays = [o for o in (_overlay(b) for b in blocks) if o is not None]
+    overlays = [o for o in (_overlay(b, corrections_by_id) for b in blocks) if o is not None]
+    blocks_by_id = {b.get("block_id"): b for b in blocks}
+    for f in frags:
+        for bid in f["bids"]:
+            corr = _correction_preview(blocks_by_id.get(bid, {}), corrections_by_id)
+            if corr:
+                f["correction"] = corr
+                break
+        else:
+            f["correction"] = None
     # 疑似识别错误(裸大算符 / \frac 围道当分母):逐片段标注,供 debug 视图橙色标出并聚合到页级
     suspicions: list[dict] = []
     for f in frags:
