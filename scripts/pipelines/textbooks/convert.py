@@ -83,6 +83,27 @@ def assemble(work_dir: str, total: int, stem: str, assets_dir: str,
     }
 
 
+def reassemble_md(doc_dir: str, pdf_path: str | None, dpi: int) -> str | None:
+    """幂等对账:读 _work 检查点 → 应用采纳的修正 → 重组 → 覆盖写 doc_dir/stem.md。
+    复用 convert_pdf 用的同一个 assemble(),保证 debug 采纳出的 md 与正式转换逐字一致。
+    只写 md,不写 selfcheck、不动 manifest。manifest 缺失/total 为 0 时返回 None。"""
+    doc_dir = os.path.abspath(doc_dir)
+    stem = os.path.basename(os.path.normpath(doc_dir))
+    work_dir = os.path.join(doc_dir, "_work")
+    assets_dir = os.path.join(doc_dir, stem + ".assets")
+    manifest = cp.load_manifest(work_dir)
+    if not manifest:
+        return None
+    total = manifest["fingerprint"]["page_count"]
+    if not total:
+        return None
+    result = assemble(work_dir, total, stem, assets_dir, pdf_path, dpi)
+    md_path = os.path.join(doc_dir, stem + ".md")
+    with open(md_path, "w", encoding="utf-8") as f:
+        f.write(result["md"])
+    return md_path
+
+
 def _register_deferred(pdf_path: str, out_dir: str, stem: str) -> dict:
     deferred = os.path.join(out_dir, "_deferred_born_digital")
     os.makedirs(deferred, exist_ok=True)

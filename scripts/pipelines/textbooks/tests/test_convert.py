@@ -437,3 +437,78 @@ def test_convert_does_not_apply_pending_correction(tmp_path, monkeypatch):
     md = open(res["md_path"], encoding="utf-8").read()
     assert "bad" in md                             # 人工确认门:待审不生效
     assert "good" not in md
+
+
+def test_reassemble_md_applies_accepted(tmp_path):
+    from scripts.pipelines.textbooks.vision_repair import content_fingerprint
+    doc_dir = tmp_path / "scan"
+    work = doc_dir / "_work"
+    os.makedirs(work, exist_ok=True)
+    original = "$$ bad $$"
+    with open(cp.page_res_path(str(work), 1), "w", encoding="utf-8") as f:
+        json.dump({"parsing_res_list": [
+            {"block_order": 0, "block_label": "display_formula", "block_id": 5,
+             "block_content": original}]}, f)
+    cp.save_manifest(str(work), cp.new_manifest(
+        "x.pdf", {"page_count": 1, "size_bytes": 0}, 100, "A"))
+    corrections = {"stem": "scan", "corrections": [
+        {"page": 1, "block_id": 5, "corrected_latex": "$$ good $$",
+         "content_fingerprint": content_fingerprint(original), "status": "accepted"}]}
+    with open(doc_dir / "scan_corrections.json", "w", encoding="utf-8") as f:
+        json.dump(corrections, f)
+
+    md_path = cv.reassemble_md(str(doc_dir), pdf_path=None, dpi=100)
+
+    assert md_path == str(doc_dir / "scan.md")
+    md = open(md_path, encoding="utf-8").read()
+    assert "good" in md and "bad" not in md
+
+
+def test_reassemble_md_does_not_apply_pending(tmp_path):
+    from scripts.pipelines.textbooks.vision_repair import content_fingerprint
+    doc_dir = tmp_path / "scan"
+    work = doc_dir / "_work"
+    os.makedirs(work, exist_ok=True)
+    original = "$$ bad $$"
+    with open(cp.page_res_path(str(work), 1), "w", encoding="utf-8") as f:
+        json.dump({"parsing_res_list": [
+            {"block_order": 0, "block_label": "display_formula", "block_id": 5,
+             "block_content": original}]}, f)
+    cp.save_manifest(str(work), cp.new_manifest(
+        "x.pdf", {"page_count": 1, "size_bytes": 0}, 100, "A"))
+    corrections = {"stem": "scan", "corrections": [
+        {"page": 1, "block_id": 5, "corrected_latex": "$$ good $$",
+         "content_fingerprint": content_fingerprint(original), "status": "pending"}]}
+    with open(doc_dir / "scan_corrections.json", "w", encoding="utf-8") as f:
+        json.dump(corrections, f)
+
+    md_path = cv.reassemble_md(str(doc_dir), pdf_path=None, dpi=100)
+
+    md = open(md_path, encoding="utf-8").read()
+    assert "bad" in md and "good" not in md
+
+
+def test_reassemble_md_idempotent(tmp_path):
+    doc_dir = tmp_path / "scan"
+    work = doc_dir / "_work"
+    os.makedirs(work, exist_ok=True)
+    with open(cp.page_res_path(str(work), 1), "w", encoding="utf-8") as f:
+        json.dump({"parsing_res_list": [
+            {"block_order": 0, "block_label": "text",
+             "block_content": "hello page 1"}]}, f)
+    cp.save_manifest(str(work), cp.new_manifest(
+        "x.pdf", {"page_count": 1, "size_bytes": 0}, 100, "A"))
+
+    p1 = cv.reassemble_md(str(doc_dir), pdf_path=None, dpi=100)
+    first = open(p1, encoding="utf-8").read()
+    p2 = cv.reassemble_md(str(doc_dir), pdf_path=None, dpi=100)
+    second = open(p2, encoding="utf-8").read()
+
+    assert first == second
+
+
+def test_reassemble_md_returns_none_when_no_manifest(tmp_path):
+    doc_dir = tmp_path / "scan"
+    os.makedirs(doc_dir, exist_ok=True)   # 无 _work / 无 manifest
+    assert cv.reassemble_md(str(doc_dir), pdf_path=None, dpi=100) is None
+    assert not (doc_dir / "scan.md").exists()
