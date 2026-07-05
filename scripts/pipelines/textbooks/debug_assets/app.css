@@ -13,12 +13,11 @@
   --line:#e8e8ed; --accent:#D97757; --shadow:rgba(0,0,0,.10);
 }
 *{box-sizing:border-box;margin:0}
-/* 只在 body 上 overflow:hidden 挡不住整页滚动——html 没被约束高度时,只要内容比视口
-   高哪怕 1px,浏览器/内嵌 webview 就会让 <html> 本身滚动(顶栏跟着滚出视口、底部
-   露出空白),body 的 overflow:hidden 对这层"外层"滚动不起作用。html/body 都要锁。 */
-html{height:100%;overflow:hidden}
+/* VS Code Simple Browser(webview iframe)里 height:100% 链条会塌陷成内容高度、让 webview 层
+   滚动(顶栏滚出/底部露白;Chrome 正常)。对齐 patents/debug_view 的做法:body 用 height:100vh
+   (相对 viewport、不依赖父级链条),不给 html 设高度。 */
 body{font-family:"Inter",-apple-system,BlinkMacSystemFont,"Segoe UI","Noto Sans SC","Microsoft YaHei",sans-serif;
-     background:var(--bg);color:var(--ink);height:100%;display:flex;flex-direction:column;overflow:hidden}
+     background:var(--bg);color:var(--ink);height:100vh;display:flex;flex-direction:column;overflow:hidden}
 
 /* ---- 顶栏:两行,分组+分隔线 ---- */
 header{display:flex;flex-direction:column;gap:8px;padding:10px 16px 8px;background:var(--panel);border-bottom:1px solid var(--line)}

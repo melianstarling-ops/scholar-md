@@ -46,7 +46,21 @@
   const pct = (v, t) => (v / t * 100).toFixed(3) + "%";
   const esc = (s) => (s || "").replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
   function toast(m) { const t = $("toast"); t.textContent = m; t.style.opacity = 1; clearTimeout(t._h); t._h = setTimeout(() => (t.style.opacity = 0), 2200); }
-  function flashEl(el) { if (!el) return; el.scrollIntoView({ block: "center", behavior: "smooth" }); el.classList.remove("flash"); void el.offsetWidth; el.classList.add("flash"); }
+  function scrollCenter(el) {
+    // 手动滚"最近的可滚容器"使 el 居中——不用 el.scrollIntoView():它会连带滚动 body/webview
+    // iframe 层,在 VS Code Simple Browser 里把顶栏挤出视口(Chrome 有 body overflow:hidden 挡着,
+    // webview iframe 挡不住)。只动找到的那个容器,绝不碰 root。
+    let c = el.parentElement;
+    while (c && c !== document.body) {
+      const oy = getComputedStyle(c).overflowY;
+      if ((oy === "auto" || oy === "scroll") && c.scrollHeight > c.clientHeight) break;
+      c = c.parentElement;
+    }
+    if (!c || c === document.body) return;
+    const er = el.getBoundingClientRect(), cr = c.getBoundingClientRect();
+    c.scrollTo({ top: c.scrollTop + (er.top - cr.top) - (c.clientHeight - er.height) / 2, behavior: "smooth" });
+  }
+  function flashEl(el) { if (!el) return; scrollCenter(el); el.classList.remove("flash"); void el.offsetWidth; el.classList.add("flash"); }
 
   // ---------- 图层开关 ----------
   const tgBox = $("toggles");
@@ -422,7 +436,7 @@
       row.addEventListener("mouseleave", () => { const b = ov.querySelector(`.annbox[data-k="${k}"]`); if (b) b.classList.remove("hot"); });
       row.addEventListener("click", () => {
         selKey = k; drawAnn();
-        const b = ov.querySelector(`.annbox[data-k="${k}"]`); if (b) { b.scrollIntoView({ block: "center", behavior: "smooth" }); flashEl(b); }
+        const b = ov.querySelector(`.annbox[data-k="${k}"]`); if (b) flashEl(b);
         const t2 = $("annList").querySelector(`.annitem[data-k="${k}"] .annnote`);
         if (t2) { t2.hidden = false; t2.focus(); t2.selectionStart = t2.value.length; }
       });
