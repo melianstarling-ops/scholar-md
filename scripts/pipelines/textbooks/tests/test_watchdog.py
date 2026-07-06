@@ -87,3 +87,15 @@ def test_main_omits_work_dir_by_default(monkeypatch):
     with pytest.raises(SystemExit):
         wd.main()
     assert "--work-dir" not in captured["argv"]
+
+
+def test_main_forwards_allow_sleep_to_convert(monkeypatch):
+    captured = {}
+    def fake_run_until_done(argv, max_restarts):
+        captured["argv"] = argv
+        return 0
+    monkeypatch.setattr(wd, "run_until_done", fake_run_until_done)
+    monkeypatch.setattr("sys.argv", ["watchdog.py", "--src", "x.pdf", "--allow-sleep"])
+    with pytest.raises(SystemExit):
+        wd.main()
+    assert "--allow-sleep" in captured["argv"]

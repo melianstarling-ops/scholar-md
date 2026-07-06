@@ -312,6 +312,14 @@ def test_job_argv_passes_work_dir_to_convert_subprocess(tmp_path):
     assert argv[argv.index("--work-dir") + 1] == str(work_root)
 
 
+def test_job_argv_passes_allow_sleep_to_convert_subprocess(tmp_path):
+    pdf = tmp_path / "A.pdf"
+    out_root = tmp_path / "out"
+    argv = bp._job_argv(pdf, out_root, None, 150, no_selfcheck_json=False,
+                        allow_sleep=True)
+    assert "--allow-sleep" in argv
+
+
 def test_run_invokes_katex_scan_by_default(tmp_path, monkeypatch):
     d = tmp_path / "src"
     d.mkdir()

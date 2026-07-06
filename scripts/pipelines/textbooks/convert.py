@@ -19,6 +19,7 @@ from scripts.pipelines.textbooks.selfcheck import (
 )
 from scripts.pipelines.textbooks import checkpoint as cp
 from scripts.pipelines.textbooks import images
+from scripts.pipelines.textbooks.power import keep_system_awake
 
 
 def _expected_visual_filenames(blocks: list[dict], page: int) -> list[str]:
@@ -219,9 +220,12 @@ def main() -> None:
     ap.add_argument("--dpi", type=int, default=cp.DEFAULT_DPI, help="栅格化 DPI(默认150)")
     ap.add_argument("--no-selfcheck-json", action="store_true",
                     help="不写 <stem>_selfcheck.json(控制台摘要仍输出)")
+    ap.add_argument("--allow-sleep", action="store_true",
+                    help="允许系统按电源计划睡眠(默认转换期间阻止睡眠)")
     args = ap.parse_args()
-    res = convert_pdf(args.src, args.out, args.work_dir, dpi=args.dpi,
-                      write_selfcheck=not args.no_selfcheck_json)
+    with keep_system_awake(enabled=not args.allow_sleep):
+        res = convert_pdf(args.src, args.out, args.work_dir, dpi=args.dpi,
+                          write_selfcheck=not args.no_selfcheck_json)
     print(f"[route={res['route']}] md={res['md_path']}")
     if res.get("failed_pages"):
         print(f"[textbooks] 失败页 {len(res['failed_pages'])}:",

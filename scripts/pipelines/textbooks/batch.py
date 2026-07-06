@@ -19,6 +19,7 @@ from pathlib import Path
 from scripts.pipelines.textbooks import checkpoint as cp
 from scripts.pipelines.textbooks.katex_scan import scan_katex
 from scripts.pipelines.textbooks.paths import resolve_layout
+from scripts.pipelines.textbooks.power import keep_system_awake
 from scripts.pipelines.textbooks.watchdog import run_until_done
 
 PROJECT_ROOT = Path(__file__).resolve().parents[3]
@@ -81,12 +82,14 @@ def _already_done(out_root: Path, work_root: Path | None, pdf_path: Path, dpi: i
 
 
 def _job_argv(pdf: Path, out_root: Path, work_root: Path | None, dpi: int,
-              no_selfcheck_json: bool) -> list[str]:
+              no_selfcheck_json: bool, allow_sleep: bool = False) -> list[str]:
     argv = ["--src", str(pdf), "--out", str(out_root), "--dpi", str(dpi)]
     if work_root:
         argv.extend(["--work-dir", str(work_root)])
     if no_selfcheck_json:
         argv.append("--no-selfcheck-json")
+    if allow_sleep:
+        argv.append("--allow-sleep")
     return argv
 
 
@@ -113,7 +116,7 @@ def _read_summary(out_root: Path, work_root: Path | None, pdf: Path) -> dict:
 def run(src_paths: list[str], out: str | None = None, dpi: int = cp.DEFAULT_DPI,
         work_dir: str | None = None, resume: bool = False, limit: int | None = None,
         max_restarts: int = cp.MAX_RESTARTS, no_selfcheck_json: bool = False,
-        katex_scan_enabled: bool = True,
+        katex_scan_enabled: bool = True, allow_sleep: bool = False,
         runner=None) -> tuple[int, list[dict]]:
     pdfs = discover(src_paths)
     if limit is not None:
@@ -137,7 +140,7 @@ def run(src_paths: list[str], out: str | None = None, dpi: int = cp.DEFAULT_DPI,
             results.append({"stem": pdf.stem, "status": "SKIP",
                              "route": None, "failed_pages": 0, "selfcheck": None})
             continue
-        argv = _job_argv(pdf, out_root, work_root, dpi, no_selfcheck_json)
+        argv = _job_argv(pdf, out_root, work_root, dpi, no_selfcheck_json, allow_sleep)
         rc = run_until_done(argv, max_restarts=max_restarts, runner=runner)
         if rc != 0:
             n_giveup += 1
@@ -183,6 +186,8 @@ def main() -> int:
                     help="透传给每本书 watchdog 的累计重启上限")
     ap.add_argument("--no-selfcheck-json", action="store_true", help="不写 <stem>_selfcheck.json")
     ap.add_argument("--no-katex-scan", action="store_true", help="转换成功后不运行 KaTeX 硬报错扫描")
+    ap.add_argument("--allow-sleep", action="store_true",
+                    help="允许系统按电源计划睡眠(默认转换期间阻止睡眠)")
     ap.add_argument("--list", action="store_true", help="只列出待处理 PDF,不转换")
     args = ap.parse_args()
 
@@ -196,11 +201,13 @@ def main() -> int:
                 print(f"  {p}")
             print(f"共 {len(pdfs)} 份 @ {src_paths}")
             return 0
-        rc, _ = run(src_paths, out=args.out, dpi=args.dpi, work_dir=args.work_dir,
-                    resume=args.resume,
-                    limit=args.limit, max_restarts=args.max_restarts,
-                    no_selfcheck_json=args.no_selfcheck_json,
-                    katex_scan_enabled=not args.no_katex_scan)
+        with keep_system_awake(enabled=not args.allow_sleep):
+            rc, _ = run(src_paths, out=args.out, dpi=args.dpi, work_dir=args.work_dir,
+                        resume=args.resume,
+                        limit=args.limit, max_restarts=args.max_restarts,
+                        no_selfcheck_json=args.no_selfcheck_json,
+                        katex_scan_enabled=not args.no_katex_scan,
+                        allow_sleep=args.allow_sleep)
         return rc
     except ValueError as e:
         print(f"[ERROR] {e}", file=sys.stderr)

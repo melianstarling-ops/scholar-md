@@ -6,6 +6,7 @@ import subprocess
 import sys
 
 from scripts.pipelines.textbooks import checkpoint as cp
+from scripts.pipelines.textbooks.power import keep_system_awake
 
 
 def _default_runner(argv: list[str]) -> int:
@@ -40,6 +41,8 @@ def main() -> None:
                     help="累计重启兜底上限")
     ap.add_argument("--no-selfcheck-json", action="store_true",
                     help="不写 <stem>_selfcheck.json(转发给 convert.py)")
+    ap.add_argument("--allow-sleep", action="store_true",
+                    help="允许系统按电源计划睡眠(默认转换期间阻止睡眠)")
     args = ap.parse_args()
     argv = ["--src", args.src, "--dpi", str(args.dpi)]
     if args.out:
@@ -48,7 +51,10 @@ def main() -> None:
         argv += ["--work-dir", args.work_dir]
     if args.no_selfcheck_json:
         argv.append("--no-selfcheck-json")
-    rc = run_until_done(argv, max_restarts=args.max_restarts)
+    if args.allow_sleep:
+        argv.append("--allow-sleep")
+    with keep_system_awake(enabled=not args.allow_sleep):
+        rc = run_until_done(argv, max_restarts=args.max_restarts)
     sys.exit(rc)
 
 
