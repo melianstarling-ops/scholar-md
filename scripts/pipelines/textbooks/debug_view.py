@@ -1,9 +1,9 @@
 """textbooks 调试可视化工具:左=页面图+block_bbox 叠框(按 label 分色),
 右=逐页 reconstruct 的 md 经 markdown-it+KaTeX **渲染后**显示(复现"红色报错")。
 
-  python -m scripts.pipelines.textbooks.debug_view --doc <stem-dir>            # 静态落 <stem>_debug.html
-  python -m scripts.pipelines.textbooks.debug_view --doc <stem-dir> --serve    # 服务模式(改代码刷新即见)
-  python -m scripts.pipelines.textbooks.debug_view --doc <stem-dir> --collect  # 归位浏览器导出的标注
+  python -m scripts.pipelines.textbooks.debug_view --out <deliverables> --stem <stem>
+  python -m scripts.pipelines.textbooks.debug_view --out <deliverables> --stem <stem> --serve
+  python -m scripts.pipelines.textbooks.debug_view --out <deliverables> --stem <stem> --collect
     可选:--src <pdf 覆盖>  --dpi  --port(默认8078)  --no-images(不嵌页图,快而小)
 
 数据源:_work/page_NNNN_res.json(引擎输出,无 GPU) + 源 PDF 现场栅格化页图。
@@ -28,6 +28,7 @@ from scripts.pipelines.textbooks.convert import reassemble_md
 from scripts.pipelines.textbooks.corrections import (
     load_corrections, apply_corrections, set_correction_status,
 )
+from scripts.pipelines.textbooks.paths import DocLayout, resolve_layout
 
 ASSETS = os.path.join(os.path.dirname(os.path.abspath(__file__)), "debug_assets")
 VENDOR = os.path.join(ASSETS, "vendor")
@@ -42,11 +43,10 @@ def _now() -> str:
     return datetime.datetime.now().strftime("%Y-%m-%d %H:%M")
 
 
-def _load_render_errors(doc_dir: str, stem: str) -> dict[int, list]:
-    path = os.path.join(doc_dir, stem + "_render_errors.json")
+def _load_render_errors(layout: DocLayout) -> dict[int, list]:
     by_page: dict[int, list] = {}
-    if os.path.exists(path):
-        data = json.load(open(path, encoding="utf-8"))
+    if os.path.exists(layout.render_errors_path):
+        data = json.load(open(layout.render_errors_path, encoding="utf-8"))
         for e in data.get("errors", []):
             by_page.setdefault(e.get("page"), []).append(e)
     return by_page
@@ -72,12 +72,12 @@ def _page_image_b64(doc, page: int, dpi: int, cache: dict) -> str | None:
     return cache[page]
 
 
-def _attach_crop_images(corrections: list[dict], doc_dir: str, stem: str) -> list[dict]:
+def _attach_crop_images(corrections: list[dict], layout: DocLayout) -> list[dict]:
     """给每条修正挂上 debug_repair 裁出的原图裁切(base64),供审核卡片把"真实源图"跟
     AI 修正并排放在一起对照(不是重渲染引擎 LaTeX——那本身可能就是错的,起不到核对
     作用)。读不到裁图(未跑 debug_repair / 产物已清)就不挂,前端退回渲染引擎 LaTeX。
     返回新列表,不改传入的 dict。"""
-    crops_dir = os.path.join(doc_dir, f"{stem}_repair", "crops")
+    crops_dir = os.path.join(layout.repair_dir, "crops")
     out = []
     for c in corrections:
         c = dict(c)
@@ -91,16 +91,16 @@ def _attach_crop_images(corrections: list[dict], doc_dir: str, stem: str) -> lis
     return out
 
 
-def build_payloads(doc_dir: str, pdf_path: str | None, dpi: int, img_dpi: int,
+def build_payloads(layout: DocLayout, pdf_path: str | None, dpi: int, img_dpi: int,
                    embed_images: bool, img_cache: dict) -> tuple[str, list[dict]]:
     """逐页 res.json → payload 列表。每次调用重新 reconstruct(serve 下反映代码改动)。"""
     importlib.reload(dp)                                        # 拾取 reconstruct/payload 代码改动
-    work = os.path.join(doc_dir, "_work")
-    stem = os.path.basename(os.path.normpath(doc_dir))
+    work = layout.work_dir
+    stem = layout.stem
     manifest = cp.load_manifest(work)
     total = manifest["fingerprint"]["page_count"] if manifest else 0
-    render_errors = _load_render_errors(doc_dir, stem)
-    corrections = _attach_crop_images(load_corrections(doc_dir), doc_dir, stem)
+    render_errors = _load_render_errors(layout)
+    corrections = _attach_crop_images(load_corrections(layout.doc_work_dir), layout)
     doc = None
     if embed_images and pdf_path and os.path.exists(pdf_path):
         try:
@@ -150,23 +150,23 @@ def render_html(stem: str, pages: list[dict], serve: bool, annotations=None) -> 
     return tpl
 
 
-def _resolve_pdf(doc_dir: str, src: str | None) -> tuple[str | None, int]:
-    manifest = cp.load_manifest(os.path.join(doc_dir, "_work"))
+def _resolve_pdf(layout: DocLayout, src: str | None) -> tuple[str | None, int]:
+    manifest = cp.load_manifest(layout.work_dir)
     dpi = manifest.get("dpi", cp.DEFAULT_DPI) if manifest else cp.DEFAULT_DPI
     pdf = src or (manifest.get("pdf_path") if manifest else None)
     return pdf, dpi
 
 
-def collect_annotations(doc_dir: str, stem: str) -> int:
-    """把浏览器导出到默认下载/工作区的 <stem>_annotations.json 归位到 doc_dir(占位:已在则报数)。"""
-    path = os.path.join(doc_dir, stem + "_annotations.json")
+def collect_annotations(layout: DocLayout) -> int:
+    """把浏览器导出到默认下载/工作区的 <stem>_annotations.json 归位到过程根(占位:已在则报数)。"""
+    path = os.path.join(layout.doc_work_dir, layout.stem + "_annotations.json")
     if os.path.exists(path):
         data = json.load(open(path, encoding="utf-8"))
         return len(data.get("annotations", []))
     return 0
 
 
-def handle_post(doc_dir: str, stem: str, path: str, body: str,
+def handle_post(layout: DocLayout, path: str, body: str,
                 state: dict | None = None, reassemble_fn=None) -> tuple[int, bytes]:
     """POST 路由(纯函数便于单测)。
     `/corrections`:采纳/驳回 → set_correction_status;成功则置 state["dirty"]。
@@ -178,7 +178,8 @@ def handle_post(doc_dir: str, stem: str, path: str, body: str,
         except json.JSONDecodeError:
             return 400, b"bad json"
         try:
-            ok = set_correction_status(doc_dir, data["page"], data["block_id"], data["status"])
+            ok = set_correction_status(layout.doc_work_dir, data["page"], data["block_id"],
+                                       data["status"])
         except (KeyError, ValueError) as e:
             return 400, str(e).encode("utf-8")
         if ok and state is not None:
@@ -191,40 +192,41 @@ def handle_post(doc_dir: str, stem: str, path: str, body: str,
             # 不重试本轮;靠下次采纳重新置脏或 serve 启动对账补偿,避免脏标记永久卡住。
             state["dirty"] = False
         return 200, b"ok"
-    with open(os.path.join(doc_dir, stem + "_annotations.json"), "w", encoding="utf-8") as f:
+    os.makedirs(layout.doc_work_dir, exist_ok=True)
+    with open(os.path.join(layout.doc_work_dir, layout.stem + "_annotations.json"),
+              "w", encoding="utf-8") as f:
         f.write(body)
     return 200, b"ok"
 
 
-def _safe_reassemble(doc_dir: str, pdf_path: str | None, dpi: int,
+def _safe_reassemble(layout: DocLayout, pdf_path: str | None, dpi: int,
                      reassemble_fn=None) -> str | None:
     """调 reassemble 落 md,异常只告警不抛(启动对账/后台落盘不掀翻服务)。"""
     fn = reassemble_fn or reassemble_md
     try:
-        return fn(doc_dir, pdf_path, dpi)
+        return fn(layout, pdf_path, dpi)
     except Exception as e:                                     # noqa: BLE001
         print(f"[debug_view] reassemble 失败(忽略,不影响审核):{e}", flush=True)
         return None
 
 
-def serve(doc_dir: str, pdf_path: str | None, dpi: int, img_dpi: int, port: int) -> None:
+def serve(layout: DocLayout, pdf_path: str | None, dpi: int, img_dpi: int, port: int) -> None:
     from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
-    stem = os.path.basename(os.path.normpath(doc_dir))
     img_cache: dict = {}
     state = {"dirty": False}
     lock = threading.Lock()
 
-    _safe_reassemble(doc_dir, pdf_path, dpi)     # 启动即对账:打开审核界面就把 md 同步到 json
+    _safe_reassemble(layout, pdf_path, dpi)     # 启动即对账:打开审核界面就把 md 同步到 json
 
     def reassemble_fn():
-        _safe_reassemble(doc_dir, pdf_path, dpi)
+        _safe_reassemble(layout, pdf_path, dpi)
 
     class H(BaseHTTPRequestHandler):
         def log_message(self, *a):  # 静默
             pass
 
         def do_GET(self):
-            s, pages = build_payloads(doc_dir, pdf_path, dpi, img_dpi, True, img_cache)
+            s, pages = build_payloads(layout, pdf_path, dpi, img_dpi, True, img_cache)
             html = render_html(s, pages, serve=True).encode("utf-8")
             self.send_response(200)
             self.send_header("Content-Type", "text/html; charset=utf-8")
@@ -236,7 +238,7 @@ def serve(doc_dir: str, pdf_path: str | None, dpi: int, img_dpi: int, port: int)
             n = int(self.headers.get("Content-Length", 0))
             body = self.rfile.read(n).decode("utf-8")
             with lock:                                # 串行化:杜绝并发写同一 stem.md 的竞态
-                status, resp = handle_post(doc_dir, stem, self.path, body,
+                status, resp = handle_post(layout, self.path, body,
                                            state=state, reassemble_fn=reassemble_fn)
             self.send_response(status)
             self.end_headers()
@@ -248,7 +250,9 @@ def serve(doc_dir: str, pdf_path: str | None, dpi: int, img_dpi: int, port: int)
 
 def main() -> None:
     ap = argparse.ArgumentParser(description="textbooks 调试可视化", formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("--doc", required=True, help="转换产物目录(含 _work/ 的 <stem> 目录)")
+    ap.add_argument("--out", required=True, help="交付根(md+assets)")
+    ap.add_argument("--work-dir", default=None, help="过程根(默认 <out>/_work_root)")
+    ap.add_argument("--stem", required=True, help="文档 stem")
     ap.add_argument("--src", default=None, help="源 PDF 覆盖(默认取 manifest.pdf_path)")
     ap.add_argument("--dpi", type=int, default=None, help="bbox 坐标系 DPI(默认取 manifest,一般不用改)")
     ap.add_argument("--img-dpi", type=int, default=110, help="左栏页图栅格化 DPI(默认110,越低 HTML 越小)")
@@ -260,27 +264,28 @@ def main() -> None:
                     help="幂等重组:应用已采纳修正,覆盖写 <stem>.md 后退出(无 UI 收尾/回填)")
     args = ap.parse_args()
 
-    doc_dir = os.path.abspath(args.doc)
-    stem = os.path.basename(os.path.normpath(doc_dir))
-    pdf_path, mdpi = _resolve_pdf(doc_dir, args.src)
+    layout = resolve_layout(args.stem, os.path.abspath(args.out),
+                            os.path.abspath(args.work_dir) if args.work_dir else None)
+    pdf_path, mdpi = _resolve_pdf(layout, args.src)
     dpi = args.dpi or mdpi
 
     if args.reassemble:
-        md_path = _safe_reassemble(doc_dir, pdf_path, dpi)
+        md_path = _safe_reassemble(layout, pdf_path, dpi)
         print(f"[debug_view] reassemble → {md_path}")
         return
 
     if args.collect:
-        print(f"[debug_view] 标注 {collect_annotations(doc_dir, stem)} 条 @ {stem}_annotations.json")
+        print(f"[debug_view] 标注 {collect_annotations(layout)} 条 @ {layout.stem}_annotations.json")
         return
 
     if args.serve:
-        serve(doc_dir, pdf_path, dpi, args.img_dpi, args.port)
+        serve(layout, pdf_path, dpi, args.img_dpi, args.port)
         return
 
-    s, pages = build_payloads(doc_dir, pdf_path, dpi, args.img_dpi, not args.no_images, {})
+    s, pages = build_payloads(layout, pdf_path, dpi, args.img_dpi, not args.no_images, {})
     html = render_html(s, pages, serve=False)
-    out = os.path.join(doc_dir, stem + "_debug.html")
+    out = layout.debug_html_path
+    os.makedirs(layout.doc_work_dir, exist_ok=True)
     with open(out, "w", encoding="utf-8") as f:
         f.write(html)
     n_img = sum(1 for p in pages if p["image_b64"])
