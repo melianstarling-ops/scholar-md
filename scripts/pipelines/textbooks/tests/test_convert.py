@@ -4,6 +4,7 @@ import fitz
 import pytest
 from scripts.pipelines.textbooks import convert as cv
 from scripts.pipelines.textbooks import checkpoint as cp
+from scripts.pipelines.textbooks.paths import resolve_layout
 
 
 def _make_scan_pdf(tmp_path, n_pages):
@@ -37,6 +38,10 @@ def _one_text_block(page):
              "block_content": f"page {page} content"}]
 
 
+def _layout(out, stem="scan"):
+    return resolve_layout(stem, str(out))
+
+
 def test_convert_full_run_A(tmp_path, monkeypatch):
     pdf = _make_scan_pdf(tmp_path, 3)
     _stub_engine(monkeypatch, _one_text_block)
@@ -51,18 +56,17 @@ def test_convert_full_run_A(tmp_path, monkeypatch):
 def test_convert_disk_bounded(tmp_path, monkeypatch):
     pdf = _make_scan_pdf(tmp_path, 4)
     seen_png_counts = []
+    layout = _layout(tmp_path / "out")
 
     def behavior(page):
         # predict 时快照 _work 里 png 数量,应 ≤1
-        work = os.path.join(str(tmp_path / "out"), "scan", "_work")
-        seen_png_counts.append(len([f for f in os.listdir(work) if f.endswith(".png")]))
+        seen_png_counts.append(len([f for f in os.listdir(layout.work_dir) if f.endswith(".png")]))
         return _one_text_block(page)
     _stub_engine(monkeypatch, behavior)
     cv.convert_pdf(pdf, str(tmp_path / "out"), dpi=100)
     assert max(seen_png_counts) <= 1
     # 结束后无残留 png
-    work = os.path.join(str(tmp_path / "out"), "scan", "_work")
-    assert [f for f in os.listdir(work) if f.endswith(".png")] == []
+    assert [f for f in os.listdir(layout.work_dir) if f.endswith(".png")] == []
 
 
 def test_convert_resume_skips_done(tmp_path, monkeypatch):
@@ -73,13 +77,13 @@ def test_convert_resume_skips_done(tmp_path, monkeypatch):
         return _one_text_block(page)
     _stub_engine(monkeypatch, behavior)
     # 预置第 1、2 页检查点 + 匹配 manifest
-    work = os.path.join(str(tmp_path / "out"), "scan", "_work")
-    os.makedirs(work, exist_ok=True)
+    layout = _layout(tmp_path / "out")
+    os.makedirs(layout.work_dir, exist_ok=True)
     for pg in (1, 2):
-        with open(cp.page_res_path(work, pg), "w", encoding="utf-8") as f:
+        with open(cp.page_res_path(layout.work_dir, pg), "w", encoding="utf-8") as f:
             json.dump({"parsing_res_list": _one_text_block(pg)}, f)
     m = cp.new_manifest(pdf, cp.pdf_fingerprint(pdf), 100, "A")
-    cp.save_manifest(work, m)
+    cp.save_manifest(layout.work_dir, m)
     cv.convert_pdf(pdf, str(tmp_path / "out"), dpi=100)
     assert predicted == [3]                       # 只跑缺失页
 
@@ -107,8 +111,8 @@ def test_convert_empty_page_checkpointed(tmp_path, monkeypatch):
     _stub_engine(monkeypatch, behavior)
     out = str(tmp_path / "out")
     cv.convert_pdf(pdf, out, dpi=100)
-    work = os.path.join(out, "scan", "_work")
-    assert cp.is_page_done(work, 1) is True            # 空白页也落了检查点
+    layout = _layout(out)
+    assert cp.is_page_done(layout.work_dir, 1) is True            # 空白页也落了检查点
     # 再跑一次:空白页不应被重跑
     calls.clear()
     cv.convert_pdf(pdf, out, dpi=100)
@@ -119,15 +123,15 @@ def test_convert_fingerprint_mismatch_wipes(tmp_path, monkeypatch):
     pdf = _make_scan_pdf(tmp_path, 2)
     _stub_engine(monkeypatch, _one_text_block)
     out = str(tmp_path / "out")
-    work = os.path.join(out, "scan", "_work")
-    os.makedirs(work, exist_ok=True)
+    layout = _layout(out)
+    os.makedirs(layout.work_dir, exist_ok=True)
     # 预置一个 DPI 不同的旧 manifest + 一页旧检查点
-    with open(cp.page_res_path(work, 1), "w", encoding="utf-8") as f:
+    with open(cp.page_res_path(layout.work_dir, 1), "w", encoding="utf-8") as f:
         json.dump({"parsing_res_list": [{"block_order": 0, "block_label": "text",
                                          "block_content": "STALE 150dpi"}]}, f)
-    cp.save_manifest(work, cp.new_manifest(pdf, cp.pdf_fingerprint(pdf), 150, "A"))
+    cp.save_manifest(layout.work_dir, cp.new_manifest(pdf, cp.pdf_fingerprint(pdf), 150, "A"))
     cv.convert_pdf(pdf, out, dpi=100)                   # 请求 100 ≠ 记录 150
-    md = open(os.path.join(out, "scan", "scan.md"), encoding="utf-8").read()
+    md = open(layout.md_path, encoding="utf-8").read()
     assert "STALE" not in md                            # 旧检查点被清空重跑
 
 
@@ -179,14 +183,14 @@ def test_convert_poison_page_skipped_on_startup(tmp_path, monkeypatch):
     pdf = _make_scan_pdf(tmp_path, 3)
     _stub_engine(monkeypatch, _one_text_block)
     out = str(tmp_path / "out")
-    work = os.path.join(out, "scan", "_work")
-    os.makedirs(work, exist_ok=True)
+    layout = _layout(out)
+    os.makedirs(layout.work_dir, exist_ok=True)
     # 模拟:第 2 页已硬崩进程 MAX-1 次,残留 in_progress(该页无 res.json);
     # 本次 startup resolve_poison 再记一次 → 达阈值判毒页
     m = cp.new_manifest(pdf, cp.pdf_fingerprint(pdf), 100, "A")
     m["in_progress"] = 2
     m["attempts_by_page"] = {"2": cp.MAX_HARD_ATTEMPTS - 1}
-    cp.save_manifest(work, m)
+    cp.save_manifest(layout.work_dir, m)
     res = cv.convert_pdf(pdf, out, dpi=100)
     # 第 2 页被判毒页跳过,进 failed_pages(process-killed),1、3 正常
     kinds = {f["page"]: f["kind"] for f in res["failed_pages"]}
@@ -200,7 +204,8 @@ def test_convert_in_progress_cleared_after_success(tmp_path, monkeypatch):
     _stub_engine(monkeypatch, _one_text_block)
     out = str(tmp_path / "out")
     cv.convert_pdf(pdf, out, dpi=100)
-    m = cp.load_manifest(os.path.join(out, "scan", "_work"))
+    layout = _layout(out)
+    m = cp.load_manifest(layout.work_dir)
     assert m["in_progress"] is None      # 正常跑完不残留 in_progress
 
 
@@ -228,12 +233,12 @@ def test_convert_poison_not_reset_by_earlier_failing_page(tmp_path, monkeypatch)
         return _one_text_block(page)
     _stub_engine(monkeypatch, behavior)
     out = str(tmp_path / "out")
-    work = os.path.join(out, "scan", "_work")
-    os.makedirs(work, exist_ok=True)
+    layout = _layout(out)
+    os.makedirs(layout.work_dir, exist_ok=True)
     m = cp.new_manifest(pdf, cp.pdf_fingerprint(pdf), 100, "A")
     m["in_progress"] = 2
     m["attempts_by_page"] = {"2": cp.MAX_HARD_ATTEMPTS - 1}   # 差一次到阈值
-    cp.save_manifest(work, m)
+    cp.save_manifest(layout.work_dir, m)
     res = cv.convert_pdf(pdf, out, dpi=100)                   # startup: page2 达阈值→毒页跳过
     kinds = {f["page"]: f["kind"] for f in res["failed_pages"]}
     assert kinds.get(2) == "process-killed"
@@ -246,9 +251,9 @@ def test_convert_writes_selfcheck_json_by_default(tmp_path, monkeypatch):
     pdf = _make_scan_pdf(tmp_path, 2)
     _stub_engine(monkeypatch, _one_text_block)
     res = cv.convert_pdf(pdf, str(tmp_path / "out"), dpi=100)
-    selfcheck_path = os.path.join(str(tmp_path / "out"), "scan", "scan_selfcheck.json")
-    assert os.path.exists(selfcheck_path)
-    with open(selfcheck_path, encoding="utf-8") as f:
+    layout = _layout(tmp_path / "out")
+    assert os.path.exists(layout.selfcheck_path)
+    with open(layout.selfcheck_path, encoding="utf-8") as f:
         on_disk = json.load(f)
     assert on_disk == res["selfcheck"]
 
@@ -257,14 +262,16 @@ def test_convert_no_selfcheck_json_when_disabled(tmp_path, monkeypatch):
     pdf = _make_scan_pdf(tmp_path, 2)
     _stub_engine(monkeypatch, _one_text_block)
     cv.convert_pdf(pdf, str(tmp_path / "out"), dpi=100, write_selfcheck=False)
-    selfcheck_path = os.path.join(str(tmp_path / "out"), "scan", "scan_selfcheck.json")
-    assert not os.path.exists(selfcheck_path)
+    layout = _layout(tmp_path / "out")
+    assert not os.path.exists(layout.selfcheck_path)
 
 
 def test_convert_cli_no_selfcheck_json_forwards_flag(monkeypatch):
     captured = {}
-    def fake_convert_pdf(pdf_path, out_dir, dpi=150, write_selfcheck=True):
+    def fake_convert_pdf(pdf_path, deliverables_dir, work_dir=None, dpi=150,
+                         write_selfcheck=True):
         captured["write_selfcheck"] = write_selfcheck
+        captured["work_dir"] = work_dir
         return {"route": "A", "md_path": "x.md",
                 "selfcheck": {"total": 0, "in_md": 0, "missing": []}, "failed_pages": []}
     monkeypatch.setattr(cv, "convert_pdf", fake_convert_pdf)
@@ -283,8 +290,8 @@ def test_convert_crops_images_before_png_deleted(tmp_path, monkeypatch):
     _stub_engine(monkeypatch, _one_image_block)
     out = str(tmp_path / "out")
     res = cv.convert_pdf(pdf, out, dpi=100)
-    assets_dir = os.path.join(out, "scan", "scan.assets")
-    assert os.path.exists(os.path.join(assets_dir, "page_0001_block_1.png"))
+    layout = _layout(out)
+    assert os.path.exists(os.path.join(layout.assets_dir, "page_0001_block_1.png"))
     md = open(res["md_path"], encoding="utf-8").read()
     assert "scan.assets/page_0001_block_1.png" in md
 
@@ -294,11 +301,11 @@ def test_convert_clears_assets_on_fingerprint_mismatch(tmp_path, monkeypatch):
     _stub_engine(monkeypatch, _one_image_block)
     out = str(tmp_path / "out")
     cv.convert_pdf(pdf, out, dpi=100)
-    assets_dir = os.path.join(out, "scan", "scan.assets")
-    assert os.path.exists(os.path.join(assets_dir, "page_0001_block_1.png"))
+    layout = _layout(out)
+    assert os.path.exists(os.path.join(layout.assets_dir, "page_0001_block_1.png"))
     # 换 DPI 触发指纹失配 → 全新跑,旧资产应被清空(重新裁出的文件名相同,
     # 用一个哨兵文件验证目录整体被清过,而不仅是被覆盖)
-    sentinel = os.path.join(assets_dir, "STALE_SENTINEL.png")
+    sentinel = os.path.join(layout.assets_dir, "STALE_SENTINEL.png")
     open(sentinel, "w").close()
     cv.convert_pdf(pdf, out, dpi=120)
     assert not os.path.exists(sentinel)
@@ -309,14 +316,13 @@ def test_convert_backfills_assets_for_pre_existing_checkpoint(tmp_path, monkeypa
     pdf = _make_scan_pdf(tmp_path, 1)
     _stub_engine(monkeypatch, _one_image_block)
     out = str(tmp_path / "out")
-    work = os.path.join(out, "scan", "_work")
-    os.makedirs(work, exist_ok=True)
-    with open(cp.page_res_path(work, 1), "w", encoding="utf-8") as f:
+    layout = _layout(out)
+    os.makedirs(layout.work_dir, exist_ok=True)
+    with open(cp.page_res_path(layout.work_dir, 1), "w", encoding="utf-8") as f:
         json.dump({"parsing_res_list": _one_image_block(1)}, f)
-    cp.save_manifest(work, cp.new_manifest(pdf, cp.pdf_fingerprint(pdf), 100, "A"))
+    cp.save_manifest(layout.work_dir, cp.new_manifest(pdf, cp.pdf_fingerprint(pdf), 100, "A"))
     res = cv.convert_pdf(pdf, out, dpi=100)          # 该页已"完成",不会重新进 OCR 循环
-    assets_dir = os.path.join(out, "scan", "scan.assets")
-    assert os.path.exists(os.path.join(assets_dir, "page_0001_block_1.png"))  # 补裁生效
+    assert os.path.exists(os.path.join(layout.assets_dir, "page_0001_block_1.png"))  # 补裁生效
     assert res["selfcheck"]["missing_assets"] == []
 
 
@@ -329,11 +335,11 @@ def test_convert_missing_assets_reported_when_backfill_impossible(tmp_path, monk
     pdf = _make_scan_pdf(tmp_path, 1)
     _stub_engine(monkeypatch, _one_image_block)
     out = str(tmp_path / "out")
-    work = os.path.join(out, "scan", "_work")
-    os.makedirs(work, exist_ok=True)
-    with open(cp.page_res_path(work, 1), "w", encoding="utf-8") as f:
+    layout = _layout(out)
+    os.makedirs(layout.work_dir, exist_ok=True)
+    with open(cp.page_res_path(layout.work_dir, 1), "w", encoding="utf-8") as f:
         json.dump({"parsing_res_list": _one_image_block(1)}, f)
-    cp.save_manifest(work, cp.new_manifest(pdf, cp.pdf_fingerprint(pdf), 100, "A"))
+    cp.save_manifest(layout.work_dir, cp.new_manifest(pdf, cp.pdf_fingerprint(pdf), 100, "A"))
 
     def flaky(pdf_path, page, out_dir, dpi=150):
         raise RuntimeError("backfill raster boom")
@@ -356,11 +362,11 @@ def test_convert_ordered_image_block_not_cropped_or_missing(tmp_path, monkeypatc
     _stub_engine(monkeypatch, _one_ordered_image_block)
     out = str(tmp_path / "out")
     res = cv.convert_pdf(pdf, out, dpi=100)
-    assets_dir = os.path.join(out, "scan", "scan.assets")
-    assert not os.path.exists(os.path.join(assets_dir, "page_0001_block_1.png"))
+    layout = _layout(out)
+    assert not os.path.exists(os.path.join(layout.assets_dir, "page_0001_block_1.png"))
     assert res["selfcheck"]["missing_assets"] == []
     # 显式断言目录本身不存在或为空,防止 scoping 回归时测试仍"意外"通过
-    assert not os.path.isdir(assets_dir) or os.listdir(assets_dir) == []
+    assert not os.path.isdir(layout.assets_dir) or os.listdir(layout.assets_dir) == []
 
 
 def test_convert_selfcheck_has_four_new_fields(tmp_path, monkeypatch):
@@ -385,12 +391,12 @@ def test_convert_applies_corrections_json(tmp_path, monkeypatch):
     pdf = _make_scan_pdf(tmp_path, 1)
     _stub_engine(monkeypatch, _one_display_formula_block)
     out = str(tmp_path / "out")
-    doc_dir = os.path.join(out, "scan")
-    os.makedirs(doc_dir, exist_ok=True)
+    layout = _layout(out)
+    os.makedirs(layout.doc_work_dir, exist_ok=True)
     corrections_payload = {"stem": "scan", "corrections": [
         {"page": 1, "block_id": 5, "corrected_latex": "$$ good $$",
          "content_fingerprint": content_fingerprint("$$ bad $$"), "status": "accepted"}]}
-    with open(os.path.join(doc_dir, "scan_corrections.json"), "w", encoding="utf-8") as f:
+    with open(layout.corrections_path, "w", encoding="utf-8") as f:
         json.dump(corrections_payload, f)
 
     res = cv.convert_pdf(pdf, out, dpi=100)
@@ -404,12 +410,12 @@ def test_convert_skips_correction_on_fingerprint_mismatch(tmp_path, monkeypatch)
     pdf = _make_scan_pdf(tmp_path, 1)
     _stub_engine(monkeypatch, _one_display_formula_block)
     out = str(tmp_path / "out")
-    doc_dir = os.path.join(out, "scan")
-    os.makedirs(doc_dir, exist_ok=True)
+    layout = _layout(out)
+    os.makedirs(layout.doc_work_dir, exist_ok=True)
     corrections_payload = {"stem": "scan", "corrections": [
         {"page": 1, "block_id": 5, "corrected_latex": "$$ good $$",
          "content_fingerprint": "stale-hash-does-not-match", "status": "accepted"}]}
-    with open(os.path.join(doc_dir, "scan_corrections.json"), "w", encoding="utf-8") as f:
+    with open(layout.corrections_path, "w", encoding="utf-8") as f:
         json.dump(corrections_payload, f)
 
     res = cv.convert_pdf(pdf, out, dpi=100)
@@ -424,12 +430,12 @@ def test_convert_does_not_apply_pending_correction(tmp_path, monkeypatch):
     pdf = _make_scan_pdf(tmp_path, 1)
     _stub_engine(monkeypatch, _one_display_formula_block)
     out = str(tmp_path / "out")
-    doc_dir = os.path.join(out, "scan")
-    os.makedirs(doc_dir, exist_ok=True)
+    layout = _layout(out)
+    os.makedirs(layout.doc_work_dir, exist_ok=True)
     corrections_payload = {"stem": "scan", "corrections": [
         {"page": 1, "block_id": 5, "corrected_latex": "$$ good $$",
          "content_fingerprint": content_fingerprint("$$ bad $$"), "status": "pending"}]}
-    with open(os.path.join(doc_dir, "scan_corrections.json"), "w", encoding="utf-8") as f:
+    with open(layout.corrections_path, "w", encoding="utf-8") as f:
         json.dump(corrections_payload, f)
 
     res = cv.convert_pdf(pdf, out, dpi=100)
@@ -441,74 +447,73 @@ def test_convert_does_not_apply_pending_correction(tmp_path, monkeypatch):
 
 def test_reassemble_md_applies_accepted(tmp_path):
     from scripts.pipelines.textbooks.vision_repair import content_fingerprint
-    doc_dir = tmp_path / "scan"
-    work = doc_dir / "_work"
-    os.makedirs(work, exist_ok=True)
+    layout = _layout(tmp_path)
+    os.makedirs(layout.work_dir, exist_ok=True)
     original = "$$ bad $$"
-    with open(cp.page_res_path(str(work), 1), "w", encoding="utf-8") as f:
+    with open(cp.page_res_path(layout.work_dir, 1), "w", encoding="utf-8") as f:
         json.dump({"parsing_res_list": [
             {"block_order": 0, "block_label": "display_formula", "block_id": 5,
              "block_content": original}]}, f)
-    cp.save_manifest(str(work), cp.new_manifest(
+    cp.save_manifest(layout.work_dir, cp.new_manifest(
         "x.pdf", {"page_count": 1, "size_bytes": 0}, 100, "A"))
     corrections = {"stem": "scan", "corrections": [
         {"page": 1, "block_id": 5, "corrected_latex": "$$ good $$",
          "content_fingerprint": content_fingerprint(original), "status": "accepted"}]}
-    with open(doc_dir / "scan_corrections.json", "w", encoding="utf-8") as f:
+    os.makedirs(layout.doc_work_dir, exist_ok=True)
+    with open(layout.corrections_path, "w", encoding="utf-8") as f:
         json.dump(corrections, f)
 
-    md_path = cv.reassemble_md(str(doc_dir), pdf_path=None, dpi=100)
+    md_path = cv.reassemble_md(layout, pdf_path=None, dpi=100)
 
-    assert md_path == str(doc_dir / "scan.md")
+    assert md_path == layout.md_path
     md = open(md_path, encoding="utf-8").read()
     assert "good" in md and "bad" not in md
 
 
 def test_reassemble_md_does_not_apply_pending(tmp_path):
     from scripts.pipelines.textbooks.vision_repair import content_fingerprint
-    doc_dir = tmp_path / "scan"
-    work = doc_dir / "_work"
-    os.makedirs(work, exist_ok=True)
+    layout = _layout(tmp_path)
+    os.makedirs(layout.work_dir, exist_ok=True)
     original = "$$ bad $$"
-    with open(cp.page_res_path(str(work), 1), "w", encoding="utf-8") as f:
+    with open(cp.page_res_path(layout.work_dir, 1), "w", encoding="utf-8") as f:
         json.dump({"parsing_res_list": [
             {"block_order": 0, "block_label": "display_formula", "block_id": 5,
              "block_content": original}]}, f)
-    cp.save_manifest(str(work), cp.new_manifest(
+    cp.save_manifest(layout.work_dir, cp.new_manifest(
         "x.pdf", {"page_count": 1, "size_bytes": 0}, 100, "A"))
     corrections = {"stem": "scan", "corrections": [
         {"page": 1, "block_id": 5, "corrected_latex": "$$ good $$",
          "content_fingerprint": content_fingerprint(original), "status": "pending"}]}
-    with open(doc_dir / "scan_corrections.json", "w", encoding="utf-8") as f:
+    os.makedirs(layout.doc_work_dir, exist_ok=True)
+    with open(layout.corrections_path, "w", encoding="utf-8") as f:
         json.dump(corrections, f)
 
-    md_path = cv.reassemble_md(str(doc_dir), pdf_path=None, dpi=100)
+    md_path = cv.reassemble_md(layout, pdf_path=None, dpi=100)
 
     md = open(md_path, encoding="utf-8").read()
     assert "bad" in md and "good" not in md
 
 
 def test_reassemble_md_idempotent(tmp_path):
-    doc_dir = tmp_path / "scan"
-    work = doc_dir / "_work"
-    os.makedirs(work, exist_ok=True)
-    with open(cp.page_res_path(str(work), 1), "w", encoding="utf-8") as f:
+    layout = _layout(tmp_path)
+    os.makedirs(layout.work_dir, exist_ok=True)
+    with open(cp.page_res_path(layout.work_dir, 1), "w", encoding="utf-8") as f:
         json.dump({"parsing_res_list": [
             {"block_order": 0, "block_label": "text",
              "block_content": "hello page 1"}]}, f)
-    cp.save_manifest(str(work), cp.new_manifest(
+    cp.save_manifest(layout.work_dir, cp.new_manifest(
         "x.pdf", {"page_count": 1, "size_bytes": 0}, 100, "A"))
 
-    p1 = cv.reassemble_md(str(doc_dir), pdf_path=None, dpi=100)
+    p1 = cv.reassemble_md(layout, pdf_path=None, dpi=100)
     first = open(p1, encoding="utf-8").read()
-    p2 = cv.reassemble_md(str(doc_dir), pdf_path=None, dpi=100)
+    p2 = cv.reassemble_md(layout, pdf_path=None, dpi=100)
     second = open(p2, encoding="utf-8").read()
 
     assert first == second
 
 
 def test_reassemble_md_returns_none_when_no_manifest(tmp_path):
-    doc_dir = tmp_path / "scan"
-    os.makedirs(doc_dir, exist_ok=True)   # 无 _work / 无 manifest
-    assert cv.reassemble_md(str(doc_dir), pdf_path=None, dpi=100) is None
-    assert not (doc_dir / "scan.md").exists()
+    layout = _layout(tmp_path)
+    os.makedirs(layout.doc_deliverable_dir, exist_ok=True)   # 无 _work / 无 manifest
+    assert cv.reassemble_md(layout, pdf_path=None, dpi=100) is None
+    assert not os.path.exists(layout.md_path)
