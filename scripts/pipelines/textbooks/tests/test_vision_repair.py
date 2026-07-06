@@ -3,6 +3,7 @@ import os
 
 import pytest
 
+from scripts.pipelines.textbooks.paths import resolve_layout
 import scripts.pipelines.textbooks.vision_repair as vision_repair
 from scripts.pipelines.textbooks.vision_repair import content_fingerprint, parse_vision_response
 
@@ -76,12 +77,11 @@ def test_call_claude_vision_invokes_subprocess_with_crop_path(monkeypatch):
     assert out["confidence"] == "high"
 
 
-def _write_worklist(doc_dir, stem, items):
-    repair_dir = os.path.join(doc_dir, f"{stem}_repair")
-    os.makedirs(repair_dir, exist_ok=True)
-    path = os.path.join(repair_dir, "worklist.json")
+def _write_worklist(layout, items):
+    os.makedirs(os.path.dirname(layout.worklist_path), exist_ok=True)
+    path = layout.worklist_path
     with open(path, "w", encoding="utf-8") as f:
-        json.dump({"stem": stem, "count": len(items), "items": items}, f)
+        json.dump({"stem": layout.stem, "count": len(items), "items": items}, f)
     return path
 
 
@@ -91,8 +91,8 @@ def _item(page, block_id, crop_path, engine_latex="$$ a $$", kinds=("bare_op",))
 
 
 def test_run_vision_repair_uses_batch_fn_once_for_all_items(tmp_path):
-    doc_dir = str(tmp_path / "book")
-    _write_worklist(doc_dir, "book", [
+    layout = resolve_layout("book", str(tmp_path / "out"))
+    _write_worklist(layout, [
         _item(49, 3, "eq3.png", r"$$ c\Delta z=\frac{a}{c^{\prime}} $$",
               ("bare_op", "frac_primed_denom")),
         _item(49, 6, "eq6.png"),
@@ -104,11 +104,12 @@ def test_run_vision_repair_uses_batch_fn_once_for_all_items(tmp_path):
         return {"49_3": {"latex": r"c\Delta z=\oint_{c'} a", "confidence": "high"},
                 "49_6": {"latex": "fixed6", "confidence": "medium"}}
 
-    result = vision_repair.run_vision_repair(doc_dir, batch_fn=fake_batch, batch_size=10)
+    result = vision_repair.run_vision_repair(layout, batch_fn=fake_batch, batch_size=10)
 
     assert len(calls) == 1                      # 一次调用打包了两项,不是两次单图调用
     assert result["count"] == 2
     assert result["failed"] == []
+    assert result["corrections_path"] == layout.corrections_path
     with open(result["corrections_path"], encoding="utf-8") as f:
         data = json.load(f)
     by_id = {c["block_id"]: c for c in data["corrections"]}
@@ -120,21 +121,21 @@ def test_run_vision_repair_uses_batch_fn_once_for_all_items(tmp_path):
 
 
 def test_run_vision_repair_splits_into_multiple_batches_by_batch_size(tmp_path):
-    doc_dir = str(tmp_path / "book")
-    _write_worklist(doc_dir, "book", [_item(1, 1, "a.png"), _item(1, 2, "b.png")])
+    layout = resolve_layout("book", str(tmp_path / "out"))
+    _write_worklist(layout, [_item(1, 1, "a.png"), _item(1, 2, "b.png")])
     calls = []
 
     def fake_batch(entries, timeout=300):
         calls.append(entries)
         return {e["key"]: {"latex": "x", "confidence": "high"} for e in entries}
 
-    vision_repair.run_vision_repair(doc_dir, batch_fn=fake_batch, batch_size=1)
+    vision_repair.run_vision_repair(layout, batch_fn=fake_batch, batch_size=1)
     assert len(calls) == 2                      # batch_size=1 → 每项各成一批
 
 
 def test_run_vision_repair_falls_back_to_single_call_for_key_missing_from_batch(tmp_path):
-    doc_dir = str(tmp_path / "book")
-    _write_worklist(doc_dir, "book", [_item(1, 1, "a.png"), _item(1, 2, "b.png")])
+    layout = resolve_layout("book", str(tmp_path / "out"))
+    _write_worklist(layout, [_item(1, 1, "a.png"), _item(1, 2, "b.png")])
 
     def partial_batch(entries, timeout=300):
         return {"1_1": {"latex": "x1", "confidence": "high"}}   # 漏了 1_2
@@ -143,10 +144,11 @@ def test_run_vision_repair_falls_back_to_single_call_for_key_missing_from_batch(
         assert crop_path == "b.png"
         return {"latex": "x2", "confidence": "medium"}
 
-    result = vision_repair.run_vision_repair(doc_dir, batch_fn=partial_batch,
+    result = vision_repair.run_vision_repair(layout, batch_fn=partial_batch,
                                              vision_fn=fake_single, batch_size=10)
     assert result["count"] == 2
     assert result["failed"] == []
+    assert result["corrections_path"] == layout.corrections_path
     with open(result["corrections_path"], encoding="utf-8") as f:
         data = json.load(f)
     by_id = {c["block_id"]: c["corrected_latex"] for c in data["corrections"]}
@@ -154,8 +156,8 @@ def test_run_vision_repair_falls_back_to_single_call_for_key_missing_from_batch(
 
 
 def test_run_vision_repair_falls_back_to_single_call_when_whole_batch_raises(tmp_path):
-    doc_dir = str(tmp_path / "book")
-    _write_worklist(doc_dir, "book", [_item(1, 1, "a.png"), _item(1, 2, "b.png")])
+    layout = resolve_layout("book", str(tmp_path / "out"))
+    _write_worklist(layout, [_item(1, 1, "a.png"), _item(1, 2, "b.png")])
 
     def raising_batch(entries, timeout=300):
         raise RuntimeError("batch boom")
@@ -163,15 +165,15 @@ def test_run_vision_repair_falls_back_to_single_call_when_whole_batch_raises(tmp
     def fake_single(crop_path, timeout=120):
         return {"latex": f"fixed:{crop_path}", "confidence": "low"}
 
-    result = vision_repair.run_vision_repair(doc_dir, batch_fn=raising_batch,
+    result = vision_repair.run_vision_repair(layout, batch_fn=raising_batch,
                                              vision_fn=fake_single, batch_size=10)
     assert result["count"] == 2
     assert result["failed"] == []
 
 
 def test_run_vision_repair_records_failed_when_single_fallback_also_fails(tmp_path):
-    doc_dir = str(tmp_path / "book")
-    _write_worklist(doc_dir, "book", [_item(1, 1, "bad.png"), _item(1, 2, "good.png")])
+    layout = resolve_layout("book", str(tmp_path / "out"))
+    _write_worklist(layout, [_item(1, 1, "bad.png"), _item(1, 2, "good.png")])
 
     def partial_batch(entries, timeout=300):
         return {"1_2": {"latex": "good", "confidence": "high"}}   # 漏了 1_1
@@ -181,11 +183,12 @@ def test_run_vision_repair_records_failed_when_single_fallback_also_fails(tmp_pa
             raise ValueError("boom")
         return {"latex": "unused", "confidence": "high"}
 
-    result = vision_repair.run_vision_repair(doc_dir, batch_fn=partial_batch,
+    result = vision_repair.run_vision_repair(layout, batch_fn=partial_batch,
                                              vision_fn=flaky_single, batch_size=10)
     assert result["count"] == 1
     assert len(result["failed"]) == 1
     assert result["failed"][0]["block_id"] == 1
+    assert result["corrections_path"] == layout.corrections_path
     with open(result["corrections_path"], encoding="utf-8") as f:
         data = json.load(f)
     assert [c["block_id"] for c in data["corrections"]] == [2]

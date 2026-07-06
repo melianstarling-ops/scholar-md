@@ -17,6 +17,8 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import date
 from pathlib import Path
 
+from scripts.pipelines.textbooks.paths import DocLayout, resolve_layout
+
 
 def content_fingerprint(text: str) -> str:
     """引擎块内容的短哈希,供 corrections.json 与当前 res.json 块内容比对防漂移。"""
@@ -197,7 +199,7 @@ def _correction_record(item: dict, result: dict, today: str) -> dict:
     }
 
 
-def run_vision_repair(doc_dir: str, batch_fn=call_claude_vision_batch,
+def run_vision_repair(layout: DocLayout, batch_fn=call_claude_vision_batch,
                       vision_fn=call_claude_vision, batch_size: int = 5,
                       parallel: int = 3, timeout: int = 300) -> dict:
     """读 Module1 产出的 worklist.json,把疑似块按 batch_size 打包,并发(parallel)
@@ -205,8 +207,8 @@ def run_vision_repair(doc_dir: str, batch_fn=call_claude_vision_batch,
     "适度并发 + 别裸 for 循环"规程)。批里没拿到结果的 key(模型漏答/整批调用异常)
     回炉成单图调用(vision_fn);单图也失败才计入 failed,不掀翻整批。写
     `<stem>_corrections.json`(§2 叠加层 schema)。"""
-    stem = os.path.basename(os.path.normpath(doc_dir))
-    worklist_path = os.path.join(doc_dir, f"{stem}_repair", "worklist.json")
+    stem = layout.stem
+    worklist_path = layout.worklist_path
     if not os.path.exists(worklist_path):
         raise ValueError(f"缺 worklist.json,先跑 build_repair_worklist:{worklist_path}")
     with open(worklist_path, encoding="utf-8") as f:
@@ -248,7 +250,8 @@ def run_vision_repair(doc_dir: str, batch_fn=call_claude_vision_batch,
                 continue
         corrections.append(_correction_record(item, result, today))
 
-    corrections_path = os.path.join(doc_dir, f"{stem}_corrections.json")
+    corrections_path = layout.corrections_path
+    os.makedirs(layout.doc_work_dir, exist_ok=True)
     with open(corrections_path, "w", encoding="utf-8") as f:
         json.dump({"stem": stem, "corrections": corrections}, f, ensure_ascii=False, indent=2)
     return {"corrections_path": corrections_path, "count": len(corrections), "failed": failed}
@@ -256,12 +259,15 @@ def run_vision_repair(doc_dir: str, batch_fn=call_claude_vision_batch,
 
 def main() -> None:
     ap = argparse.ArgumentParser(description="疑似公式:无头 claude -p 读裁图 → corrections.json")
-    ap.add_argument("--doc", required=True, help="doc 目录(同 debug_repair --doc)")
+    ap.add_argument("--out", required=True, help="交付根(md+assets)")
+    ap.add_argument("--work-dir", default=None, help="过程根(默认 <out>/_work_root)")
+    ap.add_argument("--stem", required=True, help="文档 stem")
     ap.add_argument("--batch-size", type=int, default=5, help="每次调用打包几张裁图(默认5)")
     ap.add_argument("--parallel", type=int, default=3, help="批间并发数(默认3,对齐 SOP)")
     ap.add_argument("--timeout", type=int, default=300, help="单批调用超时秒(默认300)")
     args = ap.parse_args()
-    result = run_vision_repair(args.doc, batch_size=args.batch_size,
+    layout = resolve_layout(args.stem, args.out, args.work_dir)
+    result = run_vision_repair(layout, batch_size=args.batch_size,
                                parallel=args.parallel, timeout=args.timeout)
     print(f"[vision_repair] {result['count']} 条修正 → {result['corrections_path']}")
     if result["failed"]:
