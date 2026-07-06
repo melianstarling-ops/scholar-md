@@ -98,6 +98,7 @@ import fitz
 
 from scripts.pipelines.textbooks import checkpoint as cp
 from scripts.pipelines.textbooks.debug_repair import build_repair_worklist
+from scripts.pipelines.textbooks.paths import resolve_layout
 
 
 def _write_res(work_dir, page, width, height, blocks):
@@ -114,25 +115,25 @@ def test_build_repair_worklist_crops_only_suspicious_blocks(tmp_path):
     doc.save(str(pdf))
     doc.close()
 
-    doc_dir = tmp_path / "book"
-    work_dir = doc_dir / "_work"
+    layout = resolve_layout("book", str(tmp_path / "out"))
+    work_dir = layout.work_dir
     manifest = cp.new_manifest(str(pdf), {"page_count": 2, "size_bytes": os.path.getsize(pdf)},
                                150, "A")
-    cp.save_manifest(str(work_dir), manifest)
+    cp.save_manifest(work_dir, manifest)
 
-    _write_res(str(work_dir), 1, 150, 150, [
+    _write_res(work_dir, 1, 150, 150, [
         {"block_label": "display_formula", "block_id": 3, "block_order": 1,
          "block_bbox": [10, 10, 60, 60],
          "block_content": r"$$ c\Delta z=\frac{a}{c^{\prime}} $$"},
         {"block_label": "display_formula", "block_id": 4, "block_order": 2,
          "block_bbox": [70, 70, 140, 140], "block_content": r"$$ E=mc^2 $$"},
     ])
-    _write_res(str(work_dir), 2, 150, 150, [
+    _write_res(work_dir, 2, 150, 150, [
         {"block_label": "text", "block_id": 1, "block_order": 1,
          "block_bbox": [0, 0, 10, 10], "block_content": "hello"},
     ])
 
-    result = build_repair_worklist(str(doc_dir), repair_dpi=300, pad=5)
+    result = build_repair_worklist(layout, repair_dpi=300, pad=5)
 
     assert result["count"] == 1
     item = result["items"][0]
@@ -141,11 +142,10 @@ def test_build_repair_worklist_crops_only_suspicious_blocks(tmp_path):
     assert item["kinds"] == ["frac_primed_denom"]
     assert os.path.exists(item["crop_path"])
 
-    crops_dir = os.path.join(str(doc_dir), "book_repair", "crops")
+    crops_dir = os.path.join(layout.repair_dir, "crops")
     assert sorted(os.listdir(crops_dir)) == ["page_0001_block_3.png"]
 
-    worklist_path = os.path.join(str(doc_dir), "book_repair", "worklist.json")
-    with open(worklist_path, encoding="utf-8") as f:
+    with open(layout.worklist_path, encoding="utf-8") as f:
         data = json.load(f)
     assert data["count"] == 1
 
@@ -186,19 +186,20 @@ def test_build_repair_worklist_includes_render_error_block(tmp_path):
     doc.save(str(pdf))
     doc.close()
 
-    doc_dir = tmp_path / "book"
-    work_dir = doc_dir / "_work"
-    _write_res(str(work_dir), 1, 150, 150, [
+    layout = resolve_layout("book", str(tmp_path / "out"))
+    work_dir = layout.work_dir
+    _write_res(work_dir, 1, 150, 150, [
         {"block_label": "display_formula", "block_id": 7, "block_order": 1,
          "block_bbox": [10, 10, 60, 60], "block_content": r"$$ a=\frac{x}{y} $$"},
     ])
-    cp.save_manifest(str(work_dir), cp.new_manifest(
+    cp.save_manifest(work_dir, cp.new_manifest(
         str(pdf), {"page_count": 1, "size_bytes": os.path.getsize(pdf)}, 150, "A"))
-    with open(doc_dir / "book_render_errors.json", "w", encoding="utf-8") as f:
+    os.makedirs(layout.doc_work_dir, exist_ok=True)
+    with open(layout.render_errors_path, "w", encoding="utf-8") as f:
         json.dump({"errors": [{"page": 1, "mode": "display",
                                "latex_head": r"a=\frac{x}{y}"}]}, f)
 
-    result = build_repair_worklist(str(doc_dir), repair_dpi=300, pad=5)
+    result = build_repair_worklist(layout, repair_dpi=300, pad=5)
 
     assert result["count"] == 1
     assert result["items"][0]["block_id"] == 7

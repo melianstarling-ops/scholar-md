@@ -15,6 +15,7 @@ from PIL import Image
 
 from scripts.pipelines.textbooks import checkpoint as cp
 from scripts.pipelines.textbooks import images
+from scripts.pipelines.textbooks.paths import DocLayout, resolve_layout
 from scripts.pipelines.textbooks.preprocess import pdf_page_to_png
 from scripts.pipelines.textbooks.selfcheck import scan_formula_suspicions
 
@@ -100,9 +101,9 @@ def _merge_hits(*groups: list[dict]) -> list[dict]:
     return list(by_id.values())
 
 
-def _render_errors_by_page(doc_dir: str, stem: str) -> dict:
-    """读 <stem>_render_errors.json → {page: [error, ...]};文件不存在返回 {}。"""
-    path = os.path.join(doc_dir, f"{stem}_render_errors.json")
+def _render_errors_by_page(layout: DocLayout) -> dict:
+    """读 render_errors.json -> {page: [error, ...]};文件不存在返回 {}。"""
+    path = layout.render_errors_path
     by_page: dict = {}
     if os.path.exists(path):
         with open(path, encoding="utf-8") as f:
@@ -130,28 +131,28 @@ def crop_at_scale(png_path: str, bbox: list[float], scale: float, pad: int = 10)
         return crop
 
 
-def build_repair_worklist(doc_dir: str, pdf_path: str | None = None,
+def build_repair_worklist(layout: DocLayout, pdf_path: str | None = None,
                           repair_dpi: int = 300, pad: int = 10) -> dict:
     """扫全文档 _work/page_NNNN_res.json,对疑似块高 DPI 裁图 + 落工作单。
 
-    产物落 `<doc_dir>/<stem>_repair/`:`crops/` 存裁图(命名同 images.crop_filename),
+    产物落 layout.repair_dir:`crops/` 存裁图(命名同 images.crop_filename),
     `worklist.json` 记 [{page,block_id,bbox,engine_latex,kinds,ops,crop_path}, ...],
     供下一步(无头 claude -p 读图生成修正 LaTeX)消费。只渲染真正含疑似块的页,
     渲染用的整页 PNG 用完即删(磁盘有界,同 convert.py 的惯例)。
     """
-    work_dir = os.path.join(doc_dir, "_work")
+    work_dir = layout.work_dir
     manifest = cp.load_manifest(work_dir)
     if manifest is None:
-        raise ValueError(f"{doc_dir!r} 缺 _work/manifest.json,须先跑 convert_pdf")
+        raise ValueError(f"{layout.work_dir!r} 缺 manifest.json,须先跑 convert_pdf")
     resolved_pdf = pdf_path or manifest.get("pdf_path")
     if not resolved_pdf:
         raise ValueError("未给 pdf_path,manifest 里也没有,无法栅格化裁图")
     total = manifest["fingerprint"]["page_count"]
-    stem = os.path.basename(os.path.normpath(doc_dir))
-    render_errors = _render_errors_by_page(doc_dir, stem)
-    repair_dir = os.path.join(doc_dir, f"{stem}_repair")
-    crops_dir = os.path.join(repair_dir, "crops")
-    pages_dir = os.path.join(repair_dir, "_pages")
+    stem = layout.stem
+    render_errors = _render_errors_by_page(layout)
+    repair_dir = layout.repair_dir
+    crops_dir = os.path.join(layout.repair_dir, "crops")
+    pages_dir = os.path.join(layout.repair_dir, "_pages")
 
     items: list[dict] = []
     for page in range(1, total + 1):
@@ -181,7 +182,7 @@ def build_repair_worklist(doc_dir: str, pdf_path: str | None = None,
                 os.remove(png)
 
     os.makedirs(repair_dir, exist_ok=True)
-    worklist_path = os.path.join(repair_dir, "worklist.json")
+    worklist_path = layout.worklist_path
     worklist = {"stem": stem, "count": len(items), "items": items}
     with open(worklist_path, "w", encoding="utf-8") as f:
         json.dump(worklist, f, ensure_ascii=False, indent=2)
@@ -190,12 +191,15 @@ def build_repair_worklist(doc_dir: str, pdf_path: str | None = None,
 
 def main() -> None:
     ap = argparse.ArgumentParser(description="疑似结构错公式:高 DPI 裁图 + 待修工作单导出")
-    ap.add_argument("--doc", required=True, help="doc 目录(convert_pdf 的 doc_out,含 _work/)")
+    ap.add_argument("--out", required=True, help="交付根(md+assets)")
+    ap.add_argument("--work-dir", default=None, help="过程根(默认 <out>/_work_root)")
+    ap.add_argument("--stem", required=True, help="文档 stem")
     ap.add_argument("--src", default=None, help="源 PDF 路径(默认取 manifest 记的 pdf_path)")
     ap.add_argument("--repair-dpi", type=int, default=300, help="裁图栅格化 DPI(默认300)")
     ap.add_argument("--pad", type=int, default=10, help="裁剪边距像素(默认10)")
     args = ap.parse_args()
-    result = build_repair_worklist(args.doc, pdf_path=args.src,
+    layout = resolve_layout(args.stem, args.out, args.work_dir)
+    result = build_repair_worklist(layout, pdf_path=args.src,
                                    repair_dpi=args.repair_dpi, pad=args.pad)
     print(f"[debug_repair] {result['count']} 处疑似 → {result['worklist_path']}")
 
