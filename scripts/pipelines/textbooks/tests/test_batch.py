@@ -6,6 +6,7 @@ import pytest
 
 from scripts.pipelines.textbooks import batch as bp
 from scripts.pipelines.textbooks import checkpoint as cp
+from scripts.pipelines.textbooks.paths import resolve_layout
 
 
 def _make_pdf(tmp_path, n_pages, name="book"):
@@ -57,34 +58,37 @@ def test_discover_cross_dir_stem_collision_raises(tmp_path):
 
 def test_already_done_false_when_no_manifest(tmp_path):
     pdf = _make_pdf(tmp_path, 2)
-    assert bp._already_done(tmp_path / "out", pdf, 150) is False
+    assert bp._already_done(tmp_path / "out", None, pdf, 150) is False
 
 
 def test_already_done_true_when_all_pages_done(tmp_path):
     pdf = _make_pdf(tmp_path, 2)
     out_root = tmp_path / "out"
-    work = out_root / pdf.stem / "_work"
+    layout = resolve_layout(pdf.stem, str(out_root))
+    work = Path(layout.work_dir)
     _mark_page_done(work, 1)
     _mark_page_done(work, 2)
     m = cp.new_manifest(str(pdf), cp.pdf_fingerprint(str(pdf)), 150, "A")
     cp.save_manifest(str(work), m)
-    assert bp._already_done(out_root, pdf, 150) is True
+    assert bp._already_done(out_root, None, pdf, 150) is True
 
 
 def test_already_done_false_on_dpi_mismatch(tmp_path):
     pdf = _make_pdf(tmp_path, 1)
     out_root = tmp_path / "out"
-    work = out_root / pdf.stem / "_work"
+    layout = resolve_layout(pdf.stem, str(out_root))
+    work = Path(layout.work_dir)
     _mark_page_done(work, 1)
     m = cp.new_manifest(str(pdf), cp.pdf_fingerprint(str(pdf)), 150, "A")
     cp.save_manifest(str(work), m)
-    assert bp._already_done(out_root, pdf, 200) is False   # 请求 DPI 200 ≠ 记录 150
+    assert bp._already_done(out_root, None, pdf, 200) is False   # 请求 DPI 200 ≠ 记录 150
 
 
 def test_already_done_false_on_source_replaced(tmp_path):
     pdf = _make_pdf(tmp_path, 1)
     out_root = tmp_path / "out"
-    work = out_root / pdf.stem / "_work"
+    layout = resolve_layout(pdf.stem, str(out_root))
+    work = Path(layout.work_dir)
     _mark_page_done(work, 1)
     m = cp.new_manifest(str(pdf), cp.pdf_fingerprint(str(pdf)), 150, "A")
     cp.save_manifest(str(work), m)
@@ -92,29 +96,31 @@ def test_already_done_false_on_source_replaced(tmp_path):
     doc = fitz.open()
     doc.new_page(); doc.new_page(); doc.new_page()
     doc.save(str(pdf))
-    assert bp._already_done(out_root, pdf, 150) is False
+    assert bp._already_done(out_root, None, pdf, 150) is False
 
 
 def test_already_done_true_when_only_poisoned_page_remains(tmp_path):
     pdf = _make_pdf(tmp_path, 2)
     out_root = tmp_path / "out"
-    work = out_root / pdf.stem / "_work"
+    layout = resolve_layout(pdf.stem, str(out_root))
+    work = Path(layout.work_dir)
     _mark_page_done(work, 1)
     m = cp.new_manifest(str(pdf), cp.pdf_fingerprint(str(pdf)), 150, "A")
     cp.record_failure(m, 2, "process killed repeatedly", "process-killed")
     cp.save_manifest(str(work), m)
-    assert bp._already_done(out_root, pdf, 150) is True     # 毒页不算"未完成"
+    assert bp._already_done(out_root, None, pdf, 150) is True     # 毒页不算"未完成"
 
 
 def test_already_done_false_when_page_exception_pending(tmp_path):
     pdf = _make_pdf(tmp_path, 2)
     out_root = tmp_path / "out"
-    work = out_root / pdf.stem / "_work"
+    layout = resolve_layout(pdf.stem, str(out_root))
+    work = Path(layout.work_dir)
     _mark_page_done(work, 1)
     m = cp.new_manifest(str(pdf), cp.pdf_fingerprint(str(pdf)), 150, "A")
     cp.record_failure(m, 2, "transient", "page-exception")
     cp.save_manifest(str(work), m)
-    assert bp._already_done(out_root, pdf, 150) is False    # 瞬时失败页仍算未完成,允许重试
+    assert bp._already_done(out_root, None, pdf, 150) is False    # 瞬时失败页仍算未完成,允许重试
 
 
 def test_run_calls_watchdog_once_per_book(tmp_path):
@@ -151,7 +157,8 @@ def test_run_resume_skips_done_book_without_spawning(tmp_path):
     doc.new_page()
     doc.save(str(pdf))
     out_root = tmp_path / "out"
-    work = out_root / "A" / "_work"
+    layout = resolve_layout("A", str(out_root))
+    work = Path(layout.work_dir)
     _mark_page_done(work, 1)
     cp.save_manifest(str(work),
                      cp.new_manifest(str(pdf), cp.pdf_fingerprint(str(pdf)), cp.DEFAULT_DPI, "A"))
@@ -217,7 +224,7 @@ def test_run_resume_survives_already_done_exception(tmp_path, monkeypatch):
     (d / "A.pdf").write_bytes(b"%PDF-1.4")
     (d / "B.pdf").write_bytes(b"%PDF-1.4")
 
-    def raising_already_done(out_root, pdf_path, dpi):
+    def raising_already_done(out_root, work_root, pdf_path, dpi):
         raise RuntimeError("simulated corrupt PDF")
 
     monkeypatch.setattr(bp, "_already_done", raising_already_done)
@@ -249,7 +256,8 @@ def test_run_suspect_book_keeps_rc_zero(tmp_path):
     d.mkdir()
     pdf = _make_pdf(d, 2, name="A")
     out_root = tmp_path / "out"
-    work = out_root / "A" / "_work"
+    layout = resolve_layout("A", str(out_root))
+    work = Path(layout.work_dir)
     _mark_page_done(work, 1)
     m = cp.new_manifest(str(pdf), cp.pdf_fingerprint(str(pdf)), cp.DEFAULT_DPI, "A")
     cp.record_failure(m, 2, "transient", "page-exception")
@@ -260,3 +268,145 @@ def test_run_suspect_book_keeps_rc_zero(tmp_path):
     rc, results = bp.run([str(d)], out=str(out_root), runner=fake_runner)
     assert results[0]["status"] == "SUSPECT"
     assert rc == 0
+
+
+def test_already_done_uses_explicit_work_root(tmp_path):
+    pdf = _make_pdf(tmp_path, 1)
+    out_root = tmp_path / "out"
+    work_root = tmp_path / "scratch"
+    layout = resolve_layout(pdf.stem, str(out_root), str(work_root))
+    work = Path(layout.work_dir)
+    _mark_page_done(work, 1)
+    m = cp.new_manifest(str(pdf), cp.pdf_fingerprint(str(pdf)), 150, "A")
+    cp.save_manifest(str(work), m)
+    assert bp._already_done(out_root, work_root, pdf, 150) is True
+
+
+def test_read_summary_reads_process_side_selfcheck_and_manifest(tmp_path):
+    pdf = _make_pdf(tmp_path, 1)
+    out_root = tmp_path / "out"
+    layout = resolve_layout(pdf.stem, str(out_root))
+    work = Path(layout.work_dir)
+    _mark_page_done(work, 1)
+    cp.save_manifest(str(work),
+                     cp.new_manifest(str(pdf), cp.pdf_fingerprint(str(pdf)), 150, "A"))
+    Path(layout.doc_work_dir).mkdir(parents=True, exist_ok=True)
+    with open(layout.selfcheck_path, "w", encoding="utf-8") as f:
+        json.dump({"in_md": 1, "total": 1}, f)
+
+    summary = bp._read_summary(out_root, None, pdf)
+
+    assert summary["status"] == "OK"
+    assert summary["route"] == "A"
+    assert summary["selfcheck"] == {"in_md": 1, "total": 1}
+
+
+def test_job_argv_passes_work_dir_to_convert_subprocess(tmp_path):
+    pdf = tmp_path / "A.pdf"
+    out_root = tmp_path / "out"
+    work_root = tmp_path / "scratch"
+
+    argv = bp._job_argv(pdf, out_root, work_root, 150, no_selfcheck_json=False)
+
+    assert "--work-dir" in argv
+    assert argv[argv.index("--work-dir") + 1] == str(work_root)
+
+
+def test_run_invokes_katex_scan_by_default(tmp_path, monkeypatch):
+    d = tmp_path / "src"
+    d.mkdir()
+    pdf = _make_pdf(d, 1, name="A")
+    out_root = tmp_path / "out"
+    called = []
+
+    def fake_runner(argv):
+        layout = resolve_layout("A", str(out_root))
+        work = Path(layout.work_dir)
+        Path(layout.doc_deliverable_dir).mkdir(parents=True, exist_ok=True)
+        Path(layout.md_path).write_text("# A\n", encoding="utf-8")
+        _mark_page_done(work, 1)
+        cp.save_manifest(str(work),
+                         cp.new_manifest(str(pdf), cp.pdf_fingerprint(str(pdf)), 150, "A"))
+        return 0
+
+    def fake_scan(md_path, out_path):
+        called.append((md_path, out_path))
+        return {"errors": []}
+
+    monkeypatch.setattr(bp, "scan_katex", fake_scan)
+
+    rc, results = bp.run([str(d)], out=str(out_root), dpi=150, runner=fake_runner)
+
+    layout = resolve_layout("A", str(out_root))
+    assert rc == 0
+    assert results[0]["status"] == "OK"
+    assert called == [(layout.md_path, layout.render_errors_path)]
+
+
+def test_run_does_not_invoke_katex_scan_when_disabled(tmp_path, monkeypatch):
+    d = tmp_path / "src"
+    d.mkdir()
+    pdf = _make_pdf(d, 1, name="A")
+    out_root = tmp_path / "out"
+    called = []
+
+    def fake_runner(argv):
+        layout = resolve_layout("A", str(out_root))
+        work = Path(layout.work_dir)
+        Path(layout.doc_deliverable_dir).mkdir(parents=True, exist_ok=True)
+        Path(layout.md_path).write_text("# A\n", encoding="utf-8")
+        _mark_page_done(work, 1)
+        cp.save_manifest(str(work),
+                         cp.new_manifest(str(pdf), cp.pdf_fingerprint(str(pdf)), 150, "A"))
+        return 0
+
+    monkeypatch.setattr(bp, "scan_katex", lambda md_path, out_path: called.append((md_path, out_path)))
+
+    rc, results = bp.run([str(d)], out=str(out_root), dpi=150, runner=fake_runner,
+                         katex_scan_enabled=False)
+
+    assert rc == 0
+    assert results[0]["status"] == "OK"
+    assert called == []
+
+
+def test_run_keeps_book_ok_when_katex_scan_node_missing(tmp_path, monkeypatch, capsys):
+    d = tmp_path / "src"
+    d.mkdir()
+    pdf = _make_pdf(d, 1, name="A")
+    out_root = tmp_path / "out"
+
+    def fake_runner(argv):
+        layout = resolve_layout("A", str(out_root))
+        work = Path(layout.work_dir)
+        Path(layout.doc_deliverable_dir).mkdir(parents=True, exist_ok=True)
+        Path(layout.md_path).write_text("# A\n", encoding="utf-8")
+        _mark_page_done(work, 1)
+        cp.save_manifest(str(work),
+                         cp.new_manifest(str(pdf), cp.pdf_fingerprint(str(pdf)), 150, "A"))
+        return 0
+
+    monkeypatch.setattr(bp, "scan_katex", lambda md_path, out_path: None)
+
+    rc, results = bp.run([str(d)], out=str(out_root), dpi=150, runner=fake_runner)
+
+    assert rc == 0
+    assert results[0]["status"] == "OK"
+    assert "[katex] node 缺失,跳过 A" in capsys.readouterr().out
+
+
+def test_main_no_katex_scan_threads_disabled_to_run(monkeypatch):
+    captured = {}
+
+    def fake_run(src_paths, **kwargs):
+        captured["src_paths"] = src_paths
+        captured["kwargs"] = kwargs
+        return 0, []
+
+    monkeypatch.setattr(bp, "run", fake_run)
+    monkeypatch.setattr("sys.argv", ["batch.py", "--src", "src", "--no-katex-scan"])
+
+    rc = bp.main()
+
+    assert rc == 0
+    assert captured["kwargs"]["katex_scan_enabled"] is False

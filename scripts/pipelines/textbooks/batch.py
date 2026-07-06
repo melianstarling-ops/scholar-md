@@ -17,6 +17,8 @@ import sys
 from pathlib import Path
 
 from scripts.pipelines.textbooks import checkpoint as cp
+from scripts.pipelines.textbooks.katex_scan import scan_katex
+from scripts.pipelines.textbooks.paths import resolve_layout
 from scripts.pipelines.textbooks.watchdog import run_until_done
 
 PROJECT_ROOT = Path(__file__).resolve().parents[3]
@@ -59,45 +61,49 @@ def discover(src_paths: list[str]) -> list[Path]:
     return pdfs
 
 
-def _already_done(out_root: Path, pdf_path: Path, dpi: int) -> bool:
+def _already_done(out_root: Path, work_root: Path | None, pdf_path: Path, dpi: int) -> bool:
     """--resume 跳过判断:B 路(born-digital 登记)不走这个函数,由 main 直接不做短路
     (triage 便宜、幂等,见设计 §6)。这里只判 A/C 路:指纹/DPI 失配不算 done;
     毒页(process-killed)不算"未完成"(convert_pdf 自己也不会再碰它),
     但瞬时失败页(page-exception)仍算未完成,允许下次 --resume 重试。
     """
-    work_dir = out_root / pdf_path.stem / "_work"
-    manifest = cp.load_manifest(str(work_dir))
+    layout = resolve_layout(pdf_path.stem, str(out_root),
+                            str(work_root) if work_root else None)
+    manifest = cp.load_manifest(layout.work_dir)
     if manifest is None:
         return False
     if not cp.fingerprint_ok(manifest, str(pdf_path), dpi):
         return False
     total = manifest["fingerprint"]["page_count"]
     poisoned = {f["page"] for f in manifest["failed_pages"] if f["kind"] == "process-killed"}
-    todo = [p for p in cp.pages_todo(str(work_dir), total) if p not in poisoned]
+    todo = [p for p in cp.pages_todo(layout.work_dir, total) if p not in poisoned]
     return not todo
 
 
-def _job_argv(pdf: Path, out_root: Path, dpi: int, no_selfcheck_json: bool) -> list[str]:
+def _job_argv(pdf: Path, out_root: Path, work_root: Path | None, dpi: int,
+              no_selfcheck_json: bool) -> list[str]:
     argv = ["--src", str(pdf), "--out", str(out_root), "--dpi", str(dpi)]
+    if work_root:
+        argv.extend(["--work-dir", str(work_root)])
     if no_selfcheck_json:
         argv.append("--no-selfcheck-json")
     return argv
 
 
-def _read_summary(out_root: Path, pdf: Path) -> dict:
+def _read_summary(out_root: Path, work_root: Path | None, pdf: Path) -> dict:
     """跑完一本书(rc==0)后从磁盘读回结构化结果,供汇总报告用(拿不到 Python 返回值)。"""
     deferred_marker = out_root / "_deferred_born_digital" / f"{pdf.stem}.txt"
     if deferred_marker.exists():
         return {"stem": pdf.stem, "status": "B", "route": "B",
                 "failed_pages": 0, "selfcheck": None}
-    work_dir = out_root / pdf.stem / "_work"
-    manifest = cp.load_manifest(str(work_dir))
+    layout = resolve_layout(pdf.stem, str(out_root),
+                            str(work_root) if work_root else None)
+    manifest = cp.load_manifest(layout.work_dir)
     failed_pages = manifest["failed_pages"] if manifest else []
     route = manifest["route"] if manifest else "?"
-    selfcheck_path = out_root / pdf.stem / f"{pdf.stem}_selfcheck.json"
     selfcheck = None
-    if selfcheck_path.exists():
-        with open(selfcheck_path, encoding="utf-8") as f:
+    if os.path.exists(layout.selfcheck_path):
+        with open(layout.selfcheck_path, encoding="utf-8") as f:
             selfcheck = json.load(f)
     status = "SUSPECT" if failed_pages else "OK"
     return {"stem": pdf.stem, "status": status, "route": route,
@@ -105,13 +111,15 @@ def _read_summary(out_root: Path, pdf: Path) -> dict:
 
 
 def run(src_paths: list[str], out: str | None = None, dpi: int = cp.DEFAULT_DPI,
-        resume: bool = False, limit: int | None = None,
+        work_dir: str | None = None, resume: bool = False, limit: int | None = None,
         max_restarts: int = cp.MAX_RESTARTS, no_selfcheck_json: bool = False,
+        katex_scan_enabled: bool = True,
         runner=None) -> tuple[int, list[dict]]:
     pdfs = discover(src_paths)
     if limit is not None:
         pdfs = pdfs[:limit]
     out_root = Path(out).resolve() if out else DEFAULT_OUTPUT_ROOT
+    work_root = Path(work_dir).resolve() if work_dir else None
     out_root.mkdir(parents=True, exist_ok=True)
 
     results: list[dict] = []
@@ -120,7 +128,7 @@ def run(src_paths: list[str], out: str | None = None, dpi: int = cp.DEFAULT_DPI,
         skip = False
         if resume:
             try:
-                skip = _already_done(out_root, pdf, dpi)
+                skip = _already_done(out_root, work_root, pdf, dpi)
             except Exception as e:
                 print(f"  [WARN] {pdf.stem}: --resume 指纹校验失败"
                       f"({type(e).__name__}: {e}),按未完成处理")
@@ -129,7 +137,7 @@ def run(src_paths: list[str], out: str | None = None, dpi: int = cp.DEFAULT_DPI,
             results.append({"stem": pdf.stem, "status": "SKIP",
                              "route": None, "failed_pages": 0, "selfcheck": None})
             continue
-        argv = _job_argv(pdf, out_root, dpi, no_selfcheck_json)
+        argv = _job_argv(pdf, out_root, work_root, dpi, no_selfcheck_json)
         rc = run_until_done(argv, max_restarts=max_restarts, runner=runner)
         if rc != 0:
             n_giveup += 1
@@ -137,7 +145,12 @@ def run(src_paths: list[str], out: str | None = None, dpi: int = cp.DEFAULT_DPI,
             results.append({"stem": pdf.stem, "status": "GIVEUP",
                              "route": None, "failed_pages": 0, "selfcheck": None})
             continue
-        summary = _read_summary(out_root, pdf)
+        summary = _read_summary(out_root, work_root, pdf)
+        if katex_scan_enabled and summary["status"] != "B":
+            layout = resolve_layout(pdf.stem, str(out_root),
+                                    str(work_root) if work_root else None)
+            if scan_katex(layout.md_path, layout.render_errors_path) is None:
+                print(f"[katex] node 缺失,跳过 {pdf.stem}")
         results.append(summary)
         if summary["status"] == "B":
             print(f"  [B] {pdf.stem} — 已登记 deferred")
@@ -162,12 +175,14 @@ def main() -> int:
     ap.add_argument("--src", nargs="*", default=None,
                     help="PDF 文件/目录/多个;省略回退 env SCHOLARMD_TEXTBOOKS_SRC 或仓库 02_Source/textbooks/")
     ap.add_argument("--out", default=None, help="产物根目录(省略=仓库 03_Output/textbooks/)")
+    ap.add_argument("--work-dir", default=None, help="过程根(默认 <out>/_work_root)")
     ap.add_argument("--dpi", type=int, default=cp.DEFAULT_DPI, help="栅格化 DPI(默认150)")
     ap.add_argument("--resume", action="store_true", help="跳过已全部跑完的书")
     ap.add_argument("--limit", type=int, default=None, help="只处理发现列表的前 N 本(调试/小样验证)")
     ap.add_argument("--max-restarts", type=int, default=cp.MAX_RESTARTS,
                     help="透传给每本书 watchdog 的累计重启上限")
     ap.add_argument("--no-selfcheck-json", action="store_true", help="不写 <stem>_selfcheck.json")
+    ap.add_argument("--no-katex-scan", action="store_true", help="转换成功后不运行 KaTeX 硬报错扫描")
     ap.add_argument("--list", action="store_true", help="只列出待处理 PDF,不转换")
     args = ap.parse_args()
 
@@ -181,9 +196,11 @@ def main() -> int:
                 print(f"  {p}")
             print(f"共 {len(pdfs)} 份 @ {src_paths}")
             return 0
-        rc, _ = run(src_paths, out=args.out, dpi=args.dpi, resume=args.resume,
+        rc, _ = run(src_paths, out=args.out, dpi=args.dpi, work_dir=args.work_dir,
+                    resume=args.resume,
                     limit=args.limit, max_restarts=args.max_restarts,
-                    no_selfcheck_json=args.no_selfcheck_json)
+                    no_selfcheck_json=args.no_selfcheck_json,
+                    katex_scan_enabled=not args.no_katex_scan)
         return rc
     except ValueError as e:
         print(f"[ERROR] {e}", file=sys.stderr)
