@@ -60,3 +60,30 @@ def test_main_omits_no_selfcheck_json_flag_by_default(monkeypatch):
     with pytest.raises(SystemExit):
         wd.main()
     assert "--no-selfcheck-json" not in captured["argv"]
+
+
+def test_main_forwards_work_dir_to_convert(monkeypatch):
+    captured = {}
+    def fake_run_until_done(argv, max_restarts):
+        captured["argv"] = argv
+        return 0
+    monkeypatch.setattr(wd, "run_until_done", fake_run_until_done)
+    monkeypatch.setattr("sys.argv",
+                        ["watchdog.py", "--src", "x.pdf", "--work-dir", "/scratch"])
+    with pytest.raises(SystemExit):
+        wd.main()
+    argv = captured["argv"]
+    assert "--work-dir" in argv
+    assert argv[argv.index("--work-dir") + 1] == "/scratch"
+
+
+def test_main_omits_work_dir_by_default(monkeypatch):
+    captured = {}
+    def fake_run_until_done(argv, max_restarts):
+        captured["argv"] = argv
+        return 0
+    monkeypatch.setattr(wd, "run_until_done", fake_run_until_done)
+    monkeypatch.setattr("sys.argv", ["watchdog.py", "--src", "x.pdf"])
+    with pytest.raises(SystemExit):
+        wd.main()
+    assert "--work-dir" not in captured["argv"]

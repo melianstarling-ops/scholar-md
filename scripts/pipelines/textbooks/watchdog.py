@@ -33,7 +33,8 @@ def run_until_done(argv: list[str], max_restarts: int = cp.MAX_RESTARTS,
 def main() -> None:
     ap = argparse.ArgumentParser(description="textbooks 无人值守转换(崩溃自动续跑)")
     ap.add_argument("--src", required=True, help="PDF 文件路径")
-    ap.add_argument("--out", default=None, help="输出目录(默认就地)")
+    ap.add_argument("--out", default=None, help="交付根(md+assets,默认就地)")
+    ap.add_argument("--work-dir", default=None, help="过程根(默认 <out>/_work_root,转发给 convert.py)")
     ap.add_argument("--dpi", type=int, default=cp.DEFAULT_DPI, help="栅格化 DPI(默认150)")
     ap.add_argument("--max-restarts", type=int, default=cp.MAX_RESTARTS,
                     help="累计重启兜底上限")
@@ -43,6 +44,8 @@ def main() -> None:
     argv = ["--src", args.src, "--dpi", str(args.dpi)]
     if args.out:
         argv += ["--out", args.out]
+    if args.work_dir:
+        argv += ["--work-dir", args.work_dir]
     if args.no_selfcheck_json:
         argv.append("--no-selfcheck-json")
     rc = run_until_done(argv, max_restarts=args.max_restarts)
