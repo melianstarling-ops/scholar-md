@@ -7,11 +7,11 @@
 - 不涉及：patents/general 管线改动；引擎/后端加速（vLLM 等，见下方性能前提）；batch.py 外部工作区调用（独立任务）
 
 > 立项依据：[textbooks 首版交接](../../handoff/2026-07-01-HANDOFF-textbooks-v1-done.md) §3 Task 3、
-> 2026-07-02 家用机性能实测（下 §1）、[OCR 推理性能调研报告](../../../04_Docs/PaddleOCR-VL%201.6%20文档%20OCRVLM%20推理性能优化可执行调研报告.md)（私有）。
+> 2026-07-02 公司机（学校实验室电脑）性能实测（下 §1）、[OCR 推理性能调研报告](../../../04_Docs/PaddleOCR-VL%201.6%20文档%20OCRVLM%20推理性能优化可执行调研报告.md)（私有）。
 
 ## 1. 背景：性能前提（2026-07-02 实测）
 
-在动本设计前，2026-07-02 于家用机 A（RTX 5060/Blackwell/sm_120、R9 9900X、Win11）用真实 803 页样本
+在动本设计前，2026-07-02 于公司机（学校实验室电脑，所有者专用，RTX 5060/Blackwell/sm_120、R9 9900X、Win11）用真实 803 页样本
 `02_Source/textbooks_samples/Paul_Analysis_MTL_scan.pdf` 实测，确认了大文件转换的真实瓶颈：
 
 - **速度地板 ≈ 50s/页**（DPI 150；200dpi=63s、150dpi=50s、120dpi=54s，第 200 页实测）。本机原生 Windows

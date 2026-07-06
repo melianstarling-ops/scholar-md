@@ -23,7 +23,7 @@ textbooks 管线**大文件稳健化已建成并全 review 通过**（分支 `fe
   **全程打桩 `predict_page`、零 GPU**，任何机器 0.78s 跑完。命令：`.venv-textbooks/Scripts/python -m pytest scripts/pipelines/textbooks/tests/ -v`（本机权限坑需加 `--basetemp=./.pytest_tmp`，见 lessons L-T22）。
 - **流程**：brainstorming（设计 spec）→ writing-plans（8 任务 TDD 计划）→ subagent-driven-development（每任务实现→两阶段 review→修复；全分支 opus review）。
   全分支 review 抓出 1 个单任务 review 看不到的**跨任务 Important bug**（毒页计数被前置失败页重置），已修复+复评（见 lessons L-T19）。
-- **环境**：家用机 A（RTX 5060/Blackwell）重建 `.venv-textbooks`——**cu126 wheel 起不来，须 cu129**（lessons L-T21）。
+- **环境**：公司机（学校实验室电脑，所有者专用，RTX 5060/Blackwell）重建 `.venv-textbooks`——**cu126 wheel 起不来，须 cu129**（lessons L-T21）。
 - **文档**：设计 `docs/superpowers/specs/2026-07-02-textbooks-large-file-robustness-design.md`、计划 `docs/superpowers/plans/2026-07-02-textbooks-large-file-robustness.md`、
   调研提示词 `docs/research-prompts/2026-07-02-*`、经验 `04_Docs/lessons/lessons_textbooks_dev.md`(L-T17~L-T22)。
 
