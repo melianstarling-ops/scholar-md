@@ -66,6 +66,18 @@ def _correction_preview(b: dict, corrections_by_id: dict) -> dict | None:
     }
 
 
+def _candidate_preview(b: dict, candidates_by_id: dict) -> dict | None:
+    c = candidates_by_id.get(b.get("block_id"))
+    if not c:
+        return None
+    return {
+        "candidate_id": c.get("candidate_id", ""),
+        "block_id": c.get("block_id"),
+        "reasons": c.get("reasons", []),
+        "estimate_basis": c.get("estimate_basis", ""),
+    }
+
+
 def _overlay(b: dict, corrections_by_id: dict) -> dict | None:
     bbox = _valid_bbox(b)
     if bbox is None:
@@ -98,7 +110,8 @@ def build_page_signals(blocks: list[dict], warnings: list[dict]) -> dict:
 def build_page_payload(res: dict, page: int, stem: str,
                        image_b64: str | None = None,
                        page_errors: list[dict] | None = None,
-                       corrections: list[dict] | None = None) -> dict:
+                       corrections: list[dict] | None = None,
+                       candidates: list[dict] | None = None) -> dict:
     """把一页 res.json 加工成 HTML 模板所需的 payload dict。frags 是带块归属的
     md 片段列表(供左右双向联动);md 是其 join(供报错索引/整页渲染)。corrections
     是该文档全部修正记录(任意 status),按 (page, block_id) 匹配后挂到对应块/片段的
@@ -106,9 +119,16 @@ def build_page_payload(res: dict, page: int, stem: str,
     (那是 apply_corrections 的应用侧红线),这里只负责"展示有什么提案"。"""
     blocks = res.get("parsing_res_list", [])
     corrections_by_id = {c["block_id"]: c for c in (corrections or []) if c.get("page") == page}
+    candidates_by_id = {c["block_id"]: c for c in (candidates or []) if c.get("page") == page}
     frags, warnings = reconstruct_fragments(blocks, stem=stem, page=page)
     md = "\n\n".join(f["md"] for f in frags) + "\n"
-    overlays = [o for o in (_overlay(b, corrections_by_id) for b in blocks) if o is not None]
+    overlays = []
+    for b in blocks:
+        o = _overlay(b, corrections_by_id)
+        if o is None:
+            continue
+        o["candidate"] = _candidate_preview(b, candidates_by_id)
+        overlays.append(o)
     blocks_by_id = {b.get("block_id"): b for b in blocks}
     for f in frags:
         for bid in f["bids"]:
@@ -118,6 +138,13 @@ def build_page_payload(res: dict, page: int, stem: str,
                 break
         else:
             f["correction"] = None
+        for bid in f["bids"]:
+            cand = _candidate_preview(blocks_by_id.get(bid, {}), candidates_by_id)
+            if cand:
+                f["candidate"] = cand
+                break
+        else:
+            f["candidate"] = None
     # 疑似识别错误(裸大算符 / \frac 围道当分母):逐片段标注,供 debug 视图橙色标出并聚合到页级
     suspicions: list[dict] = []
     for f in frags:
@@ -137,4 +164,5 @@ def build_page_payload(res: dict, page: int, stem: str,
         "signals": build_page_signals(blocks, warnings),
         "render_errors": page_errors or [],
         "suspicions": suspicions,
+        "candidates": [c for c in (candidates or []) if c.get("page") == page],
     }

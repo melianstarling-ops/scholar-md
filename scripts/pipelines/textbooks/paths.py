@@ -42,6 +42,14 @@ class DocLayout:
         return os.path.join(self.repair_dir, "worklist.json")
 
     @property
+    def formula_candidates_path(self) -> str:
+        return os.path.join(self.repair_dir, "formula_candidates.jsonl")
+
+    @property
+    def formula_candidates_summary_path(self) -> str:
+        return os.path.join(self.repair_dir, "formula_candidates_summary.json")
+
+    @property
     def render_errors_path(self) -> str:
         return os.path.join(self.doc_work_dir, f"{self.stem}_render_errors.json")
 

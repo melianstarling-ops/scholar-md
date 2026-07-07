@@ -33,11 +33,12 @@
   const NUM_CAT = { 1: "render_err", 2: "layout_err", 3: "missing", 4: "miscat", 5: "img_pos" };
 
   const BASE = 860;
-  const ANN_KEY = "tbdbgann:" + stem, EXP_KEY = "tbdbgexp:" + stem;
+  const ANN_KEY = "tbdbgann:" + stem, EXP_KEY = "tbdbgexp:" + stem, CAND_KEY = "tbdbgcand:" + stem;
   let cur = 0, zoom = 0, annMode = false, suppressClick = false, selKey = null;
   let probPages = [];   // 问题页:KaTeX 硬报错(红) 或 疑似漏识别(裸大算符,琥珀)
   let corrDirty = false;   // 本页有采纳/驳回写回但还没刷新(离开本页时才刷新,省得点一次刷一次)
   const ann = new Map(Object.entries(JSON.parse(localStorage.getItem(ANN_KEY) || "{}")));
+  const candReview = new Map(Object.entries(JSON.parse(localStorage.getItem(CAND_KEY) || "{}")));
 
   // 数学交给 markdown-it-katex 插件($…$ 在 inline 阶段 tokenize,先于 markdown 强调,LaTeX 不被污染)
   const mdit = window.markdownit({ html: false, linkify: true, breaks: false })
@@ -255,13 +256,15 @@
       scratch.innerHTML = renderMarkdownFragment(p.md || "");
       const nErr = scratch.querySelectorAll(".katex-error").length;
       const nSusp = (p.suspicions || []).length;
+      const nCand = (p.candidates || []).length;
       const nReview = nPendingReview(p);
-      if (nErr > 0 || nSusp > 0) rows.push({ i, page: p.page, nErr, nSusp, nReview });
+      if (nErr > 0 || nSusp > 0 || nCand > 0) rows.push({ i, page: p.page, nErr, nSusp, nCand, nReview });
     });
     document.body.removeChild(scratch);
     return rows;
   }
   const probLabel = (r) => [r.nErr ? `${r.nErr} 红` : "", r.nSusp ? `疑似${r.nSusp}` : "",
+    r.nCand ? `候选${r.nCand}` : "",
     r.nReview ? `★待审${r.nReview}` : ""].filter(Boolean).join("·");
 
   // ---------- 缩略图条 ----------
@@ -275,6 +278,7 @@
       t.className = "thumb" + (pr ? "" : " noerr"); t.dataset.i = i;
       const img = p.image_b64 ? `<img loading="lazy" src="data:image/jpeg;base64,${p.image_b64}" alt="">` : "";
       const mark = pr ? (pr.nErr ? '<span class="terr">⚠</span>' : "") + (pr.nSusp ? '<span class="tsusp">◆</span>' : "")
+        + (pr.nCand ? '<span class="tcand">◇</span>' : "")
         + (pr.nReview ? '<span class="trev">★</span>' : "") : "";
       t.innerHTML = img + mark +
         (p.signals && p.signals.column_suspected ? '<span class="tcol">▮▮</span>' : "") +
@@ -335,12 +339,29 @@
   function updateDirty() { $("expBtn").classList.toggle("dirty", ann.size > 0 && annSerial() !== localStorage.getItem(EXP_KEY)); }
   function saveAnn() { localStorage.setItem(ANN_KEY, JSON.stringify(Object.fromEntries(ann))); updateDirty(); }
   function markExported() { localStorage.setItem(EXP_KEY, annSerial()); updateDirty(); }
+  const candKey = (c) => c.candidate_id || (c.page + "|" + c.block_id);
+  const candStatus = (c) => candReview.get(candKey(c)) || "needs_repair";
+  function saveCandReview() { localStorage.setItem(CAND_KEY, JSON.stringify(Object.fromEntries(candReview))); }
+  function candidateReviewRows() {
+    const rows = [];
+    pages.forEach((p) => (p.candidates || []).forEach((c) => {
+      rows.push({
+        stem,
+        page: c.page,
+        block_id: c.block_id,
+        candidate_id: c.candidate_id || "",
+        reasons: c.reasons || [],
+        status: candStatus(c),
+      });
+    }));
+    return rows.sort((a, b) => a.page - b.page || a.block_id - b.block_id);
+  }
   function exportJson() {
     const arr = [...ann.values()].sort((a, b) => a.page - b.page).map((v) => ({
       stem, page: v.page, bbox: v.bbox, block_id: v.block_id, category: CAT_NUM[v.cat], note: v.note || "",
     }));
     return JSON.stringify({ stem, generated: DATA.generated, exported: new Date().toISOString(),
-      legend: CAT_NAMES, annotations: arr }, null, 2);
+      legend: CAT_NAMES, annotations: arr, candidate_reviews: candidateReviewRows() }, null, 2);
   }
   $("expBtn").onclick = async () => {
     const json = exportJson();
@@ -585,6 +606,11 @@
     }
     const nRev = nPendingReview(d);
     if (nRev) badges.push(`<span class="badge review">★ 待审修正 ${nRev}(见下方卡片,一键采纳/驳回)</span>`);
+    const cand = d.candidates || [];
+    if (cand.length) {
+      const detailTitle = cand.map((c) => `#${c.block_id} ${c.reasons.join(",")}`).join("\n");
+      badges.push(`<span class="badge candidate" title="${esc(detailTitle)}">候选复核 ${cand.length}</span>`);
+    }
     if (s.column_suspected) badges.push(`<span class="badge col">双栏嫌疑</span>`);
     (s.unhandled_labels || []).forEach((l) => badges.push(`<span class="badge warn">未知 label: ${esc(l)}</span>`));
     (s.visual_warnings || []).forEach((w) => badges.push(`<span class="badge warn">${esc(w.kind)}</span>`));
@@ -596,15 +622,44 @@
     out.innerHTML = frags.map((f, fi) => {
       const bids = (f.bids || []).filter((x) => x != null).join(" ");
       const sus = f.suspicions && f.suspicions.length;
-      const cls = "mdblk" + (sus ? " susp" : "");
-      const ttl = sus ? ` title="疑似识别错误:${f.suspicions.join(" , ")}"` : "";
+      const cand = f.candidate;
+      const cls = "mdblk" + (sus ? " susp" : "") + (cand ? " candidate" : "");
+      const titles = [];
+      if (sus) titles.push(`疑似识别错误:${f.suspicions.join(" , ")}`);
+      if (cand) titles.push(`候选复核:${cand.reasons.join(" , ")}`);
+      const ttl = titles.length ? ` title="${esc(titles.join("\n"))}"` : "";
       const card = f.correction ? renderCorrCard(f.correction, d.page, fi) : "";
-      return `<div class="${cls}" data-bids="${bids}"${ttl}>${renderMarkdownFragment(f.md || "")}${card}</div>`;
+      const candCard = cand ? renderCandidateCard(cand) : "";
+      return `<div class="${cls}" data-bids="${bids}"${ttl}>${renderMarkdownFragment(f.md || "")}${card}${candCard}</div>`;
     }).join("");
     out.querySelectorAll(".katex-error").forEach((e) => { (e.closest(".katex-display") || e.closest(".katex") || e).classList.add("err-formula"); });
     wireLink();
     wireCorrCards(frags);
+    wireCandidateCards(frags);
     if (!d.image_b64) { renderAnnList(); }
+  }
+
+  // ---------- 候选公式审核卡片:默认 needs_repair,只勾 OCR 正确 ----------
+  function renderCandidateCard(c) {
+    const checked = candStatus(c) === "ocr_correct";
+    const status = checked ? "OCR 正确" : "默认待修";
+    const reasons = (c.reasons || []).map((r) => `<span class="candre">${esc(r)}</span>`).join("");
+    return `<div class="candcard" data-cid="${esc(c.candidate_id || "")}" data-page="${c.page}" data-bid="${c.block_id}">
+      <div class="candhead"><span class="candtag">候选复核</span><span class="candstatus">${status}</span></div>
+      <label class="candcheck"><input type="checkbox" class="cand-ok" ${checked ? "checked" : ""}> OCR 正确</label>
+      <div class="candreasons">${reasons}</div>
+    </div>`;
+  }
+  function wireCandidateCards() {
+    $("mdOut").querySelectorAll(".candcard").forEach((card) => {
+      const c = { candidate_id: card.dataset.cid, page: +card.dataset.page, block_id: +card.dataset.bid };
+      const cb = card.querySelector(".cand-ok");
+      cb.onchange = () => {
+        candReview.set(candKey(c), cb.checked ? "ocr_correct" : "needs_repair");
+        saveCandReview();
+        card.querySelector(".candstatus").textContent = cb.checked ? "OCR 正确" : "默认待修";
+      };
+    });
   }
 
   // ---------- 待审修正卡片(人工确认门:AI 提案 → 一键采纳/驳回,写回 corrections.json) ----------
@@ -697,9 +752,10 @@
     ov.innerHTML = "";
     if (!d.width || !d.height) return;
     const suspBids = new Set((d.suspicions || []).flatMap((x) => x.bids).filter((x) => x != null));
+    const candidateBids = new Set((d.candidates || []).map((x) => x.block_id).filter((x) => x != null));
     for (const b of d.blocks) {
       const el = document.createElement("div");
-      el.className = "box g-" + groupOf(b.label) + (suspBids.has(b.block_id) ? " susp" : "");
+      el.className = "box g-" + groupOf(b.label) + (suspBids.has(b.block_id) ? " susp" : "") + (candidateBids.has(b.block_id) ? " candidate" : "");
       el.style.left = pct(b.bbox[0], d.width); el.style.top = pct(b.bbox[1], d.height);
       el.style.width = pct(b.bbox[2] - b.bbox[0], d.width); el.style.height = pct(b.bbox[3] - b.bbox[1], d.height);
       el.dataset.bid = b.block_id; el.dataset.lab = b.label; el.dataset.ord = b.order; el.dataset.b = b.bbox.join(",");
@@ -746,8 +802,9 @@
     probPages = computeProblems();
     reviewPages = probPages.filter((r) => r.nReview);
     const nErrP = probPages.filter((r) => r.nErr).length, nSuspP = probPages.filter((r) => r.nSusp).length;
+    const nCandP = probPages.filter((r) => r.nCand).length;
     const sel = $("errIndex");
-    sel.innerHTML = `<option value="">问题索引 (${nErrP} 红 / ${nSuspP} 疑似 / ★${reviewPages.length} 待审)</option>` +
+    sel.innerHTML = `<option value="">问题索引 (${nErrP} 红 / ${nSuspP} 疑似 / ${nCandP} 候选 / ★${reviewPages.length} 待审)</option>` +
       // 待审(有 AI 提案,可一键采纳/驳回)排在前面优先看,其余按页序
       [...reviewPages, ...probPages.filter((r) => !r.nReview)]
         .map((r) => `<option value="${r.i}">${r.nReview ? "★ " : ""}p${r.page} — ${probLabel(r)}</option>`).join("");

@@ -65,6 +65,9 @@ $V -m scripts.pipelines.textbooks.katex_scan --md ./out/book/book.md --out ./scr
 # 建公式修复工作单(裁疑似块)
 $V -m scripts.pipelines.textbooks.debug_repair --out ./out --work-dir ./scratch --stem book [--src book.pdf]
 
+# 公式视觉复核候选 dry-run(只聚合疑点+估算成本,不调用模型/不改 md)
+$V -m scripts.pipelines.textbooks.formula_candidates --out ./out --work-dir ./scratch --stem book
+
 # 公式视觉修复(读裁图 → pending corrections;默认 claude 后端)
 $V -m scripts.pipelines.textbooks.vision_repair --out ./out --work-dir ./scratch --stem book [--backend claude|agy|codex|kimi]
 

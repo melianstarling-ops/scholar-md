@@ -199,6 +199,34 @@ def test_build_payloads_correction_has_no_crop_b64_when_file_missing(tmp_path):
     assert b["correction"].get("crop_b64", "") == ""
 
 
+def test_build_payloads_attaches_formula_candidates(tmp_path):
+    layout = _layout(tmp_path)
+    work = layout.work_dir
+    os.makedirs(work, exist_ok=True)
+    with open(cp.page_res_path(work, 1), "w", encoding="utf-8") as f:
+        json.dump({"width": 100, "height": 100, "parsing_res_list": [
+            {"block_label": "display_formula", "block_id": 5, "block_order": 0,
+             "block_bbox": [0, 0, 10, 10], "block_content": "$$ suspect $$"}]}, f)
+    cp.save_manifest(work, cp.new_manifest("x.pdf", {"page_count": 1, "size_bytes": 0},
+                                           150, "A"))
+    os.makedirs(layout.repair_dir, exist_ok=True)
+    with open(layout.formula_candidates_path, "w", encoding="utf-8") as f:
+        f.write(json.dumps({
+            "candidate_id": "p0001-b0005",
+            "page": 1,
+            "block_id": 5,
+            "reasons": ["katex_warning:unicodeTextInMathMode"],
+            "estimate_basis": "bbox_proxy",
+        }) + "\n")
+
+    stem, pages = dv.build_payloads(layout, pdf_path=None, dpi=150, img_dpi=150,
+                                    embed_images=False, img_cache={})
+
+    assert pages[0]["candidates"][0]["candidate_id"] == "p0001-b0005"
+    block = next(b for b in pages[0]["blocks"] if b["block_id"] == 5)
+    assert block["candidate"]["reasons"] == ["katex_warning:unicodeTextInMathMode"]
+
+
 def test_handle_post_reassemble_runs_when_dirty(tmp_path):
     layout = _layout(tmp_path)
     os.makedirs(layout.doc_work_dir, exist_ok=True)
@@ -308,6 +336,21 @@ def test_debug_asset_normalizes_inline_math_delimiter_padding():
     assert "function normalizeInlineMathPadding" in app_js
     assert "const trimmed = body.trim()" in app_js
     assert "mdit.render(normalizeInlineMathPadding(md || \"\"))" in app_js
+
+
+def test_debug_asset_surfaces_formula_candidates():
+    app_js = open(os.path.join(dv.ASSETS, "app.js"), encoding="utf-8").read()
+    app_css = open(os.path.join(dv.ASSETS, "app.css"), encoding="utf-8").read()
+
+    assert "nCand" in app_js
+    assert "候选复核" in app_js
+    assert "candidateBids" in app_js
+    assert "OCR 正确" in app_js
+    assert "needs_repair" in app_js
+    assert "candidate_reviews" in app_js
+    assert ".mdblk.candidate" in app_css
+    assert ".box.candidate" in app_css
+    assert ".candcard" in app_css
 
 
 def test_debug_asset_inline_math_padding_does_not_swallow_prose_between_formulas(tmp_path):

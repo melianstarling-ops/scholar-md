@@ -119,6 +119,7 @@ main{flex:1;display:flex;min-height:0}
 .thumb .tno{position:absolute;right:4px;bottom:4px;font-size:10px;font-weight:600;color:#fff;background:rgba(0,0,0,.55);border-radius:5px;padding:1px 5px}
 .thumb .terr{position:absolute;right:4px;top:3px;font-size:10px;color:var(--bad);text-shadow:0 0 3px rgba(0,0,0,.6)}
 .thumb .tsusp{position:absolute;right:15px;top:3px;font-size:9px;color:var(--warn);text-shadow:0 0 3px rgba(0,0,0,.6)}
+.thumb .tcand{position:absolute;right:27px;top:3px;font-size:9px;color:var(--accent);text-shadow:0 0 3px rgba(0,0,0,.6)}
 .thumb .tcol{position:absolute;left:5px;top:5px;font-size:10px;color:#818cf8;text-shadow:0 0 3px rgba(0,0,0,.6)}
 .thumb .trev{position:absolute;left:5px;bottom:4px;font-size:10px;color:var(--accent);text-shadow:0 0 3px rgba(0,0,0,.6)}
 #errBtn.on{color:var(--bad);border-color:var(--bad);background:color-mix(in srgb,var(--bad) 12%,transparent)}
@@ -139,6 +140,7 @@ main{flex:1;display:flex;min-height:0}
 .badge.col{background:color-mix(in srgb,#6366f1 16%,var(--card));color:#818cf8;border-color:color-mix(in srgb,#6366f1 40%,transparent)}
 .badge.ok{background:color-mix(in srgb,var(--pass) 14%,var(--card));color:var(--pass);border-color:color-mix(in srgb,var(--pass) 36%,transparent)}
 .badge.review{background:color-mix(in srgb,var(--accent) 15%,var(--card));color:var(--accent);border-color:color-mix(in srgb,var(--accent) 40%,transparent);font-weight:600}
+.badge.candidate{background:color-mix(in srgb,var(--accent) 13%,var(--card));color:var(--accent);border-color:color-mix(in srgb,var(--accent) 38%,transparent)}
 
 /* markdown 正文(右栏核心) */
 #mdOut{max-width:860px;font-size:14px;line-height:1.65}
@@ -161,6 +163,17 @@ main{flex:1;display:flex;min-height:0}
 /* 疑似漏识别(裸大算符):琥珀标,区别于红色硬报错 */
 .mdblk.susp{outline:1.5px dashed var(--warn);outline-offset:2px;background:color-mix(in srgb,var(--warn) 7%,transparent)}
 .box.susp{outline:2px solid var(--warn);outline-offset:1px}
+.mdblk.candidate{box-shadow:inset 3px 0 0 var(--accent);background:color-mix(in srgb,var(--accent) 6%,transparent)}
+.box.candidate{box-shadow:0 0 0 2px color-mix(in srgb,var(--accent) 70%,transparent);outline-offset:2px}
+.candcard{margin:7px 0 5px;border:1px solid color-mix(in srgb,var(--accent) 42%,var(--line));
+          border-radius:7px;background:color-mix(in srgb,var(--accent) 7%,var(--card));padding:8px 10px;font-size:12px}
+.candhead{display:flex;align-items:center;justify-content:space-between;margin-bottom:6px}
+.candtag{font-weight:700;color:var(--accent);font-size:11px;text-transform:uppercase;letter-spacing:.04em}
+.candstatus{color:var(--sub);font-size:11px}
+.candcheck{display:inline-flex;align-items:center;gap:7px;cursor:pointer;color:var(--ink);font-weight:600}
+.candcheck input{accent-color:var(--accent)}
+.candreasons{display:flex;flex-wrap:wrap;gap:5px;margin-top:7px}
+.candre{font-size:10.5px;color:var(--sub);border:1px solid var(--line);border-radius:999px;padding:1px 6px;background:var(--bg)}
 /* 待审修正卡片(人工确认门 UI):片段内嵌,原文/AI 修正 双栏对照 + 采纳/驳回 */
 .corrcard{margin:8px 0 4px;border:1px solid color-mix(in srgb,var(--accent) 45%,var(--line));
           border-radius:8px;background:color-mix(in srgb,var(--accent) 6%,var(--card));padding:10px 12px;font-size:12.5px}

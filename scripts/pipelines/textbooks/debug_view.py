@@ -52,6 +52,23 @@ def _load_render_errors(layout: DocLayout) -> dict[int, list]:
     return by_page
 
 
+def _load_formula_candidates(layout: DocLayout) -> dict[int, list[dict]]:
+    by_page: dict[int, list[dict]] = {}
+    if not os.path.exists(layout.formula_candidates_path):
+        return by_page
+    with open(layout.formula_candidates_path, encoding="utf-8") as f:
+        for line in f:
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                c = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            by_page.setdefault(c.get("page"), []).append(c)
+    return by_page
+
+
 def _page_image_b64(doc, page: int, dpi: int, cache: dict) -> str | None:
     """内存直出 JPEG(扫描件照片压缩率高,比 PNG 小一个量级)。叠框对齐靠 res 的
     width/height 坐标系换算,与本图片自身分辨率无关,故 DPI 可独立调低省体积。"""
@@ -100,6 +117,7 @@ def build_payloads(layout: DocLayout, pdf_path: str | None, dpi: int, img_dpi: i
     manifest = cp.load_manifest(work)
     total = manifest["fingerprint"]["page_count"] if manifest else 0
     render_errors = _load_render_errors(layout)
+    candidates = _load_formula_candidates(layout)
     corrections = _attach_crop_images(load_corrections(layout.doc_work_dir), layout)
     doc = None
     if embed_images and pdf_path and os.path.exists(pdf_path):
@@ -121,7 +139,8 @@ def build_payloads(layout: DocLayout, pdf_path: str | None, dpi: int, img_dpi: i
             img = _page_image_b64(doc, i, img_dpi, img_cache) if embed_images else None
             pages.append(dp.build_page_payload(res, page=i, stem=stem, image_b64=img,
                                                page_errors=render_errors.get(i, []),
-                                               corrections=corrections))
+                                               corrections=corrections,
+                                               candidates=candidates.get(i, [])))
         return stem, pages
     finally:
         if doc is not None:

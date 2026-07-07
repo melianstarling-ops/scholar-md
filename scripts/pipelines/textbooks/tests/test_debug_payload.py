@@ -143,3 +143,18 @@ def test_payload_correction_none_when_not_provided():
     ]}
     p = build_page_payload(res, page=1, stem="s")
     assert p["blocks"][0]["correction"] is None
+
+
+def test_payload_attaches_formula_candidate_to_block_and_frag():
+    res = {"width": 100, "height": 100, "parsing_res_list": [
+        {"block_label": "display_formula", "block_content": "$$ a $$",
+         "block_order": 1, "block_bbox": [0, 0, 10, 10], "block_id": 1},
+    ]}
+    candidates = [{"page": 1, "block_id": 1, "reasons": ["katex_warning:unicodeTextInMathMode"],
+                   "candidate_id": "p0001-b0001", "estimate_basis": "bbox_proxy"}]
+
+    p = build_page_payload(res, page=1, stem="s", candidates=candidates)
+
+    assert p["candidates"] == candidates
+    assert p["blocks"][0]["candidate"]["reasons"] == ["katex_warning:unicodeTextInMathMode"]
+    assert p["frags"][0]["candidate"]["candidate_id"] == "p0001-b0001"
