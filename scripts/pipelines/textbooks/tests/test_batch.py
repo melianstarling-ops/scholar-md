@@ -337,18 +337,18 @@ def test_run_invokes_katex_scan_by_default(tmp_path, monkeypatch):
                          cp.new_manifest(str(pdf), cp.pdf_fingerprint(str(pdf)), 150, "A"))
         return 0
 
-    def fake_scan(md_path, out_path):
-        called.append((md_path, out_path))
+    def fake_scan(layout, out_path):
+        called.append((layout.stem, out_path))
         return {"errors": []}
 
-    monkeypatch.setattr(bp, "scan_katex", fake_scan)
+    monkeypatch.setattr(bp, "scan_katex_work_pages", fake_scan)
 
     rc, results = bp.run([str(d)], out=str(out_root), dpi=150, runner=fake_runner)
 
     layout = resolve_layout("A", str(out_root))
     assert rc == 0
     assert results[0]["status"] == "OK"
-    assert called == [(layout.md_path, layout.render_errors_path)]
+    assert called == [("A", layout.render_errors_path)]
 
 
 def test_run_does_not_invoke_katex_scan_when_disabled(tmp_path, monkeypatch):
@@ -368,7 +368,8 @@ def test_run_does_not_invoke_katex_scan_when_disabled(tmp_path, monkeypatch):
                          cp.new_manifest(str(pdf), cp.pdf_fingerprint(str(pdf)), 150, "A"))
         return 0
 
-    monkeypatch.setattr(bp, "scan_katex", lambda md_path, out_path: called.append((md_path, out_path)))
+    monkeypatch.setattr(bp, "scan_katex_work_pages",
+                        lambda layout, out_path: called.append((layout.stem, out_path)))
 
     rc, results = bp.run([str(d)], out=str(out_root), dpi=150, runner=fake_runner,
                          katex_scan_enabled=False)
@@ -394,7 +395,7 @@ def test_run_keeps_book_ok_when_katex_scan_node_missing(tmp_path, monkeypatch, c
                          cp.new_manifest(str(pdf), cp.pdf_fingerprint(str(pdf)), 150, "A"))
         return 0
 
-    monkeypatch.setattr(bp, "scan_katex", lambda md_path, out_path: None)
+    monkeypatch.setattr(bp, "scan_katex_work_pages", lambda layout, out_path: None)
 
     rc, results = bp.run([str(d)], out=str(out_root), dpi=150, runner=fake_runner)
 

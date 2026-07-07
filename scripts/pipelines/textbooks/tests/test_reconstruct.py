@@ -190,6 +190,22 @@ def test_sanitize_latex_leaves_sub_then_super_untouched():
     assert sanitize_latex(s) == s
 
 
+def test_sanitize_latex_collapses_adjacent_double_superscript():
+    # 同一节点连续两个上标 ^{A}^{B} 是 KaTeX 硬报错(double superscript);兜底:单行合并
+    assert sanitize_latex(r"\omega^{\prime}^{2}") == r"\omega^{\prime 2}"
+
+
+def test_sanitize_latex_collapses_triple_superscript():
+    # 连续三上标也应全部合并进一个上标(循环直到稳定)
+    assert sanitize_latex(r"x^{A}^{B}^{C}") == r"x^{A\ B\ C}"
+
+
+def test_sanitize_latex_leaves_prime_then_super_untouched():
+    # x'^{2} 本身可被 KaTeX 渲染,不是相邻 braced double superscript
+    s = r"x'^{2}"
+    assert sanitize_latex(s) == s
+
+
 def test_sanitize_latex_fixes_real_1_3a_double_subscript():
     # 真实语料 1.3a 的畸形片段:underbrace 收尾 } 后被连下标两次
     frag = (r"\underbrace{\nabla_{z}\times\overrightarrow{\mathcal{E}}_{\mathrm{t}}}"
@@ -228,6 +244,133 @@ def test_sanitize_latex_fixes_cdotd_glue():
 def test_sanitize_latex_cdotd_does_not_touch_cdot():
     # 负向边界:合法的 \cdot 不得被 \cdotd 规则误伤
     assert sanitize_latex(r"a\cdot b") == r"a\cdot b"
+
+
+def test_sanitize_latex_decodes_known_entities_inside_math():
+    assert sanitize_latex(r"\varepsilon&#x27;_{r}") == r"\varepsilon'_{r}"
+    assert sanitize_latex(r"R_{S}&lt;Z_{C}") == r"R_{S}<Z_{C}"
+    assert sanitize_latex(r"R_{L}&gt;Z_{C}") == r"R_{L}>Z_{C}"
+
+
+def test_sanitize_latex_strips_boldmath_declaration():
+    # PaddleOCR-VL emits LaTeX's text-mode \boldmath declaration inside math.
+    # KaTeX does not implement it; dropping the declaration preserves payload text.
+    assert sanitize_latex(r"\mathrm{\boldmath~G~}") == r"\mathrm{~G~}"
+
+
+def test_sanitize_latex_drops_unmatched_closing_brace():
+    # OCR sometimes appends one impossible top-level "}" after an otherwise
+    # balanced expression; removing only the unmatched closer preserves payload.
+    assert sanitize_latex(r"\mathrm{\frac{\partial}{\partial t}}}\Leftrightarrow j\omega") == \
+        r"\mathrm{\frac{\partial}{\partial t}}\Leftrightarrow j\omega"
+
+
+def test_sanitize_latex_keeps_balanced_nested_braces():
+    s = r"\hat{\mathrm{~\bf~P~}}(\hat{\mathrm{~\bf~Z~}})"
+    assert sanitize_latex(s) == s
+
+
+def test_sanitize_latex_removes_literal_dollar_markers_inside_formula():
+    # Once we are inside $$...$$, literal dollar markers from figure labels make
+    # KaTeX hard-fail. Drop the marker only, keeping the visible label text.
+    assert sanitize_latex(r"\boldsymbol{h}(t)\ $ a)") == r"\boldsymbol{h}(t)\  a)"
+
+
+def test_sanitize_latex_drops_empty_left_right_delimiters():
+    # OCR sometimes wraps an ordinary factor as \left.f(t)dt-\cdots\right.,
+    # which leaves KaTeX in a delimiter state across an array row break.
+    assert sanitize_latex(r"\frac{t^{2}}{2!}\left.f(t)d t-\cdots\right.") == \
+        r"\frac{t^{2}}{2!}f(t)d t-\cdots"
+
+
+def test_sanitize_latex_collapses_redundant_right_delimiter_before_bracket_close():
+    # OCR can split one visible bracket pair across array rows by closing with
+    # \right. and reopening with \left.; KaTeX then sees the later \right\} as
+    # unmatched. Preserve the visible delimiters and remove only that row split.
+    assert sanitize_latex(
+        r"\left[E(t)\right.}\\ &{}&{\left.-E(t)\right]\right\}"
+    ) == r"[E(t)\\ &{}&{-E(t)]\}"
+
+
+def test_sanitize_latex_closes_unbalanced_array_row_before_separator():
+    assert sanitize_latex(
+        r"\begin{array}{r c l}{}&{=}&{\displaystyle\int\limits_{0}^{\infty}{f(t)d t-s\int\limits_{0}^{\infty}{t f(t)d t}+s^{2}\int\limits_{0}^{\infty}{\frac{t^{2}}{2!}f(t)d t-\cdots}}\\ {}&{=}&{k_{0}}\end{array}"
+    ) == r"\begin{array}{r c l}{}&{=}&{\displaystyle\int\limits_{0}^{\infty}{f(t)d t-s\int\limits_{0}^{\infty}{t f(t)d t}+s^{2}\int\limits_{0}^{\infty}{\frac{t^{2}}{2!}f(t)d t-\cdots}}}\\ {}&{=}&{k_{0}}\end{array}"
+
+
+def test_sanitize_latex_downgrades_split_array_braces():
+    assert sanitize_latex(
+        r"\left\{a\right.}\\ &{}&{\left.+b\right.}\\ &{}&{c\right\}"
+    ) == r"\{a\\ &{}&{+b}\\ &{}&{c\}"
+
+
+def test_sanitize_latex_downgrades_orphan_right_delimiter_after_invisible_left():
+    assert sanitize_latex(
+        r"\left\{a\right.\\&\left.\frac{b}{c}\right\}"
+    ) == r"\left\{a\right.\\&\frac{b}{c}\}"
+
+
+def test_sanitize_latex_removes_subscript_from_spacing_command():
+    assert sanitize_latex(r"x\\&\quad_{(12)}\end{aligned}") == \
+        r"x\\&\quad{}_{(12)}\end{aligned}"
+
+
+def test_sanitize_latex_fixes_malformed_bmatrix_command():
+    assert sanitize_latex(
+        r"\mathrm{~\bmatrix{~\widehat{\mathbf{Z}}_{C}(s)\mathbf{~}}}\\ \end{bmatrix}_{i k}"
+    ) == r"\left[\widehat{\mathbf{Z}}_{C}(s)\right]_{i k}"
+
+
+def test_sanitize_latex_moves_orphan_aprime_into_integral_limit():
+    assert sanitize_latex(
+        r"a^{\prime}\\ \int\limits_{a}^{\overrightarrow{\hat{E}}}_{\mathrm{t}}^{\mathrm{inc}}\cdot d\overrightarrow{l}"
+    ) == \
+        r"\int\limits_{a}^{a^{\prime}}\overrightarrow{\hat{E}}_{\mathrm{t}}^{\mathrm{inc}}\cdot d\overrightarrow{l}"
+
+
+def test_sanitize_latex_unwraps_malformed_integral_frac_run():
+    assert sanitize_latex(
+        r"\frac{\displaystyle\int\displaystyle\int}\vec{\mathcal{H}}_{\mathrm{t}}"
+    ) == r"{\displaystyle\int\displaystyle\int}\vec{\mathcal{H}}_{\mathrm{t}}"
+
+
+def test_sanitize_latex_inserts_missing_endarray_before_right_bracket():
+    assert sanitize_latex(
+        r"\left[\begin{array}{cc}\vdots&\vdots\\a&b\right]_{T}"
+    ) == r"\left[\begin{array}{cc}\vdots&\vdots\\a&b\end{array}\right]_{T}"
+
+
+def test_sanitize_latex_expands_array_colspec_to_seen_columns():
+    assert sanitize_latex(
+        r"\begin{array}{cc}a&b&c\\d&e&f\end{array}"
+    ) == r"\begin{array}{ccc}a&b&c\\d&e&f\end{array}"
+
+
+def test_table_pass_through_sanitizes_inline_math_entities():
+    blocks = [{
+        "block_label": "table",
+        "block_content": r"<table><tr><td>$ R_{S}&lt;Z_{C} $</td><td>$ \varepsilon&#x27;_{r} $</td></tr></table>",
+        "block_order": None,
+        "block_bbox": [0, 0, 10, 10],
+        "block_id": 3,
+    }]
+    md, _ = reconstruct_markdown(blocks)
+    assert r"$ R_{S}<Z_{C} $" in md
+    assert r"$ \varepsilon'_{r} $" in md
+
+
+def test_reconstruct_prefers_adjacent_formula_number_over_embedded_tag():
+    # OCR sometimes includes a damaged \tag in the formula body and also emits a
+    # cleaner adjacent formula_number block. The final display math must have
+    # exactly one tag, otherwise KaTeX raises "Multiple \tag".
+    blocks = [
+        {"block_label": "display_formula", "block_content": r"$$ x=1\tag{8.1698} $$", "block_order": 1},
+        {"block_label": "formula_number", "block_content": "(8.169a)", "block_order": 2},
+    ]
+    md, _ = reconstruct_markdown(blocks)
+    assert r"\tag{8.1698}" not in md
+    assert md.count(r"\tag{") == 1
+    assert r"\tag{8.169a}" in md
 
 
 def test_reconstruct_fixes_1_3b_chained_atop_end_to_end():

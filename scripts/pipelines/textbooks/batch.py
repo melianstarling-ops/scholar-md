@@ -17,7 +17,7 @@ import sys
 from pathlib import Path
 
 from scripts.pipelines.textbooks import checkpoint as cp
-from scripts.pipelines.textbooks.katex_scan import scan_katex
+from scripts.pipelines.textbooks.katex_scan import scan_katex_work_pages
 from scripts.pipelines.textbooks.paths import resolve_layout
 from scripts.pipelines.textbooks.power import keep_system_awake
 from scripts.pipelines.textbooks.watchdog import run_until_done
@@ -152,7 +152,12 @@ def run(src_paths: list[str], out: str | None = None, dpi: int = cp.DEFAULT_DPI,
         if katex_scan_enabled and summary["status"] != "B":
             layout = resolve_layout(pdf.stem, str(out_root),
                                     str(work_root) if work_root else None)
-            if scan_katex(layout.md_path, layout.render_errors_path) is None:
+            try:
+                katex_result = scan_katex_work_pages(layout, layout.render_errors_path)
+            except ValueError as e:
+                print(f"[katex] 检查点不完整,跳过 {pdf.stem}: {e}")
+                katex_result = {}
+            if katex_result is None:
                 print(f"[katex] node 缺失,跳过 {pdf.stem}")
         results.append(summary)
         if summary["status"] == "B":

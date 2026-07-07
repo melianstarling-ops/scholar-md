@@ -45,6 +45,92 @@
 
   const pct = (v, t) => (v / t * 100).toFixed(3) + "%";
   const esc = (s) => (s || "").replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
+  const isBlankText = (n) => n.nodeType === Node.TEXT_NODE && !n.textContent.trim();
+  function onlyTableRoots(md) {
+    if (!/<table[\s>]/i.test(md || "")) return null;
+    const tpl = document.createElement("template");
+    tpl.innerHTML = (md || "").trim();
+    const roots = [...tpl.content.childNodes].filter((n) => !isBlankText(n));
+    return roots.length && roots.every((n) => n.nodeType === Node.ELEMENT_NODE && n.tagName === "TABLE") ? roots : null;
+  }
+  function spanAttr(el, name) {
+    const n = Number.parseInt(el.getAttribute(name) || "", 10);
+    return Number.isInteger(n) && n > 1 && n <= 99 ? ` ${name}="${n}"` : "";
+  }
+  function normalizeInlineMathPadding(md) {
+    md = md || "";
+    const isEscaped = (pos) => {
+      let n = 0;
+      for (let i = pos - 1; i >= 0 && md[i] === "\\"; i--) n++;
+      return n % 2 === 1;
+    };
+    const isWord = (ch) => ch !== undefined && /^[\w\d]$/u.test(ch);
+    const canOpen = (pos) => {
+      const prev = md[pos - 1];
+      return md[pos] === "$" && prev !== "$" && prev !== "\\" &&
+        (prev === undefined || /^\s$/u.test(prev) || !isWord(prev));
+    };
+    const canClose = (pos) => {
+      const next = md[pos + 1];
+      return md[pos] === "$" && next !== "$" &&
+        (next === undefined || /^\s$/u.test(next) || !isWord(next));
+    };
+    let out = "";
+    for (let i = 0; i < md.length; i++) {
+      if (md[i] !== "$" || md[i + 1] === "$" || isEscaped(i) || !canOpen(i)) {
+        out += md[i];
+        continue;
+      }
+      let end = -1;
+      for (let j = i + 1; j < md.length; j++) {
+        if (md[j] === "\n") break;
+        if (md[j] === "$" && md[j - 1] !== "$" && md[j + 1] !== "$" &&
+            !isEscaped(j) && canClose(j)) {
+          end = j;
+          break;
+        }
+      }
+      if (end === -1) {
+        out += md[i];
+        continue;
+      }
+      const body = md.slice(i + 1, end);
+      const trimmed = body.trim();
+      out += trimmed ? "$" + trimmed + "$" : md.slice(i, end + 1);
+      i = end;
+    }
+    return out;
+  }
+  function renderSafeTableHtml(md) {
+    const roots = onlyTableRoots(md);
+    if (!roots) return null;
+    const renderCell = (cell) => {
+      const tag = cell.tagName === "TH" ? "th" : "td";
+      const body = mdit.renderInline(normalizeInlineMathPadding((cell.textContent || "").trim()));
+      return `<${tag}${spanAttr(cell, "colspan")}${spanAttr(cell, "rowspan")}>${body}</${tag}>`;
+    };
+    const renderRow = (row) => `<tr>${[...row.children]
+      .filter((c) => c.tagName === "TH" || c.tagName === "TD")
+      .map(renderCell).join("")}</tr>`;
+    const renderRows = (holder) => [...holder.children]
+      .filter((r) => r.tagName === "TR")
+      .map(renderRow).join("");
+    const renderTable = (table) => {
+      const chunks = [...table.children].map((child) => {
+        if (child.tagName === "CAPTION") return `<caption>${mdit.renderInline((child.textContent || "").trim())}</caption>`;
+        if (child.tagName === "THEAD" || child.tagName === "TBODY" || child.tagName === "TFOOT") {
+          return `<${child.tagName.toLowerCase()}>${renderRows(child)}</${child.tagName.toLowerCase()}>`;
+        }
+        if (child.tagName === "TR") return renderRow(child);
+        return "";
+      }).join("");
+      return `<table>${chunks}</table>`;
+    };
+    return roots.map(renderTable).join("");
+  }
+  function renderMarkdownFragment(md) {
+    return renderSafeTableHtml(md) || mdit.render(normalizeInlineMathPadding(md || ""));
+  }
   function toast(m) { const t = $("toast"); t.textContent = m; t.style.opacity = 1; clearTimeout(t._h); t._h = setTimeout(() => (t.style.opacity = 0), 2200); }
   function scrollCenter(el) {
     // 手动滚"最近的可滚容器"使 el 居中——不用 el.scrollIntoView():它会连带滚动 body/webview
@@ -166,7 +252,7 @@
     document.body.appendChild(scratch);
     const rows = [];
     pages.forEach((p, i) => {
-      scratch.innerHTML = mdit.render(p.md || "");
+      scratch.innerHTML = renderMarkdownFragment(p.md || "");
       const nErr = scratch.querySelectorAll(".katex-error").length;
       const nSusp = (p.suspicions || []).length;
       const nReview = nPendingReview(p);
@@ -513,7 +599,7 @@
       const cls = "mdblk" + (sus ? " susp" : "");
       const ttl = sus ? ` title="疑似识别错误:${f.suspicions.join(" , ")}"` : "";
       const card = f.correction ? renderCorrCard(f.correction, d.page, fi) : "";
-      return `<div class="${cls}" data-bids="${bids}"${ttl}>${mdit.render(f.md || "")}${card}</div>`;
+      return `<div class="${cls}" data-bids="${bids}"${ttl}>${renderMarkdownFragment(f.md || "")}${card}</div>`;
     }).join("");
     out.querySelectorAll(".katex-error").forEach((e) => { (e.closest(".katex-display") || e.closest(".katex") || e).classList.add("err-formula"); });
     wireLink();

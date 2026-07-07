@@ -66,6 +66,21 @@ def blocks_from_render_errors(blocks: list[dict], page_errors: list[dict]) -> li
     out: list[dict] = []
     seen: set = set()
     for e in page_errors:
+        precise_ids = {int(bid) for bid in e.get("block_ids", []) if bid is not None}
+        if precise_ids:
+            for b in dfs:
+                bid = b.get("block_id")
+                if bid in seen or bid not in precise_ids:
+                    continue
+                out.append({
+                    "block_id": bid,
+                    "bbox": b.get("block_bbox"),
+                    "engine_latex": b.get("block_content") or "",
+                    "kinds": ["render_error"],
+                    "ops": [],
+                })
+                seen.add(bid)
+            continue
         head = _norm_latex(e.get("latex_head") or "")
         if not head:
             continue

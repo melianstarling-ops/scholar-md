@@ -178,6 +178,20 @@ def test_blocks_from_render_errors_no_match_returns_empty():
     assert blocks_from_render_errors(blocks, page_errors) == []
 
 
+def test_blocks_from_render_errors_prefers_precise_block_ids():
+    blocks = [
+        {"block_label": "display_formula", "block_id": 7, "block_bbox": [0, 0, 1, 1],
+         "block_content": r"$$ E=mc^2 $$"},
+        {"block_label": "display_formula", "block_id": 9, "block_bbox": [2, 0, 3, 1],
+         "block_content": r"$$ x=y+z $$"},
+    ]
+    page_errors = [{"page": 1, "mode": "display", "block_ids": [7, 8],
+                    "latex_head": "does-not-match-anything"}]
+    hits = blocks_from_render_errors(blocks, page_errors)
+    assert [h["block_id"] for h in hits] == [7]
+    assert hits[0]["kinds"] == ["render_error"]
+
+
 def test_build_repair_worklist_includes_render_error_block(tmp_path):
     # 一个启发式不命中(干净公式)但被 KaTeX 报错的块,应经 render_errors 进入 worklist
     doc = fitz.open()

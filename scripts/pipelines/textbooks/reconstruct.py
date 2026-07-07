@@ -13,12 +13,20 @@ _EMPH_WRAP_RE = re.compile(r"\$\s*((?:\\underset\{\\cdot\}\{[^{}]*\}\s*)*)\s*\$"
 # KaTeX(Typora 默认渲染器)不认、但在 $$ display 模式里语义冗余的命令。
 # 新踩坑命令追加到这里即可;清洗层(sanitize_latex)与 Tier0 lint(selfcheck) 共用此单一清单。
 # L-T16:PaddleOCR-VL 把 display 积分输出成 \int\displaylimits_{下}^{上},KaTeX 报红。
-KATEX_INCOMPAT_COMMANDS = [r"\displaylimits"]
+# L-T18:PaddleOCR-VL 会把 LaTeX 文本声明 \boldmath 放进数学环境;KaTeX 不实现。
+KATEX_INCOMPAT_COMMANDS = [r"\displaylimits", r"\boldmath"]
 # (?![a-zA-Z]) 负向边界:删 \displaylimits 不误伤前缀相近的 \displaystyle
 _KATEX_SUB = [(re.compile(re.escape(cmd) + r"(?![a-zA-Z])"), "") for cmd in KATEX_INCOMPAT_COMMANDS]
 
 _PASSTHROUGH_UNORDERED_LABELS = {"table", "footnote", "figure_title"}
 _KNOWN_NOISE_LABELS = {"header", "number", "header_image"}
+_LATEX_ENTITY_REPL = {
+    "&#x27;": "'",
+    "&#39;": "'",
+    "&lt;": "<",
+    "&gt;": ">",
+}
+_TAG_RE = re.compile(r"\\tag\{[^{}]*\}")
 
 
 def _match_braced(s: str, i: int) -> int:
@@ -77,6 +85,139 @@ def _collapse_double_subscript(s: str) -> str:
     return "".join(out)
 
 
+def _collapse_double_superscript(s: str) -> str:
+    r"""合并同一节点上相邻的多个上标 ^{A}^{B}(…) → ^{A\ B(…)}。
+
+    与双下标清洗同样只处理 braced 形态,用于消除 KaTeX double superscript 硬报错;
+    `x'^{2}` 这类合法 prime+上标不触发。"""
+    out: list[str] = []
+    i, n = 0, len(s)
+    while i < n:
+        if s[i] == "^" and i + 1 < n and s[i + 1] == "{":
+            end = _match_braced(s, i + 1)
+            if end == -1:
+                out.append(s[i])
+                i += 1
+                continue
+            inners = [s[i + 2:end - 1]]
+            j = end
+            while True:
+                k = j
+                while k < n and s[k] in " \t":
+                    k += 1
+                if not (k < n and s[k] == "^" and k + 1 < n and s[k + 1] == "{"):
+                    break
+                nxt = _match_braced(s, k + 1)
+                if nxt == -1:
+                    break
+                inners.append(s[k + 2:nxt - 1])
+                j = nxt
+            if len(inners) > 1:
+                joiner = " " if all(part in (r"\prime", r"\prime\prime") or part.isdigit()
+                                    for part in inners) else r"\ "
+                out.append("^{" + joiner.join(inners) + "}")
+                i = j
+            else:
+                out.append(s[i:end])
+                i = end
+            continue
+        out.append(s[i])
+        i += 1
+    return "".join(out)
+
+
+def _decode_latex_entities(s: str) -> str:
+    for src, dst in _LATEX_ENTITY_REPL.items():
+        s = s.replace(src, dst)
+    return s
+
+
+def _strip_latex_tags(s: str) -> str:
+    return _TAG_RE.sub("", s).strip()
+
+
+def _drop_unmatched_closing_braces(s: str) -> str:
+    """Drop only top-level closing braces that cannot be paired in math mode."""
+    out: list[str] = []
+    depth = 0
+    for i, c in enumerate(s):
+        if c in "{}" and _is_escaped(s, i):
+            out.append(c)
+        elif c == "{":
+            depth += 1
+            out.append(c)
+        elif c == "}":
+            if depth > 0:
+                depth -= 1
+                out.append(c)
+        else:
+            out.append(c)
+    return "".join(out)
+
+
+def _drop_unescaped_dollar_tokens(s: str) -> str:
+    """Inside an extracted math body, unescaped '$' is never a delimiter."""
+    return "".join(c for i, c in enumerate(s) if c != "$" or _is_escaped(s, i))
+
+
+def _is_escaped(s: str, pos: int) -> bool:
+    n = 0
+    i = pos - 1
+    while i >= 0 and s[i] == "\\":
+        n += 1
+        i -= 1
+    return n % 2 == 1
+
+
+def _find_display_math_end(s: str, start: int) -> int:
+    i = start
+    while i < len(s) - 1:
+        if s.startswith("$$", i) and not _is_escaped(s, i):
+            return i
+        i += 1
+    return -1
+
+
+def _find_inline_math_end(s: str, start: int) -> int:
+    i = start
+    while i < len(s):
+        if s[i] == "$" and not _is_escaped(s, i):
+            if (i > 0 and s[i - 1] == "$") or (i + 1 < len(s) and s[i + 1] == "$"):
+                return -1
+            return i
+        i += 1
+    return -1
+
+
+def _sanitize_markdown_math_spans(text: str) -> str:
+    """对普通 Markdown/HTML 片段里的 $...$/$$...$$ 公式应用同一 LaTeX 清洗。
+
+    表格块来自 OCR 的 raw HTML,但其中仍混有 Markdown math。只清洗 math span 内部,
+    避免改写 HTML 标签或正文实体。"""
+    out: list[str] = []
+    i = 0
+    n = len(text)
+    while i < n:
+        if text[i] == "$" and not _is_escaped(text, i):
+            display = i + 1 < n and text[i + 1] == "$"
+            if not display and ((i > 0 and text[i - 1] == "$") or (i + 1 < n and text[i + 1] == "$")):
+                out.append(text[i])
+                i += 1
+                continue
+            delim = "$$" if display else "$"
+            start = i + len(delim)
+            end = _find_display_math_end(text, start) if display else _find_inline_math_end(text, start)
+            if end != -1:
+                out.append(delim)
+                out.append(sanitize_latex(text[start:end]))
+                out.append(delim)
+                i = end + len(delim)
+                continue
+        out.append(text[i])
+        i += 1
+    return "".join(out)
+
+
 def _split_top_level_atop(inner: str) -> list[str]:
     r"""按 brace-depth 0 处的 \atop(排除 \atopwithdelims)切分 inner。"""
     parts: list[str] = []
@@ -131,15 +272,185 @@ def _collapse_chained_atop(s: str) -> str:
 # OCR 把 \cdot d(点积 + 微分 d)粘成未定义控制序列 \cdotd(L-T17,p48 语料实测)。
 # (?![a-zA-Z]) 负向边界:只改 \cdotd 本身,不误伤合法 \cdot。
 _CDOTD_RE = re.compile(r"\\cdotd(?![a-zA-Z])")
+_EMPTY_LEFT_RIGHT_PAIR_RE = re.compile(r"\\left\.((?:(?!\\left|\\right).)*?)\\right\.", re.DOTALL)
+_SPLIT_EMPTY_DELIM_RE = re.compile(r"\\right\.(\s*}\s*\\\\\s*&\{\}&\{)\\left\.")
+_RIGHT_DOT_BEFORE_CELL_END_RE = re.compile(r"\\right\.(?=\s*})")
+_MOMENT_ROW_MISSING_CLOSE_RE = re.compile(
+    r"(\\frac\{t\^\{2\}\}\{2!\}f\(t\)d t-\\cdots)}}(\\\\\s+\{\}&\{=\})"
+)
+_PSEUDO_BMATRIX_RE = re.compile(
+    r"\\mathrm\{~\\bmatrix\{~(?P<body>.*?)\\mathbf\{~\}\}\}"
+    r"\s*\\\\\s*\\end\{bmatrix\}(?P<script>_\{[^{}]*\})",
+    re.DOTALL,
+)
+_INTEGRAL_FRAC_RUN_RE = re.compile(
+    r"\\frac\{(?P<body>(?:\\displaystyle\\int)+)\}(?=\\[A-Za-z])"
+)
+_APRIME_INTEGRAL_SPLIT_RE = re.compile(
+    r"a\^\{\\prime\}\\\\\s*\\int\\limits_\{a\}"
+    r"\^\{\\overrightarrow\{\\hat\{E\}\}\}_\{\\mathrm\{t\}\}\^\{\\mathrm\{inc\}\}"
+)
+_SPACING_SCRIPT_RE = re.compile(r"(\\(?:quad|qquad))_(\{[^{}]*\})")
+_MISSING_ENDARRAY_BEFORE_RIGHT_RE = re.compile(
+    r"(\\left\[\\begin\{array\}\{[^{}]*\}(?:(?!\\end\{array\}).)*?)(\\right\](?=\}?_\{))",
+    re.DOTALL,
+)
+_ARRAY_RE = re.compile(
+    r"\\begin\{array\}\{(?P<spec>[^{}]*)\}(?P<body>(?:(?!\\begin\{array\}).)*?)\\end\{array\}",
+    re.DOTALL,
+)
+
+
+def _drop_empty_left_right_delimiters(s: str) -> str:
+    """Remove OCR-only invisible delimiter pairs that make KaTeX lose balance."""
+    had_split = _SPLIT_EMPTY_DELIM_RE.search(s) is not None
+    if had_split:
+        s = _SPLIT_EMPTY_DELIM_RE.sub(r"\1", s)
+        s = _RIGHT_DOT_BEFORE_CELL_END_RE.sub("", s)
+        # Dynamic delimiters cannot cross the array-cell group boundary that
+        # the OCR row split introduced. Plain delimiters keep visible content.
+        s = s.replace(r"\left[", "[")
+        s = s.replace(r"\right]", "]")
+        s = s.replace(r"\left\{", r"\{")
+        s = s.replace(r"\right\}", r"\}")
+    prev = None
+    while prev != s:
+        prev = s
+        s = _EMPTY_LEFT_RIGHT_PAIR_RE.sub(r"\1", s)
+    return s
+
+
+def _repair_pseudo_bmatrix(s: str) -> str:
+    r"""Repair OCR-only ``\bmatrix{...}\end{bmatrix}`` pseudo syntax."""
+    return _PSEUDO_BMATRIX_RE.sub(
+        lambda m: r"\left[" + m.group("body") + r"\right]" + m.group("script"),
+        s,
+    )
+
+
+def _unwrap_malformed_integral_frac_runs(s: str) -> str:
+    """Paddle sometimes emits one-argument ``\frac{integral-run}`` chunks."""
+    return _INTEGRAL_FRAC_RUN_RE.sub(lambda m: "{" + m.group("body") + "}", s)
+
+
+def _repair_orphan_aprime_integral_limits(s: str) -> str:
+    """Repair the observed split ``a'`` upper-limit row before an E-field integral."""
+    return _APRIME_INTEGRAL_SPLIT_RE.sub(
+        r"\\int\\limits_{a}^{a^{\\prime}}\\overrightarrow{\\hat{E}}_{\\mathrm{t}}^{\\mathrm{inc}}",
+        s,
+    )
+
+
+def _fix_spacing_command_scripts(s: str) -> str:
+    """Give scripts attached to spacing commands a legal empty-group base."""
+    return _SPACING_SCRIPT_RE.sub(r"\1{}_\2", s)
+
+
+def _insert_missing_endarray_before_right(s: str) -> str:
+    r"""OCR sometimes closes ``\left[`` before closing the nested array."""
+    prev = None
+    while prev != s:
+        prev = s
+        s = _MISSING_ENDARRAY_BEFORE_RIGHT_RE.sub(r"\1\\end{array}\2", s)
+    return s
+
+
+def _expand_array_colspecs(s: str) -> str:
+    """Pad underspecified simple array column specs to the widest observed row."""
+    def _fix(m: re.Match) -> str:
+        spec = m.group("spec")
+        body = m.group("body")
+        align = [c for c in spec if c in "lcr"]
+        if not align:
+            return m.group(0)
+        rows = re.split(r"(?<!\\)\\\\", body)
+        needed = max((row.count("&") + 1 for row in rows), default=len(align))
+        if needed <= len(align):
+            return m.group(0)
+        fixed = "".join(align) + align[-1] * (needed - len(align))
+        return r"\begin{array}{" + fixed + "}" + body + r"\end{array}"
+
+    prev = None
+    while prev != s:
+        prev = s
+        s = _ARRAY_RE.sub(_fix, s)
+    return s
+
+
+def _downgrade_split_invisible_delimiters(s: str) -> str:
+    """Downgrade row-split invisible delimiters to fixed visible delimiters."""
+    if r"\left" not in s and r"\right" not in s:
+        return s
+
+    def _delim_end(pos: int) -> tuple[int, str]:
+        if pos >= len(s):
+            return pos, ""
+        if s[pos] == "\\" and pos + 1 < len(s):
+            return pos + 2, s[pos:pos + 2]
+        return pos + 1, s[pos]
+
+    repl: list[tuple[int, int, str]] = []
+    stack: list[tuple[int, int, str]] = []
+    i = 0
+    while i < len(s):
+        if s.startswith(r"\left", i):
+            end, delim = _delim_end(i + len(r"\left"))
+            if delim == ".":
+                repl.append((i, end, ""))
+            else:
+                stack.append((i, end, delim))
+            i = end
+            continue
+        if s.startswith(r"\right", i):
+            end, delim = _delim_end(i + len(r"\right"))
+            if stack:
+                stack.pop()
+            else:
+                repl.append((i, end, "" if delim == "." else delim))
+            i = end
+            continue
+        i += 1
+
+    for start, end, delim in stack:
+        repl.append((start, end, "" if delim == "." else delim))
+    if not repl:
+        return s
+    repl.sort()
+    out: list[str] = []
+    last = 0
+    for start, end, text in repl:
+        out.append(s[last:start])
+        out.append(text)
+        last = end
+    out.append(s[last:])
+    return "".join(out)
+
+
+def _close_known_moment_row(s: str) -> str:
+    """Repair the p477 moment-expansion row after empty delimiter cleanup."""
+    return _MOMENT_ROW_MISSING_CLOSE_RE.sub(r"\1}}}\2", s)
 
 
 def sanitize_latex(s: str) -> str:
-    r"""引擎方言清洗:删冗余命令 + 合并非法相邻双下标 + 链式 atop→substack + \cdotd 拆合。"""
+    r"""引擎方言清洗:删冗余命令 + 合并非法相邻双脚本 + 链式 atop→substack + \cdotd 拆合。"""
+    s = _decode_latex_entities(s)
+    s = _drop_unescaped_dollar_tokens(s)
+    s = _repair_pseudo_bmatrix(s)
+    s = _unwrap_malformed_integral_frac_runs(s)
+    s = _repair_orphan_aprime_integral_limits(s)
+    s = _fix_spacing_command_scripts(s)
     for pat, repl in _KATEX_SUB:
         s = pat.sub(repl, s)
     s = _CDOTD_RE.sub(r"\\cdot d", s)
     s = _collapse_chained_atop(s)
     s = _collapse_double_subscript(s)
+    s = _collapse_double_superscript(s)
+    s = _insert_missing_endarray_before_right(s)
+    s = _expand_array_colspecs(s)
+    s = _drop_empty_left_right_delimiters(s)
+    s = _downgrade_split_invisible_delimiters(s)
+    s = _close_known_moment_row(s)
+    s = _drop_unmatched_closing_braces(s)
     return s
 
 
@@ -196,7 +507,7 @@ def _render_ordered(ordered: list[dict]) -> list[dict]:
         if label == "paragraph_title":
             emit(y0, [bid], f"## {content}")
         elif label in ("text", "abstract", "reference_content"):
-            emit(y0, [bid], restore_emphasis_dots(content))
+            emit(y0, [bid], _sanitize_markdown_math_spans(restore_emphasis_dots(content)))
         elif label == "content":
             emit(y0, [bid], _hard_breaks(content))
         elif label == "algorithm":
@@ -215,6 +526,7 @@ def _render_ordered(ordered: list[dict]) -> list[dict]:
             if nxt and nxt.get("block_label") == "formula_number":
                 m = _NUM_RE.match((nxt.get("block_content") or "").strip())
                 tag = m.group(1) if m else (nxt.get("block_content") or "").strip()
+                body = _strip_latex_tags(body)
                 emit(y0, [bid, nxt.get("block_id")], f"$$ {body} \\tag{{{tag}}} $$")
                 i += 1                      # 吸收编号块
             else:
@@ -265,7 +577,7 @@ def _render_unordered(blocks: list[dict], stem: str | None,
             if not content:
                 continue
             extras.append({"y0": y0, "seq": seq, "bids": [block_id],
-                           "md": restore_emphasis_dots(content)})
+                           "md": _sanitize_markdown_math_spans(restore_emphasis_dots(content))})
         elif label in _KNOWN_NOISE_LABELS:
             continue
         elif content:

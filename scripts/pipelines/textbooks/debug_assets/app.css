@@ -145,6 +145,10 @@ main{flex:1;display:flex;min-height:0}
 #mdOut h1,#mdOut h2{font-size:20px;border-bottom:1px solid var(--line);padding-bottom:6px;margin:24px 0 12px}
 #mdOut p{margin:10px 0}
 #mdOut img{max-width:100%;border:1px solid var(--line);border-radius:6px;background:#fff}
+#mdOut table{width:100%;border-collapse:collapse;margin:10px 0;display:block;overflow-x:auto}
+#mdOut th,#mdOut td{border:1px solid var(--line);padding:5px 8px;vertical-align:top}
+#mdOut th{background:color-mix(in srgb,var(--sub) 12%,transparent);font-weight:600}
+#mdOut caption{caption-side:top;color:var(--sub);font-size:12px;text-align:left;margin-bottom:4px}
 #mdOut pre{background:var(--bg);padding:12px 14px;border-radius:8px;overflow-x:auto;border:1px solid var(--line)}
 #mdOut code{background:color-mix(in srgb,var(--sub) 18%,transparent);padding:1px 5px;border-radius:4px}
 #mdOut pre code{background:none;padding:0}

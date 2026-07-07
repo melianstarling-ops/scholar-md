@@ -13,27 +13,69 @@ function arg(name, def = null) {
   return i !== -1 && i + 1 < process.argv.length ? process.argv[i + 1] : def;
 }
 
+function isEscaped(md, pos) {
+  let n = 0;
+  for (let i = pos - 1; i >= 0 && md[i] === '\\'; i--) n++;
+  return n % 2 === 1;
+}
+
+function isMarkdownBoundary(md, pos) {
+  if (md.startsWith('<!--', pos)) return true;
+  if (md.startsWith('\n\n', pos)) return true;
+  if (md.startsWith('![', pos)) return true;
+  if (md.startsWith('\n![', pos)) return true;
+  return false;
+}
+
+function findDisplayEnd(md, start) {
+  for (let i = start; i < md.length - 1; i++) {
+    if (md.startsWith('$$', i) && !isEscaped(md, i)) return i;
+  }
+  return -1;
+}
+
+function findInlineEnd(md, start) {
+  for (let i = start; i < md.length; i++) {
+    if (isMarkdownBoundary(md, i)) return -1;
+    if (md[i] !== '$' || isEscaped(md, i)) continue;
+    if (md[i - 1] === '$' || md[i + 1] === '$') return -1;
+    return i;
+  }
+  return -1;
+}
+
 // 左到右分词:先认 $$ 再认 $;\$ 转义不当分隔符;<!-- page: N --> 更新当前页。
 export function extractMath(md) {
   const out = [];
-  let i = 0, page = null;
+  let i = 0, page = null, block_ids = [];
   while (i < md.length) {
     if (md.startsWith('<!-- page:', i)) {
       const end = md.indexOf('-->', i);
       if (end !== -1) {
-        const m = md.slice(i, end).match(/page:\s*(\d+)/);
+        const comment = md.slice(i, end);
+        const m = comment.match(/page:\s*(\d+)/);
         if (m) page = parseInt(m[1], 10);
+        const b = comment.match(/block_ids:\s*([0-9,\s]+)/);
+        block_ids = b ? b[1].split(',').map((x) => parseInt(x.trim(), 10)).filter((x) => !Number.isNaN(x)) : [];
         i = end + 3;
         continue;
       }
     }
-    if (md[i] === '$' && md[i - 1] !== '\\') {
+    if (md[i] === '$' && !isEscaped(md, i)) {
       const display = md[i + 1] === '$';
       const delim = display ? '$$' : '$';
       const start = i + delim.length;
-      const end = md.indexOf(delim, start);
-      if (end === -1) { i++; continue; }
-      out.push({ page, mode: display ? 'display' : 'inline', latex: md.slice(start, end).trim() });
+      const end = display ? findDisplayEnd(md, start) : findInlineEnd(md, start);
+      if (end === -1) { i += display ? 2 : 1; continue; }
+      const latex = md.slice(start, end).trim();
+      const tag = latex.match(/\\tag\{([^}]*)\}/);
+      out.push({
+        page,
+        block_ids,
+        formula_number: tag ? tag[1] : null,
+        mode: display ? 'display' : 'inline',
+        latex,
+      });
       i = end + delim.length;
       continue;
     }
@@ -53,6 +95,7 @@ export function scan(md) {
       if (!seen.has(key)) {
         seen.add(key);
         warnings.push({ index, page: f.page, mode: f.mode, code,
+          block_ids: f.block_ids, formula_number: f.formula_number,
           message: String(msg).split('\n')[0], latex_head: f.latex.slice(0, 90) });
       }
       return 'warn';       // 不升级为 error,保持默认渲染行为
@@ -62,6 +105,7 @@ export function scan(md) {
     } catch (e) {
       errors.push({
         index, page: f.page, mode: f.mode,
+        block_ids: f.block_ids, formula_number: f.formula_number,
         error: String(e.message).split('\n')[0],
         latex_head: f.latex.slice(0, 90),
       });

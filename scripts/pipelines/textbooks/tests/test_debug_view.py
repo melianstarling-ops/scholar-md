@@ -1,5 +1,8 @@
 import json
 import os
+import re
+import shutil
+import subprocess
 
 from scripts.pipelines.textbooks import checkpoint as cp
 from scripts.pipelines.textbooks import debug_view as dv
@@ -288,3 +291,57 @@ def test_cli_static_debug_html_writes_to_process_root_not_deliverables(tmp_path,
     assert layout.debug_html_path.startswith(layout.doc_work_dir)
     assert not os.path.exists(os.path.join(layout.doc_deliverable_dir,
                                            f"{layout.stem}_debug.html"))
+
+
+def test_debug_asset_renders_table_html_without_enabling_global_html():
+    app_js = open(os.path.join(dv.ASSETS, "app.js"), encoding="utf-8").read()
+
+    assert "window.markdownit({ html: false" in app_js
+    assert "function renderSafeTableHtml" in app_js
+    assert "function renderMarkdownFragment" in app_js
+    assert "renderMarkdownFragment(f.md || \"\")" in app_js
+
+
+def test_debug_asset_normalizes_inline_math_delimiter_padding():
+    app_js = open(os.path.join(dv.ASSETS, "app.js"), encoding="utf-8").read()
+
+    assert "function normalizeInlineMathPadding" in app_js
+    assert "const trimmed = body.trim()" in app_js
+    assert "mdit.render(normalizeInlineMathPadding(md || \"\"))" in app_js
+
+
+def test_debug_asset_inline_math_padding_does_not_swallow_prose_between_formulas(tmp_path):
+    node = shutil.which("node")
+    if not node:
+        import pytest
+        pytest.skip("node not available")
+    app_js = open(os.path.join(dv.ASSETS, "app.js"), encoding="utf-8").read()
+    match = re.search(
+        r"function normalizeInlineMathPadding\(md\) \{\n(?P<body>.*?)\n  \}",
+        app_js,
+        re.S,
+    )
+    assert match
+    probe = tmp_path / "probe.mjs"
+    expected = (
+        r"then (12.76) represent $n$ uncoupled sets of two-conductor lines, "
+        r"each with incident field excitation through elements of the vectors "
+        r"$\mathbf{V}_{\mathrm{Fm}}(z,t)$ and $\mathbf{I}_{\mathrm{Fm}}(z,t)$. Once"
+    )
+    probe.write_text(
+        "function normalizeInlineMathPadding(md) {\n"
+        f"{match.group('body')}\n"
+        "}\n"
+        f"const md = String.raw`{expected}`;\n"
+        "console.log(normalizeInlineMathPadding(md));\n",
+        encoding="utf-8",
+    )
+
+    proc = subprocess.run([node, str(probe)], capture_output=True, text=True,
+                          encoding="utf-8", errors="replace", timeout=10)
+
+    assert proc.returncode == 0, proc.stderr
+    assert proc.stdout.strip() == expected
+    assert "$n$uncoupled" not in proc.stdout
+    assert "vectors$\\mathbf{V}" not in proc.stdout
+    assert "$and$" not in proc.stdout

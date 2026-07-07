@@ -35,6 +35,9 @@ TODO.md
 03_Output/
 04_Docs/
 
+# --- 私有:教科书 PDF 汇总副本(大容量源文件,不入 git) ---
+docs/textbook_pdfs/
+
 # --- 私有:调试视图产物(内嵌文档页面图;所有者指定默认落 scripts/pipelines/patents/,
 #     故全局拦截,任何位置都不入 git) ---
 *_debug.html
