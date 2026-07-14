@@ -35,6 +35,16 @@ _TOKEN = re.compile(r"\\[a-zA-Z]+|[a-zA-Z0-9]+|[^\s\\a-zA-Z0-9]")
 # 跟长度比阈值锁死;真正的幻觉(换成一个不相干的庞然大物)绝对变化量必大。
 _MAX_ABS_DELTA = 12
 
+# _MAX_ABS_DELTA 单独存在时留了个漏洞:重合度公式 overlap = |new∩old|/|old|
+# 分母是原文 token 数,原文只有 1~3 个 token 时分母极小,新公式只要还带着
+# 原来那个符号,重合度就轻易 >= min_overlap,长度比闸又被 abs_delta 豁免,
+# 于是短公式场景下"捏造"能全须全尾地滑过去(如 "x" -> "x^2+x-y+1")。
+# 真正区分"合法增补"(补下标/补重音/补撇号)与"凭空捏造"的信号是新引入
+# 了多少个原文里没有的不同符号:补下标 "x"->"x_i" 只新增 2 个 token,
+# 捏造 "x"->"x^2+x-y+1" 新增 6 个且含全新变量。预算下限设 3,覆盖补下标
+# /补重音/补撇号这类最常见的合法增补(至多需要 3 个新 token)。
+_MAX_NEW_TOKEN_FLOOR = 3
+
 
 @dataclass(frozen=True)
 class GateRejection:
@@ -102,6 +112,19 @@ def similarity_gate(result: AgentResult, engine_latex: str, *,
     if overlap < min_overlap:
         return GateRejection(result.candidate_id, "similarity",
                              f"符号重合度 {overlap:.2f} < {min_overlap},疑为幻觉或候选串位")
+
+    # 新符号预算:挡住"短公式因分母小而重合度虚高"的捏造漏洞,见
+    # _MAX_NEW_TOKEN_FLOOR 注释。这道检查会连带拒收"引擎乱码被模型救回"
+    # 这类大改写(如 "0 infty e x2 dx" -> "\int_0^\infty e^{-x^2}\,dx")——
+    # 有意为之:字符串层面无法区分"乱码被救回"与"凭空捏造",按"绝不改
+    # 坏"优先于"尽量多修"的第一原则,这类条目该拒收进 uncertain 报告,
+    # 而不是被悄悄自动应用。
+    new_only = new_t - old_t
+    budget = max(_MAX_NEW_TOKEN_FLOOR, len(old_t))
+    if len(new_only) > budget:
+        return GateRejection(result.candidate_id, "similarity",
+                             f"引入 {len(new_only)} 个原文没有的新符号,超出预算 {budget},"
+                             f"疑为捏造而非修补")
     return None
 
 

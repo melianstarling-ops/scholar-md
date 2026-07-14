@@ -97,6 +97,43 @@ def test_similarity_gate_passes_when_engine_latex_empty():
     assert similarity_gate(_r("x_i"), "") is None
 
 
+@pytest.mark.parametrize("engine,new,why", [
+    ("x", "x^2+x-y+1", "凭空捏造多项式,变量全变"),
+    ("x+1", "x+y+z+w+2", "凭空捏造,引入 y/z/w 三个全新变量"),
+    ("n!", "n!=n*(n-1)!*2", "凭空捏造递推式"),
+])
+def test_similarity_gate_new_token_budget_rejects_fabrication(engine, new, why):
+    """回归:_MAX_ABS_DELTA 豁免 + 短公式分母小 → 重合度虚高,曾让这些捏造
+    滑过闸门。新符号预算必须拦下。"""
+    rej = similarity_gate(_r(new), engine)
+    assert rej is not None, why
+    assert rej.gate == "similarity"
+
+
+@pytest.mark.parametrize("engine,new", [
+    ("x", "x_i"),                 # 补下标
+    ("v", "\\vec{v}"),            # 补重音
+    ("a", "\\hat a"),             # 补重音
+    ("r_{nf} + 1", "r_{hf} + 1"), # 改下标
+    ("a+b+c", "a-b-c"),           # 符号反转
+    ("f(x)", "f'(x)"),            # 补撇号
+])
+def test_similarity_gate_new_token_budget_does_not_regress_legit_repairs(engine, new):
+    """新符号预算不该误伤真实的合法修补(补下标/补重音/改符号)。"""
+    assert similarity_gate(_r(new), engine) is None
+
+
+def test_similarity_gate_accepted_tradeoff_rejects_garbled_engine_rescue():
+    """已知且接受的代价(非 bug):引擎输出严重乱码、模型给出真值救回的场景,
+    也会被新符号预算拒收。字符串层面无法区分"乱码被救回"与"凭空捏造",
+    按"绝不改坏"优先于"尽量多修"的第一原则,这里选择拒收——该条目会
+    进 uncertain 报告让所有者人工确认,而不是被自动悄悄写进教材。不要为
+    了放行这类大改写而放宽预算。"""
+    rej = similarity_gate(_r("\\int_{0}^{\\infty} e^{-x^2}\\,dx"), "0 infty e x2 dx")
+    assert rej is not None
+    assert rej.gate == "similarity"
+
+
 @pytest.mark.parametrize("n,total,tripped", [
     (7, 10, True),     # 70% > 60%
     (6, 10, False),    # 60% 不算超
