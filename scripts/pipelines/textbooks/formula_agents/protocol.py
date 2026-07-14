@@ -58,37 +58,86 @@ def normalize_latex(text: str) -> str:
 
 
 def _extract_json_array(stdout: str) -> list:
-    """取 stdout 里最后一个完整 JSON 数组(容忍模型前置叙述/工具日志)。"""
+    """单遍顺序扫描 stdout,取最后一个顶层 JSON 数组(容忍模型前置叙述/工具日志)。
+
+    只有当扫描头不处于任何字符串内部时,遇到的 `[` 才会被当作候选顶层数组的
+    起点——字符串内部的 `[`(例如 LaTeX 区间记号 `x \\in [0, 1]`)不会被误当
+    成起点,不会导致真数组被漏检或误判。
+    每个候选起点会一路消费到与之配对的 `]` 为止(按括号深度匹配);无论该
+    候选区间是否能成功 json.loads,下一个候选起点都从这段已消费区域*之后*
+    继续找,绝不会从消费区域内部的嵌套 `[` 重新起扫——因此额外字段里携带的
+    "看起来合规"的嵌套数组不会顶替/劫持真正的顶层数组。
+    """
     text = stdout or ""
+    n = len(text)
     found: list[list] = []
-    for start in (m.start() for m in re.finditer(r"\[", text)):
-        depth, in_str, esc = 0, False, False
-        for i in range(start, len(text)):
-            ch = text[i]
-            if in_str:
-                if esc:
-                    esc = False
-                elif ch == "\\":
-                    esc = True
-                elif ch == '"':
-                    in_str = False
-                continue
-            if ch == '"':
-                in_str = True
-            elif ch == "[":
+    i = 0
+    in_str, esc = False, False
+    while i < n:
+        ch = text[i]
+        if in_str:
+            if esc:
+                esc = False
+            elif ch == "\\":
+                esc = True
+            elif ch == '"':
+                in_str = False
+            i += 1
+            continue
+        if ch == '"':
+            in_str = True
+            i += 1
+            continue
+        if ch != "[":
+            i += 1
+            continue
+
+        # 候选顶层数组起点:此处确定不在任何字符串内部。
+        start = i
+        depth = 0
+        j = i
+        in_str2 = esc2 = False
+        end = None
+        while j < n:
+            c = text[j]
+            if in_str2:
+                if esc2:
+                    esc2 = False
+                elif c == "\\":
+                    esc2 = True
+                elif c == '"':
+                    in_str2 = False
+            elif c == '"':
+                in_str2 = True
+            elif c == "[":
                 depth += 1
-            elif ch == "]":
+            elif c == "]":
                 depth -= 1
                 if depth == 0:
-                    try:
-                        arr = json.loads(text[start:i + 1])
-                    except json.JSONDecodeError:
-                        break
-                    if isinstance(arr, list):
-                        found.append(arr)
+                    end = j
                     break
+            j += 1
+
+        if end is None:
+            # 这个 `[` 一路扫到文本末尾都没配对上 `]`,不是完整数组;
+            # 从下一个字符继续找(不算已消费,允许其后仍有独立的合法数组)。
+            i = start + 1
+            continue
+
+        try:
+            arr = json.loads(text[start:end + 1])
+        except json.JSONDecodeError:
+            arr = None
+        if isinstance(arr, list):
+            found.append(arr)
+        # 无论本次是否解析成功,都从已消费区域之后继续——绝不再深入其内部
+        # 的嵌套 `[` 重新起扫。
+        i = end + 1
+
     if not found:
-        raise ProtocolError("stdout 中找不到可解析的 JSON 数组")
+        raise ProtocolError(
+            "stdout 中找不到可解析的顶层 JSON 数组"
+            "(已排除字符串内部的 `[` 与嵌套数组,只在顶层扫描)")
     return found[-1]
 
 
@@ -97,9 +146,9 @@ def validate_agent_payload(stdout: str, expected_ids: list[str]) -> list[AgentRe
     arr = _extract_json_array(stdout)
 
     items: list[dict] = []
-    for it in arr:
+    for idx, it in enumerate(arr):
         if not isinstance(it, dict):
-            raise ProtocolError(f"数组元素不是对象: {it!r}")
+            raise ProtocolError(f"顶层数组第 {idx} 项不是对象(须为 dict): {it!r}")
         items.append(it)
 
     got = [str(it.get("candidate_id", "")) for it in items]
