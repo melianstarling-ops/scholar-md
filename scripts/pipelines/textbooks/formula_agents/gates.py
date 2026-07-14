@@ -30,6 +30,11 @@ _ERROR_PHRASES = (
 
 _TOKEN = re.compile(r"\\[a-zA-Z]+|[a-zA-Z0-9]+|[^\s\\a-zA-Z0-9]")
 
+# 短公式的长度比是坏判据:"x" -> "x_i" 长度比 3.0,却是最常见的合法补下标。
+# 长度比检查只在绝对变化量也大时才生效,避免把"改一个字符"的合法修补
+# 跟长度比阈值锁死;真正的幻觉(换成一个不相干的庞然大物)绝对变化量必大。
+_MAX_ABS_DELTA = 12
+
 
 @dataclass(frozen=True)
 class GateRejection:
@@ -60,10 +65,18 @@ def degenerate_gate(result: AgentResult) -> GateRejection | None:
 
 def similarity_gate(result: AgentResult, engine_latex: str, *,
                     min_ratio: float = 0.5, max_ratio: float = 2.0,
-                    min_overlap: float = 0.3) -> GateRejection | None:
+                    min_overlap: float = 0.5) -> GateRejection | None:
     """闸 2:公式修正应是"修补"而非"换一个公式"。返回 None = 通过。
 
     挡的是: 模型把 A 候选的答案填进 B 候选;模型凭空编了个不相干的公式。
+
+    长度比检查只在绝对变化量也大(> _MAX_ABS_DELTA)时才生效,见该常量注释。
+
+    min_overlap 默认 0.5(而非更宽松的 0.3):挡的是退化复读这类幻觉——
+    比如把 "x = y + z" 复读成 "x = x = x",归一化后长度比 1.0 能骗过长度
+    闸,旧阈值 0.3 下符号重合度 0.4 也能骗过重合度闸,而这种退化复读是
+    合法 LaTeX,下游 KaTeX 闸也拦不住,必须在这里拦。0.5 经验证不会误伤
+    改下标/符号反转/补撇号等真实修复(重合度普遍 ≥0.75)。
     """
     if result.verdict not in _MUTATING:
         return None
@@ -76,9 +89,11 @@ def similarity_gate(result: AgentResult, engine_latex: str, *,
         return GateRejection(result.candidate_id, "similarity", "建议 latex 归一化后为空")
 
     ratio = len(new) / len(old)
-    if not (min_ratio <= ratio <= max_ratio):
+    abs_delta = abs(len(new) - len(old))
+    if not (min_ratio <= ratio <= max_ratio) and abs_delta > _MAX_ABS_DELTA:
         return GateRejection(result.candidate_id, "similarity",
-                             f"长度比 {ratio:.2f} 超出 [{min_ratio}, {max_ratio}]")
+                             f"长度比 {ratio:.2f} 超出 [{min_ratio}, {max_ratio}] "
+                             f"且绝对变化量 {abs_delta} > {_MAX_ABS_DELTA}")
 
     new_t, old_t = set(_tokens(new)), set(_tokens(old))
     if not old_t:
