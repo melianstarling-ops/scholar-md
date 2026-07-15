@@ -254,26 +254,54 @@ def run_agents(layout, *, adapters, pdf_path: str, dpi: int = 300,
 
     # --- 调度(断点续跑 + 逐批落 ledger)---
     todo = resume_pending(load_ledger(ledger_path), candidates, batch_size=batch_size)
+
+    # Fix A: 所有批次已在先前运行终态(done/blocked)—— 本次没有新东西要跑。
+    # corrections.json 是整轮产物(write_corrections 整文件覆盖),若继续往下走,
+    # `results` 只会从本次(空的)outcomes 重建,进而用空列表覆盖掉先前运行已经
+    # 落盘、已验证的 corrections.json,导致下次 reassemble_md 把已应用的修正
+    # 全部还原成 OCR。这里直接早返回:不碰 corrections.json,不 reassemble,
+    # 也不重新评估闸门/熔断(那些已经在产出 corrections.json 的那次运行里判过了)。
+    if not todo:
+        report.reason = "所有批次已在先前运行完成,沿用既有 corrections.json,md 不改动"
+        report.applied = 0
+        return report
+
     batches = chunk_candidates(todo, batch_size)
     state = DispatchState.for_adapters(adapters, per_provider=per_provider)
 
     outcomes: list[BatchOutcome] = []
-    if batches:
-        with ThreadPoolExecutor(max_workers=max(1, len(batches))) as pool:
-            futures = [pool.submit(dispatch_with_fallback, b, adapters, state=state,
-                                   confidence_threshold=confidence_threshold)
-                       for b in batches]
-            for fut in futures:
-                oc = fut.result()
-                outcomes.append(oc)
-                append_ledger(ledger_path, {
-                    "batch_id": oc.batch_id, "candidate_ids": oc.candidate_ids,
-                    "attempts": oc.attempts,
-                    "resolved": [r.__dict__ for r in oc.resolved],
-                    "pending_ids": oc.pending_ids, "status": oc.status,
-                })
+    with ThreadPoolExecutor(max_workers=max(1, len(batches))) as pool:
+        futures = [pool.submit(dispatch_with_fallback, b, adapters, state=state,
+                               confidence_threshold=confidence_threshold)
+                   for b in batches]
+        for fut in futures:
+            oc = fut.result()
+            outcomes.append(oc)
+            append_ledger(ledger_path, {
+                "batch_id": oc.batch_id, "candidate_ids": oc.candidate_ids,
+                "attempts": oc.attempts,
+                "resolved": [r.__dict__ for r in oc.resolved],
+                "pending_ids": oc.pending_ids, "status": oc.status,
+            })
 
-    results = [r for oc in outcomes for r in oc.resolved]
+    # Fix B: 崩溃续跑时,本次 outcomes 只覆盖 todo(本次要跑的批次)。若之前的运行
+    # 已经把某些批次跑到终态(done/blocked)但那次运行本身没能把 corrections.json
+    # 写完整(例如中途崩溃),这些批次的 resolved 只存在于 ledger 里,从未被读回。
+    # 从 ledger(此刻已含刚 append 的 + 更早的)读回本次没跑到的终态批次,
+    # 与本次 outcomes 的 resolved 合并,corrections.json 才能覆盖全部批次。
+    current_resolved = [r for oc in outcomes for r in oc.resolved]
+    current_batch_ids = {oc.batch_id for oc in outcomes}
+
+    prior_resolved: list[AgentResult] = []
+    seen = set(current_batch_ids)
+    for row in load_ledger(ledger_path):
+        bid = row.get("batch_id")
+        if row.get("status") in ("done", "blocked") and bid not in seen:
+            seen.add(bid)
+            for d in row.get("resolved", []):
+                prior_resolved.append(AgentResult(**d))
+
+    results = current_resolved + prior_resolved
     report.pending_ids = [cid for oc in outcomes for cid in oc.pending_ids]
 
     # 全部 verdict 落证据台账(不进 md)
