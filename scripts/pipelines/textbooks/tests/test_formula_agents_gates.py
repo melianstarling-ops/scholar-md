@@ -162,6 +162,10 @@ def test_is_pure_token_reorder_false_when_new_latex_empty():
     (6, 10, False),    # 60% 不算超
     (2, 10, False),
     (0, 0, False),     # 空候选不熔断
+    (1, 1, False),     # 小书 1 候选 100% 不该熔断(候选数 < 下限)
+    (2, 3, False),     # 3 候选 67% 也不熔断(候选数 < 下限,噪声)
+    (4, 4, False),     # 4 候选 100% 不熔断(仍 < 下限 5)
+    (5, 5, True),      # 5 候选 100% 才开始按比例判(达到下限)
 ])
 def test_circuit_breaker(n, total, tripped):
     assert (circuit_breaker(n, total, ratio=0.6) is not None) is tripped

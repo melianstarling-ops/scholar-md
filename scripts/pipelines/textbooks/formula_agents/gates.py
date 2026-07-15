@@ -151,14 +151,21 @@ def similarity_gate(result: AgentResult, engine_latex: str, *,
     return None
 
 
+# 候选数低于此值时比例判据无统计意义(1/1=100%、2/3=67% 都是噪声),不熔断。
+_CIRCUIT_MIN_CANDIDATES = 5
+
+
 def circuit_breaker(n_mutating: int, n_candidates: int, *,
                     ratio: float = 0.6) -> str | None:
     """闸 4:一轮里被提议修改的比例过高 = 模型状态可能不对。
 
     漏斗里本就混有"虚惊一场"的条目,正常修改率不应过半。
     返回原因字符串 = 熔断(整轮降级 propose);None = 未触发。
+
+    候选数太少(< _CIRCUIT_MIN_CANDIDATES)时比例无意义(小书 1 个候选只要改
+    就是 100%),直接不熔断——此时逐条闸 1/2/5 仍在把关,不靠比例这道粗网。
     """
-    if n_candidates <= 0:
+    if n_candidates < _CIRCUIT_MIN_CANDIDATES:
         return None
     actual = n_mutating / n_candidates
     if actual > ratio:
