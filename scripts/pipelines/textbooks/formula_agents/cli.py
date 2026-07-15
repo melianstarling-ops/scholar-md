@@ -13,15 +13,18 @@ from scripts.pipelines.textbooks.paths import resolve_layout
 
 
 def crops_only_collect(layout) -> dict:
-    """只保留带裁图的候选(可视觉核对的真可疑公式)。
+    """保留"带裁图 或 硬错"的候选,滤掉无裁图的 KaTeX 警告。
 
     大书里候选常被数百个 KaTeX 严格模式警告(无裁图、多半无害)灌爆;视觉 Agent
-    对无裁图项只能瞎猜。过滤到带裁图 = render_errors + worklist 的真可疑集,
-    既省调用又聚焦。crop-less 项(多为 katex_warning)留给确定性处理,不进视觉。
+    对无裁图项只能瞎猜。但**硬错(katex_error)是确定要修的**,即便没裁图也要保留
+    (Agent 可凭文本重建,如指数乱码)。所以过滤规则 = 有裁图 OR 是硬错;
+    只丢无裁图的纯警告(那些多半无害,交给 CJK/确定性 sanitizer)。
     """
     out = collect_formula_candidates(layout)
     cands = out["candidates"] if isinstance(out, dict) else list(out)
-    kept = [c for c in cands if c.get("crop_path")]
+    kept = [c for c in cands
+            if c.get("crop_path")
+            or any(str(r).startswith("katex_error") for r in c.get("reasons", []))]
     return {"candidates": kept,
             "summary": (out.get("summary", {}) if isinstance(out, dict) else {})}
 
