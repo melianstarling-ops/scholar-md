@@ -155,3 +155,113 @@ def circuit_breaker(n_mutating: int, n_candidates: int, *,
         return (f"熔断:本轮 {n_mutating}/{n_candidates} = {actual:.0%} 的候选被提议修改,"
                 f"超过阈值 {ratio:.0%};疑为模型状态异常,整轮不自动应用")
     return None
+
+
+class KatexUnavailable(RuntimeError):
+    """node/KaTeX 不可用 —— 没有校验能力就不放行。"""
+
+
+def build_katex_probe_md(results: list[AgentResult],
+                         candidates_by_id: dict[str, dict]) -> str:
+    """把所有会改 md 的建议拼成一个探针 md,复用 katex_scan 的页/块归属注释约定,
+    使一次 node 调用即可校验整轮。"""
+    parts: list[str] = []
+    for r in results:
+        if r.verdict not in _MUTATING:
+            continue
+        cand = candidates_by_id.get(r.candidate_id)
+        if cand is None:
+            continue
+        parts.append(f"<!-- page: {cand['page']} block_ids: {cand['block_id']} -->\n"
+                     f"$$\n{r.latex}\n$$")
+    return "\n\n".join(parts) + ("\n" if parts else "")
+
+
+def katex_gate(results: list[AgentResult], candidates_by_id: dict[str, dict], *,
+               work_dir: str, scan_fn=None
+               ) -> tuple[list[AgentResult], list[GateRejection]]:
+    """闸 1:建议 LaTeX 必须能被 KaTeX 解析,否则丢弃该条。
+
+    只调一次 node(整轮批量),复用与浏览器同版本的 KaTeX oracle。
+    scan_fn 返回 None(node 缺失) → 抛 KatexUnavailable,调用方整轮降级 propose。
+    """
+    scan = scan_fn or scan_katex
+    if not any(r.verdict in _MUTATING for r in results):
+        return list(results), []
+
+    md = build_katex_probe_md(results, candidates_by_id)
+    os.makedirs(work_dir, exist_ok=True)
+    fd, probe_md = tempfile.mkstemp(prefix=".katex_probe_", suffix=".md", dir=work_dir)
+    os.close(fd)
+    probe_out = probe_md + ".json"
+    try:
+        with open(probe_md, "w", encoding="utf-8") as f:
+            f.write(md)
+        report = scan(probe_md, probe_out)
+    finally:
+        for p in (probe_md, probe_out):
+            if os.path.exists(p):
+                os.remove(p)
+
+    if report is None:
+        raise KatexUnavailable(
+            "node 不可用,KaTeX 准入闸无法执行 —— 拒绝在无校验能力时自动应用")
+
+    bad: dict[tuple[int, int], str] = {}
+    for err in report.get("errors", []):
+        page = err.get("page")
+        for bid in (err.get("block_ids") or []):
+            bad[(int(page), int(bid))] = str(err.get("error") or "KaTeX 解析失败")
+
+    passed: list[AgentResult] = []
+    rejected: list[GateRejection] = []
+    for r in results:
+        if r.verdict not in _MUTATING:
+            passed.append(r)
+            continue
+        cand = candidates_by_id.get(r.candidate_id)
+        key = (int(cand["page"]), int(cand["block_id"])) if cand else None
+        if key is not None and key in bad:
+            rejected.append(GateRejection(r.candidate_id, "katex", bad[key]))
+        else:
+            passed.append(r)
+    return passed, rejected
+
+
+def snapshot_md(md_path: str) -> str | None:
+    """闸 5 前置:应用前对最终 md 做快照。md 不存在返回 None。"""
+    if not os.path.exists(md_path):
+        return None
+    snap = md_path + ".pre_agent.bak"
+    shutil.copy2(md_path, snap)
+    return snap
+
+
+def rollback_md(md_path: str, snapshot_path: str) -> None:
+    shutil.copy2(snapshot_path, md_path)
+
+
+def regression_guard(md_path: str, *, work_dir: str, baseline_hard_errors: int,
+                     scan_fn=None) -> str | None:
+    """闸 5:应用并重建后,KaTeX 硬错不得增加。
+
+    返回原因字符串 = 出现回归(调用方须自动回滚);None = 通过。
+    node 不可用时同样判为不通过 —— 无法验证就不敢放行(同闸 1 的保守原则)。
+    (Tier0 missing_chars 回归由收尾的 SOP-03 另行检查。)
+    """
+    scan = scan_fn or scan_katex
+    os.makedirs(work_dir, exist_ok=True)
+    out = os.path.join(work_dir, ".katex_regression.json")
+    try:
+        report = scan(md_path, out)
+    finally:
+        if os.path.exists(out):
+            os.remove(out)
+
+    if report is None:
+        return "回归检查无法执行(node 不可用),保守判定为不通过"
+
+    hard = len(report.get("errors", []))
+    if hard > baseline_hard_errors:
+        return f"回归:应用后 KaTeX 硬错 {baseline_hard_errors} → {hard},自动回滚整轮"
+    return None

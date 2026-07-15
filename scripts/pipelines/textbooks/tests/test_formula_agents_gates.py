@@ -1,7 +1,8 @@
 import pytest
 
 from scripts.pipelines.textbooks.formula_agents.gates import (
-    circuit_breaker, degenerate_gate, similarity_gate,
+    KatexUnavailable, build_katex_probe_md, circuit_breaker, degenerate_gate,
+    katex_gate, regression_guard, rollback_md, similarity_gate, snapshot_md,
 )
 from scripts.pipelines.textbooks.formula_agents.protocol import AgentResult
 
@@ -142,3 +143,86 @@ def test_similarity_gate_accepted_tradeoff_rejects_garbled_engine_rescue():
 ])
 def test_circuit_breaker(n, total, tripped):
     assert (circuit_breaker(n, total, ratio=0.6) is not None) is tripped
+
+
+CANDS = {
+    "p0001-b0001": {"candidate_id": "p0001-b0001", "page": 1, "block_id": 1,
+                    "engine_latex": "x^2 + 1"},
+    "p0002-b0002": {"candidate_id": "p0002-b0002", "page": 2, "block_id": 2,
+                    "engine_latex": "y^2 + 1"},
+}
+
+
+# --- 闸 1: KaTeX 可渲染门 ---
+
+def test_probe_md_tags_each_formula_and_skips_non_mutating():
+    results = [_r("x", cid="p0001-b0001", verdict="accept"),      # 不改 md,不入探针
+               _r("y^{2}", cid="p0002-b0002")]                     # correct,入探针
+    md = build_katex_probe_md(results, CANDS)
+    assert "<!-- page: 2 block_ids: 2 -->" in md
+    assert "y^{2}" in md
+    assert "<!-- page: 1 block_ids: 1 -->" not in md
+    assert md.count("$$") == 2                                     # 一条 display 公式
+
+
+def test_katex_gate_rejects_unparseable_and_keeps_the_rest():
+    results = [_r("x^{2}+2", cid="p0001-b0001"),
+               _r("\\frac{1", cid="p0002-b0002")]                  # 未闭合 = 硬错
+
+    def fake_scan(md_path, out_path, **kw):
+        return {"errors": [{"page": 2, "block_ids": [2],
+                            "error": "KaTeX parse error: Expected '}'"}]}
+
+    passed, rejected = katex_gate(results, CANDS, work_dir=".", scan_fn=fake_scan)
+    assert [r.candidate_id for r in passed] == ["p0001-b0001"]
+    assert len(rejected) == 1
+    assert rejected[0].candidate_id == "p0002-b0002" and rejected[0].gate == "katex"
+
+
+def test_katex_gate_passes_all_when_clean():
+    passed, rejected = katex_gate([_r("x^{2}+2", cid="p0001-b0001")], CANDS,
+                                  work_dir=".", scan_fn=lambda *a, **k: {"errors": []})
+    assert len(passed) == 1 and rejected == []
+
+
+def test_katex_gate_raises_when_node_missing():
+    """node 不可用 → 没有校验能力 → 绝不放行,抛错让调用方整轮降级 propose。"""
+    with pytest.raises(KatexUnavailable):
+        katex_gate([_r("x^{2}", cid="p0001-b0001")], CANDS, work_dir=".",
+                   scan_fn=lambda *a, **k: None)
+
+
+def test_katex_gate_skips_node_call_when_nothing_mutating():
+    passed, rejected = katex_gate(
+        [_r("x", cid="p0001-b0001", verdict="accept")], CANDS, work_dir=".",
+        scan_fn=lambda *a, **k: pytest.fail("无 correct 时不该调 node"))
+    assert len(passed) == 1 and rejected == []
+
+
+# --- 闸 5: 快照 / 回滚 / 回归守卫 ---
+
+def test_snapshot_and_rollback_roundtrip(tmp_path):
+    md = tmp_path / "book.md"
+    md.write_text("原始内容", encoding="utf-8")
+
+    snap = snapshot_md(str(md))
+    assert snap == str(md) + ".pre_agent.bak"
+
+    md.write_text("被改坏了", encoding="utf-8")
+    rollback_md(str(md), snap)
+    assert md.read_text(encoding="utf-8") == "原始内容"
+    assert snapshot_md(str(tmp_path / "nope.md")) is None      # md 不存在
+
+
+@pytest.mark.parametrize("scan_result,should_trip", [
+    ({"errors": [{"error": "boom"}]}, True),    # 硬错从 0 涨到 1 → 回滚
+    ({"errors": []},                  False),   # 无变化 → 放行
+    (None,                            True),    # node 不可用 → 无法验证 → 不敢放行
+])
+def test_regression_guard(tmp_path, scan_result, should_trip):
+    md = tmp_path / "book.md"
+    md.write_text("$$ x $$", encoding="utf-8")
+    reason = regression_guard(str(md), work_dir=str(tmp_path),
+                              baseline_hard_errors=0,
+                              scan_fn=lambda *a, **k: scan_result)
+    assert (reason is not None) is should_trip
