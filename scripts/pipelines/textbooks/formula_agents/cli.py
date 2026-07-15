@@ -8,7 +8,22 @@ import sys
 from scripts.pipelines.textbooks.formula_agents import gates
 from scripts.pipelines.textbooks.formula_agents.adapters import default_adapters
 from scripts.pipelines.textbooks.formula_agents.orchestrator import run_agents
+from scripts.pipelines.textbooks.formula_candidates import collect_formula_candidates
 from scripts.pipelines.textbooks.paths import resolve_layout
+
+
+def crops_only_collect(layout) -> dict:
+    """只保留带裁图的候选(可视觉核对的真可疑公式)。
+
+    大书里候选常被数百个 KaTeX 严格模式警告(无裁图、多半无害)灌爆;视觉 Agent
+    对无裁图项只能瞎猜。过滤到带裁图 = render_errors + worklist 的真可疑集,
+    既省调用又聚焦。crop-less 项(多为 katex_warning)留给确定性处理,不进视觉。
+    """
+    out = collect_formula_candidates(layout)
+    cands = out["candidates"] if isinstance(out, dict) else list(out)
+    kept = [c for c in cands if c.get("crop_path")]
+    return {"candidates": kept,
+            "summary": (out.get("summary", {}) if isinstance(out, dict) else {})}
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -25,6 +40,8 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--dry-run", action="store_true", help="只估算,不调模型")
     ap.add_argument("--propose", action="store_true", help="只落 pending,不改 md")
     ap.add_argument("--rollback", action="store_true", help="回滚最近一轮")
+    ap.add_argument("--crops-only", action="store_true",
+                    help="只处理带裁图候选(滤掉无裁图的 KaTeX 警告,大书必用)")
     args = ap.parse_args(argv)
 
     layout = resolve_layout(args.stem, args.deliverables_root, args.work_dir)
@@ -44,7 +61,8 @@ def main(argv: list[str] | None = None) -> int:
         layout, adapters=default_adapters(), pdf_path=args.pdf or "", dpi=args.dpi,
         batch_size=args.batch_size, per_provider=args.per_provider,
         confidence_threshold=args.confidence_threshold,
-        circuit_ratio=args.circuit_breaker_ratio, mode=mode)
+        circuit_ratio=args.circuit_breaker_ratio, mode=mode,
+        collect_fn=crops_only_collect if args.crops_only else None)
 
     print(f"[formula_agents] stem={report.stem} mode={report.mode}")
     print(f"  候选: {report.n_candidates}    已应用: {report.applied}")
