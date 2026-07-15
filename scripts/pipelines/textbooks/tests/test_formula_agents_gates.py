@@ -192,6 +192,32 @@ def test_katex_gate_raises_when_node_missing():
                    scan_fn=lambda *a, **k: None)
 
 
+def test_katex_gate_rejects_malformed_candidate_page_instead_of_crashing():
+    """Minor 回归:候选 page/block_id 非数字须被保守拒收,不崩溃、不放行。"""
+    bad_cands = {
+        "p000x-b0001": {"candidate_id": "p000x-b0001", "page": "x", "block_id": 1,
+                        "engine_latex": "x^2 + 1"},
+    }
+    results = [_r("x^{2}+2", cid="p000x-b0001")]
+    passed, rejected = katex_gate(results, bad_cands, work_dir=".",
+                                  scan_fn=lambda *a, **k: {"errors": []})
+    assert passed == []
+    assert len(rejected) == 1
+    assert rejected[0].candidate_id == "p000x-b0001" and rejected[0].gate == "katex"
+
+
+def test_katex_gate_skips_malformed_error_record_mapping_without_crashing():
+    """Minor 回归:err 记录里的 page/block_id 非数字应被跳过映射,不崩溃。"""
+
+    def fake_scan(md_path, out_path, **kw):
+        return {"errors": [{"page": "not-a-number", "block_ids": [1],
+                            "error": "irrelevant"}]}
+
+    passed, rejected = katex_gate([_r("x^{2}+2", cid="p0001-b0001")], CANDS,
+                                  work_dir=".", scan_fn=fake_scan)
+    assert len(passed) == 1 and rejected == []
+
+
 def test_katex_gate_skips_node_call_when_nothing_mutating():
     passed, rejected = katex_gate(
         [_r("x", cid="p0001-b0001", verdict="accept")], CANDS, work_dir=".",

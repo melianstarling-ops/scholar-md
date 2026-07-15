@@ -211,7 +211,12 @@ def katex_gate(results: list[AgentResult], candidates_by_id: dict[str, dict], *,
     for err in report.get("errors", []):
         page = err.get("page")
         for bid in (err.get("block_ids") or []):
-            bad[(int(page), int(bid))] = str(err.get("error") or "KaTeX 解析失败")
+            try:
+                key = (int(page), int(bid))
+            except (TypeError, ValueError):
+                # 无法解析的错误记录跳过映射即可:映射不上就不会误拒任何候选。
+                continue
+            bad[key] = str(err.get("error") or "KaTeX 解析失败")
 
     passed: list[AgentResult] = []
     rejected: list[GateRejection] = []
@@ -220,7 +225,17 @@ def katex_gate(results: list[AgentResult], candidates_by_id: dict[str, dict], *,
             passed.append(r)
             continue
         cand = candidates_by_id.get(r.candidate_id)
-        key = (int(cand["page"]), int(cand["block_id"])) if cand else None
+        if cand is not None:
+            try:
+                key = (int(cand["page"]), int(cand["block_id"]))
+            except (TypeError, ValueError):
+                # 候选自身 page/block_id 畸形,无法确定归属 —— 保守拒收,
+                # 绝不放行(放行=可能把未经校验的公式写进书),也绝不崩溃。
+                rejected.append(GateRejection(
+                    r.candidate_id, "katex", "候选 page/block_id 非法,无法确定页/块归属,保守拒收"))
+                continue
+        else:
+            key = None
         if key is not None and key in bad:
             rejected.append(GateRejection(r.candidate_id, "katex", bad[key]))
         else:

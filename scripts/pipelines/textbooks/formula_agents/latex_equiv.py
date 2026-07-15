@@ -1,7 +1,8 @@
 """LaTeX 等价判定:两家模型写法不同但数学一致时,交叉验证仍应判"一致"。
 
 判据是"渲染成同一个 MathML 结构树",不是字符串相等。MathML 保留顺序,
-故 a+b != b+a —— 绝不把重排当等价。node 缺失时返回 None,调用方保守当不等价。
+故 a+b != b+a —— 绝不把重排当等价。node 缺失、或任一侧渲染为空(无法判定)
+时返回 None,调用方保守当不等价。
 """
 from __future__ import annotations
 
@@ -45,5 +46,10 @@ def latex_equiv(a: str, b: str, *, node_bin: str | None = None,
     render = render_fn or (lambda latex_list, node_bin=None: mathml_of(latex_list, node_bin=node_bin))
     rendered = render([a, b], node_bin=node_bin)
     if rendered is None or len(rendered) != 2:
+        return None
+    # 任一侧规范化 MathML 为空(渲染失败/找不到 <math> 结构)= 无法判定,
+    # 不是"等价"。绝不能让两条不同的不可渲染 latex 因为都变成空串而被判
+    # True——那等于把"渲染失败"当"结构相同",会把错公式当验证通过写进书。
+    if not rendered[0].strip() or not rendered[1].strip():
         return None
     return rendered[0] == rendered[1]
