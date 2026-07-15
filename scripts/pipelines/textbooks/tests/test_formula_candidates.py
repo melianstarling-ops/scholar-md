@@ -191,5 +191,57 @@ def test_token_estimator_is_deterministic():
     }
 
 
+def test_pure_render_error_worklist_item_links_crop_to_katex_candidate(tmp_path):
+    """Regression: a worklist item whose only kind is render_error carries a
+    crop_path that must still be linked to the merged katex_error candidate,
+    without introducing a redundant worklist:render_error reason."""
+    layout = resolve_layout("Book", str(tmp_path / "out"))
+    crop = tmp_path / "crop.png"
+    Image.new("RGB", (40, 30), color="white").save(crop)
+    _write_page(layout, 5, [_block(block_id=12, content=r"$$ \frac{x}{y} $$")])
+    _write_worklist(layout, [
+        _worklist_item(page=5, block_id=12, kinds=("render_error",), crop_path=str(crop)),
+    ])
+    _write_json(layout.render_errors_path, {
+        "total": 1,
+        "errors": [{
+            "page": 5,
+            "mode": "display",
+            "block_ids": [12],
+            "error": "ParseError: Expected '}'",
+            "latex_head": r"\frac{x}{y",
+        }],
+        "warnings": [],
+    })
+
+    result = collect_formula_candidates(layout)
+
+    assert len(result["candidates"]) == 1
+    candidate = result["candidates"][0]
+    assert candidate["reasons"] == ["katex_error:ParseError"]
+    assert "worklist:render_error" not in candidate["reasons"]
+    assert candidate["crop_path"] == str(crop)
+    assert candidate["estimate_basis"] == "crop"
+
+
+def test_non_render_error_worklist_item_still_gets_reason_and_crop(tmp_path):
+    """Non-regression: worklist items with a non-render_error kind must keep
+    producing their worklist:<kind> reason and their crop_path linkage."""
+    layout = resolve_layout("Book", str(tmp_path / "out"))
+    crop = tmp_path / "crop2.png"
+    Image.new("RGB", (20, 10), color="white").save(crop)
+    _write_page(layout, 6, [_block(block_id=15)])
+    _write_worklist(layout, [
+        _worklist_item(page=6, block_id=15, kinds=("frac_primed_denom",), crop_path=str(crop)),
+    ])
+
+    result = collect_formula_candidates(layout)
+
+    assert len(result["candidates"]) == 1
+    candidate = result["candidates"][0]
+    assert candidate["reasons"] == ["worklist:frac_primed_denom"]
+    assert candidate["crop_path"] == str(crop)
+
+
 # TODO: add a vision_repair adapter compatibility test when candidates become
 # the direct input to model execution.

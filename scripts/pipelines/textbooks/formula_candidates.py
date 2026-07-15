@@ -81,7 +81,14 @@ def _new_candidate(page: int, block_id: int, block: dict | None, item: dict | No
 
 
 def _add_reason(candidates: dict[tuple[int, int], dict], page: int, block_id: int,
-                reason: str, block: dict | None = None, item: dict | None = None) -> None:
+                reason: str | None, block: dict | None = None, item: dict | None = None) -> None:
+    """Ensure a candidate exists and enrich it from block/item.
+
+    `reason=None` enriches crop_path/bbox/engine_latex without appending a
+    reason string — used for worklist items whose only kind is render_error,
+    where the katex_error reason (added separately) already covers it but the
+    crop_path must still be linked.
+    """
     key = (page, block_id)
     if key not in candidates:
         candidates[key] = _new_candidate(page, block_id, block, item)
@@ -94,7 +101,7 @@ def _add_reason(candidates: dict[tuple[int, int], dict], page: int, block_id: in
         cand["crop_path"] = cand.get("crop_path") or item.get("crop_path")
         cand["bbox"] = cand.get("bbox") or item.get("bbox")
         cand["engine_latex"] = cand.get("engine_latex") or item.get("engine_latex") or ""
-    if reason not in cand["reasons"]:
+    if reason and reason not in cand["reasons"]:
         cand["reasons"].append(reason)
 
 
@@ -107,11 +114,17 @@ def _add_worklist(candidates: dict[tuple[int, int], dict], layout: DocLayout) ->
         if page is None or block_id is None:
             continue
         block = _page_blocks_by_id(layout, int(page)).get(block_id)
-        for kind in item.get("kinds", []):
-            if kind == "render_error":
-                continue
-            _add_reason(candidates, int(page), int(block_id), f"worklist:{kind}", block, item)
-            hits += 1
+        non_render = [kind for kind in item.get("kinds", []) if kind != "render_error"]
+        if non_render:
+            for kind in non_render:
+                _add_reason(candidates, int(page), int(block_id), f"worklist:{kind}", block, item)
+                hits += 1
+        else:
+            # Pure render_error worklist item: don't add a redundant
+            # worklist:render_error reason (the katex_error reason from
+            # _add_katex already covers it), but still link the crop_path
+            # and bbox so the candidate isn't left without an image.
+            _add_reason(candidates, int(page), int(block_id), None, block, item)
     return hits
 
 
