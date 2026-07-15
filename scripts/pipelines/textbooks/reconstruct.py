@@ -18,6 +18,22 @@ KATEX_INCOMPAT_COMMANDS = [r"\displaylimits", r"\boldmath"]
 # (?![a-zA-Z]) 负向边界:删 \displaylimits 不误伤前缀相近的 \displaystyle
 _KATEX_SUB = [(re.compile(re.escape(cmd) + r"(?![a-zA-Z])"), "") for cmd in KATEX_INCOMPAT_COMMANDS]
 
+# KaTeX 不认的命令 → 语义等价替换(区别于 _KATEX_SUB 的纯删除)。
+# 全部来自 OCR/上游产物在真实教材里反复出现的确定性坏形态,映射均由真实语料上下文核实:
+#   \upmu       upgreek 包的直立 μ(单位前缀 μA/μV/μF/μH),KaTeX 无 → \mu
+#   \pit        OCR 把 "\pi t"(频率 1/\pi t_r)黏一起;字母边界排除真命令 \pitchfork
+#   \[          数学内容已被 $$ 包裹,残留的 display 定界符 \[ 恒非法 → 删
+# 字母边界 (?![a-zA-Z]) 防止误伤更长的合法命令。替换串内 \\ 均为字面反斜杠。
+# 注:曾出现的 \omegaarrow/\sigmaarrow 并非 OCR 坏形态,而是合法 \omega\leftarrow /
+# \sigma\rightarrow 被 _downgrade_split_invisible_delimiters 啃坏的产物,已在该函数根治,
+# 不在此处治标。
+_KATEX_CMD_MAP = [
+    (re.compile(r"\\upmu(?![a-zA-Z])"), r"\\mu"),
+    (re.compile(r"\\pit(?![a-zA-Z])"), r"\\pi t"),
+    (re.compile(r"\\\[(?![a-zA-Z])"), ""),
+]
+_ENSUREMATH_RE = re.compile(r"\\ensuremath\s*\{")
+
 _PASSTHROUGH_UNORDERED_LABELS = {"table", "footnote", "figure_title"}
 _KNOWN_NOISE_LABELS = {"header", "number", "header_image"}
 _LATEX_ENTITY_REPL = {
@@ -42,6 +58,20 @@ def _match_braced(s: str, i: int) -> int:
                 return i + 1
         i += 1
     return -1
+
+
+def _unwrap_ensuremath(s: str) -> str:
+    r"""\ensuremath{X} → X。已在数学模式,该包裹恒冗余;靠括号配对(非贪婪正则)解包,
+    保留内容原样。花括号不配对时放弃改写,绝不破坏(最坏 = 原样)。"""
+    while True:
+        m = _ENSUREMATH_RE.search(s)
+        if not m:
+            return s
+        brace = m.end() - 1                 # 指向 '{'
+        end = _match_braced(s, brace)
+        if end == -1:                       # 花括号不配对 → 放弃,不破坏
+            return s
+        s = s[:m.start()] + s[brace + 1:end - 1] + s[end:]
 
 
 def _collapse_double_subscript(s: str) -> str:
@@ -393,7 +423,11 @@ def _downgrade_split_invisible_delimiters(s: str) -> str:
     stack: list[tuple[int, int, str]] = []
     i = 0
     while i < len(s):
-        if s.startswith(r"\left", i):
+        # 字母边界:\left / \right 作定界符时后接定界符(( [ . | 或 \langle 等命令),绝不
+        # 后接字母。后接字母(\leftarrow / \rightarrow / \leftrightarrow / \rightharpoonup …)
+        # 是合法箭头/谐波命令,若当定界符会把 \lefta… 啃成 \…arrow(实测 \omega\leftarrow
+        # 被啃成未定义的 \omegaarrow),故跳过不处理。
+        if s.startswith(r"\left", i) and not s[i + len(r"\left"):i + len(r"\left") + 1].isalpha():
             end, delim = _delim_end(i + len(r"\left"))
             if delim == ".":
                 repl.append((i, end, ""))
@@ -401,7 +435,7 @@ def _downgrade_split_invisible_delimiters(s: str) -> str:
                 stack.append((i, end, delim))
             i = end
             continue
-        if s.startswith(r"\right", i):
+        if s.startswith(r"\right", i) and not s[i + len(r"\right"):i + len(r"\right") + 1].isalpha():
             end, delim = _delim_end(i + len(r"\right"))
             if stack:
                 stack.pop()
@@ -491,6 +525,9 @@ def sanitize_latex(s: str) -> str:
     s = _fix_spacing_command_scripts(s)
     for pat, repl in _KATEX_SUB:
         s = pat.sub(repl, s)
+    for pat, repl in _KATEX_CMD_MAP:
+        s = pat.sub(repl, s)
+    s = _unwrap_ensuremath(s)
     s = _CDOTD_RE.sub(r"\\cdot d", s)
     s = _collapse_chained_atop(s)
     s = _collapse_double_subscript(s)
@@ -584,6 +621,11 @@ def _render_ordered(ordered: list[dict]) -> list[dict]:
                 emit(y0, [bid], f"$$ {body} $$")
         elif label == "formula_number":
             emit(y0, [bid], content)
+        elif label == "inline_formula":
+            # PaddleOCR-VL 的 inline_formula 内容已自带 $$...$$(或 $...$)包裹;历史上落
+            # 未知分支当纯文本直落,绕过 sanitize_latex,命令映射/CJK 等触不到内部 latex。
+            # 改走 math-span 清洗:有 $ 包裹则清洗内部,无包裹的裸内容原样穿过(等价旧行为)。
+            emit(y0, [bid], _sanitize_markdown_math_spans(content))
         else:
             print(f"[reconstruct] 未知 block_label={label!r},按纯文本兜底落段", file=sys.stderr)
             emit(y0, [bid], content)

@@ -347,6 +347,82 @@ def test_sanitize_latex_expands_array_colspec_to_seen_columns():
     ) == r"\begin{array}{ccc}a&b&c\\d&e&f\end{array}"
 
 
+# --- 命令映射(_KATEX_CMD_MAP / _unwrap_ensuremath):KaTeX 不认的命令 → 语义等价替换 ---
+
+def test_sanitize_latex_maps_upmu_to_mu():
+    # upgreek 包的直立 μ(单位前缀 μA/μV/μF),KaTeX 无 → \mu
+    assert sanitize_latex(r"0.016\;\upmu\mathrm{F}") == r"0.016\;\mu\mathrm{F}"
+
+
+def test_sanitize_latex_upmu_does_not_touch_longer_command():
+    # 字母边界:\upmuX(假想更长命令)不被误伤;实际语料里 \upmu 恒后接非字母
+    s = r"\upmuped"
+    assert sanitize_latex(s) == s
+
+
+def test_sanitize_latex_preserves_leftarrow_command():
+    # 根因回归:\left 定界符清洗曾把 \leftarrow 里的 \left 当定界符,啃成未定义的
+    # \omegaarrow(频率定标 ω←ω/ωc)。字母边界守卫后 \leftarrow 必须逐字保留。
+    s = r"\omega\leftarrow\frac{\omega}{\omega_{c}}"
+    assert sanitize_latex(s) == s
+
+
+def test_sanitize_latex_preserves_rightarrow_command():
+    # 同根因:\sigma\rightarrow\infty 曾被啃成 \sigmaarrow(理想导体 σ→∞)
+    assert sanitize_latex(r"(\sigma\rightarrow\infty)") == r"(\sigma\rightarrow\infty)"
+
+
+def test_sanitize_latex_preserves_leftrightarrow_command():
+    # 更长的箭头命令同样不能被 \left 定界符清洗误伤
+    s = r"a\leftrightarrow b"
+    assert sanitize_latex(s) == s
+
+
+def test_sanitize_latex_still_downgrades_real_left_delimiter():
+    # 守卫不影响真定界符:\left. 后接非字母,仍按原逻辑降级(不回归既有行为)
+    assert sanitize_latex(r"\left\{a\right.}\\ &{}&{\left.+b\right.}\\ &{}&{c\right\}") == \
+        r"\{a\\ &{}&{+b}\\ &{}&{c\}"
+
+
+def test_sanitize_latex_maps_pit_to_pi_t():
+    # OCR 把 "\pi t"(频率 1/\pi t_r)黏一起
+    assert sanitize_latex(r"1/\pit_{r}") == r"1/\pi t_{r}"
+
+
+def test_sanitize_latex_pit_does_not_touch_pitchfork():
+    # 字母边界:真命令 \pitchfork 不被误拆
+    s = r"a\pitchfork b"
+    assert sanitize_latex(s) == s
+
+
+def test_sanitize_latex_unwraps_ensuremath_simple():
+    # 已在数学模式,\ensuremath{X} 冗余 → 解包为 X
+    assert sanitize_latex(r"\frac{1}{2}\ln 2\ensuremath{\mathrm{N p}}") == \
+        r"\frac{1}{2}\ln 2\mathrm{N p}"
+
+
+def test_sanitize_latex_unwraps_ensuremath_with_nested_braces():
+    # 内容含嵌套花括号,靠括号配对而非贪婪正则
+    assert sanitize_latex(r"\ensuremath{20\cdot\pi^{2}}\cdot(L/\lambda)^{2}") == \
+        r"20\cdot\pi^{2}\cdot(L/\lambda)^{2}"
+
+
+def test_sanitize_latex_unwraps_multiple_ensuremath():
+    assert sanitize_latex(r"\ensuremath{a}+\ensuremath{b}") == r"a+b"
+
+
+def test_sanitize_latex_ensuremath_unbalanced_braces_left_intact():
+    # 花括号不配对时放弃改写,绝不破坏(最坏=原样)
+    s = r"\ensuremath{a+b"
+    assert sanitize_latex(s) == s
+
+
+def test_sanitize_latex_drops_stray_display_open_delimiter():
+    # 数学内容已被 $$ 包裹,残留的 display 定界符 \[ 恒非法 → 删
+    assert sanitize_latex(r"\[\begin{array}{l}x\end{array}") == \
+        r"\begin{array}{l}x\end{array}"
+
+
 def test_table_pass_through_sanitizes_inline_math_entities():
     blocks = [{
         "block_label": "table",
@@ -358,6 +434,29 @@ def test_table_pass_through_sanitizes_inline_math_entities():
     md, _ = reconstruct_markdown(blocks)
     assert r"$ R_{S}<Z_{C} $" in md
     assert r"$ \varepsilon'_{r} $" in md
+
+
+def test_inline_formula_block_sanitizes_math_body():
+    # inline_formula 块内容已自带 $$...$$ 包裹,历史上落未知分支被当纯文本直落,
+    # 绕过 sanitize_latex → 命令映射等触不到。现应路由过 math-span 清洗。
+    blocks = [{
+        "block_label": "inline_formula",
+        "block_content": r"$$ 0.016\;\upmu\mathrm{F} $$",
+        "block_order": 1, "block_id": 1, "block_bbox": [0, 0, 10, 10],
+    }]
+    md, _ = reconstruct_markdown(blocks)
+    assert r"\upmu" not in md            # sanitize_latex 已触达(否则会原样直落)
+    assert r"\mu\mathrm{F}" in md
+
+
+def test_inline_formula_block_without_dollar_wrap_passes_through_unchanged():
+    # 无 $ 包裹的裸内容:math-span 清洗找不到 span,原样穿过(与旧直落行为等价,无回归)。
+    blocks = [{
+        "block_label": "inline_formula", "block_content": "see figure 3",
+        "block_order": 1, "block_id": 1, "block_bbox": [0, 0, 10, 10],
+    }]
+    md, _ = reconstruct_markdown(blocks)
+    assert "see figure 3" in md
 
 
 def test_reconstruct_prefers_adjacent_formula_number_over_embedded_tag():
