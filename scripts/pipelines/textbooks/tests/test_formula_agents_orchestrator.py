@@ -1,10 +1,12 @@
 import json
+import os
 import threading
 
 from scripts.pipelines.textbooks.formula_agents.orchestrator import (
-    DispatchState, chunk_candidates, dispatch_with_fallback,
+    DispatchState, chunk_candidates, dispatch_with_fallback, run_agents,
 )
 from scripts.pipelines.textbooks.formula_agents.protocol import RawResponse
+from scripts.pipelines.textbooks.paths import resolve_layout
 from scripts.pipelines.textbooks.tests.formula_agents_fakes import FakeAdapter
 
 
@@ -224,3 +226,137 @@ def test_success_resets_the_consecutive_failure_streak():
         dispatch_with_fallback(batch, ads, state=state)
 
     assert not state.is_blocked("kimi")   # 2 次失败 → 成功清零 → 又 2 次,从未连续 3 次
+
+
+# --- run_agents 全流程(五道闸编排 + 自动应用 + 回归回滚)---
+
+MD_BEFORE = "原始 md 内容\n"
+
+
+def _layout(tmp_path):
+    layout = resolve_layout("Book", str(tmp_path / "d"), str(tmp_path / "w"))
+    os.makedirs(layout.doc_deliverable_dir, exist_ok=True)
+    os.makedirs(layout.doc_work_dir, exist_ok=True)
+    with open(layout.md_path, "w", encoding="utf-8") as f:
+        f.write(MD_BEFORE)
+    return layout
+
+
+def _md(layout):
+    with open(layout.md_path, encoding="utf-8") as f:
+        return f.read()
+
+
+def _corrections(layout):
+    with open(layout.corrections_path, encoding="utf-8") as f:
+        return json.load(f)["corrections"]
+
+
+def _run(layout, adapters, **kw):
+    rebuilt = {"n": 0}
+
+    def reassemble(lay, pdf, dpi):
+        rebuilt["n"] += 1
+        with open(lay.md_path, "w", encoding="utf-8") as f:
+            f.write("重建后的 md\n")
+        return lay.md_path
+
+    kw.setdefault("collect_fn", lambda _: _cands(2))
+    kw.setdefault("scan_fn", lambda *a, **k: {"errors": []})
+    kw.setdefault("reassemble_fn", reassemble)
+    kw.setdefault("circuit_ratio", 1.0)          # 多数用例不测熔断
+    report = run_agents(layout, adapters=adapters, pdf_path="x.pdf",
+                        today="2026-07-14", **kw)
+    return report, rebuilt
+
+
+def test_apply_mode_writes_accepted_corrections_and_rebuilds(tmp_path):
+    layout = _layout(tmp_path)
+    ads = [FakeAdapter("kimi", [_ok(_cands(2), confidence=0.95)])]
+
+    report, rebuilt = _run(layout, ads)
+
+    assert report.mode == "apply" and report.applied == 2
+    assert rebuilt["n"] == 1
+    assert all(c["status"] == "accepted" for c in _corrections(layout))
+
+
+def test_dry_run_never_calls_any_adapter(tmp_path):
+    layout = _layout(tmp_path)
+    kimi = FakeAdapter("kimi", [_ok(_cands(2))])
+
+    report, rebuilt = _run(layout, [kimi], mode="dry-run")
+
+    assert kimi.calls == 0 and rebuilt["n"] == 0
+    assert report.n_candidates == 2
+    assert _md(layout) == MD_BEFORE
+
+
+def test_katex_gate_rejection_excludes_that_candidate(tmp_path):
+    """闸 1:agent 吐了 KaTeX 解析不了的东西 → 该条被拒,不进 corrections。"""
+    layout = _layout(tmp_path)
+    ads = [FakeAdapter("kimi", [_ok(_cands(2), confidence=0.95)])]
+
+    def scan(md_path, out_path, **kw):
+        with open(md_path, encoding="utf-8") as f:
+            body = f.read()
+        if "block_ids: 1" in body:                       # 这是闸 1 的探针 md
+            return {"errors": [{"page": 1, "block_ids": [1], "error": "parse error"}]}
+        return {"errors": []}                            # baseline / 回归检查
+
+    report, _ = _run(layout, ads, scan_fn=scan)
+
+    assert report.applied == 1
+    assert any(r.gate == "katex" for r in report.rejected)
+
+
+def test_circuit_breaker_downgrades_to_propose_and_md_stays_byte_identical(tmp_path):
+    layout = _layout(tmp_path)
+    ads = [FakeAdapter("kimi", [_ok(_cands(2), confidence=0.95)])]   # 2/2 = 100% > 60%
+
+    report, rebuilt = _run(layout, ads, circuit_ratio=0.6)
+
+    assert report.circuit_broken and report.mode == "propose"
+    assert rebuilt["n"] == 0
+    assert _md(layout) == MD_BEFORE                                   # 逐字未变
+    assert all(c["status"] == "pending" for c in _corrections(layout))
+
+
+def test_node_unavailable_downgrades_to_propose(tmp_path):
+    """闸 1 无法执行 → 不在缺少校验能力时放行。"""
+    layout = _layout(tmp_path)
+    ads = [FakeAdapter("kimi", [_ok(_cands(2), confidence=0.95)])]
+
+    report, rebuilt = _run(layout, ads, scan_fn=lambda *a, **k: None)
+
+    assert report.mode == "propose"
+    assert rebuilt["n"] == 0
+    assert _md(layout) == MD_BEFORE
+
+
+def test_regression_after_apply_triggers_automatic_rollback(tmp_path):
+    layout = _layout(tmp_path)
+    ads = [FakeAdapter("kimi", [_ok(_cands(2), confidence=0.95)])]
+    calls = {"n": 0}
+
+    def scan(md_path, out_path, **kw):
+        calls["n"] += 1
+        # 前两次(闸1探针 / baseline)干净;第三次(应用后回归)冒出硬错
+        return {"errors": [{"error": "boom"}]} if calls["n"] >= 3 else {"errors": []}
+
+    report, _ = _run(layout, ads, scan_fn=scan)
+
+    assert report.rolled_back and report.applied == 0
+    assert _md(layout) == MD_BEFORE                       # 已自动回滚
+
+
+def test_all_providers_failing_leaves_md_byte_identical(tmp_path):
+    """核心不变量:额度耗尽/调用全挂 → 最坏结果是"没改",绝不是"改坏"。"""
+    layout = _layout(tmp_path)
+    bad = RawResponse("Error: quota exhausted", "429", 1)
+    ads = [FakeAdapter(n, [bad] * 5) for n in ("kimi", "gemini", "codex", "claude")]
+
+    report, rebuilt = _run(layout, ads)
+
+    assert report.applied == 0 and rebuilt["n"] == 0
+    assert _md(layout) == MD_BEFORE

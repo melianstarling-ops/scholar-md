@@ -5,15 +5,25 @@ F6: 限流键是 provider,不是整场运行 —— 每个 provider 独立 Semap
 """
 from __future__ import annotations
 
+import datetime as _dt
+import os
 import threading
 import time
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field, replace
 
+from scripts.pipelines.textbooks.formula_agents import gates
+from scripts.pipelines.textbooks.formula_agents.corrections_map import (
+    build_corrections_payload, write_corrections,
+)
 from scripts.pipelines.textbooks.formula_agents.latex_equiv import latex_equiv
-from scripts.pipelines.textbooks.formula_agents.ledger import batch_id
+from scripts.pipelines.textbooks.formula_agents.ledger import (
+    append_ledger, batch_id, load_ledger, resume_pending,
+)
 from scripts.pipelines.textbooks.formula_agents.protocol import (
     AgentResult, ProtocolError, validate_agent_payload,
 )
+from scripts.pipelines.textbooks.formula_candidates import collect_formula_candidates
 
 _UNCERTAIN = "uncertain"
 _CORRECT = "correct"
@@ -186,3 +196,157 @@ def dispatch_with_fallback(batch: list[dict], adapters, *, state: DispatchState,
     if adapters and all(state.is_blocked(a.name) for a in adapters):
         out.status = "blocked"
     return out
+
+
+@dataclass
+class RunReport:
+    stem: str
+    mode: str
+    n_candidates: int = 0
+    applied: int = 0
+    rejected: list = field(default_factory=list)      # list[gates.GateRejection]
+    pending_ids: list[str] = field(default_factory=list)
+    circuit_broken: bool = False
+    rolled_back: bool = False
+    reason: str | None = None
+
+
+def _as_candidate_list(raw) -> list[dict]:
+    """collect_fn 的默认实现(collect_formula_candidates)返回
+    {"candidates": [...], "summary": {...}};测试用的 fake collect_fn 直接返回
+    list[dict]。两种形状都接受,不因调用方是谁而崩。"""
+    if isinstance(raw, dict) and "candidates" in raw:
+        return list(raw["candidates"])
+    return list(raw)
+
+
+def run_agents(layout, *, adapters, pdf_path: str, dpi: int = 300,
+               batch_size: int = 10, per_provider: int = 3,
+               confidence_threshold: float = 0.8, circuit_ratio: float = 0.6,
+               mode: str = "apply", collect_fn=None, scan_fn=None,
+               reassemble_fn=None, today: str | None = None) -> RunReport:
+    """公式 Agent 终检全流程。
+
+    不变量:所有失败路径的最坏结果都是"这条没改",绝不是"这条被改坏了"。
+    """
+    from scripts.pipelines.textbooks.convert import reassemble_md
+
+    collect = collect_fn or collect_formula_candidates
+    reassemble = reassemble_fn or reassemble_md
+    scan = scan_fn or gates.scan_katex
+    today = today or _dt.date.today().isoformat()
+
+    report = RunReport(stem=layout.stem, mode=mode)
+
+    candidates = _as_candidate_list(collect(layout))
+    report.n_candidates = len(candidates)
+    if not candidates:
+        report.reason = "无候选,无需处理"
+        return report
+
+    if mode == "dry-run":
+        report.reason = f"dry-run:{len(candidates)} 个候选,未调用模型"
+        return report
+
+    by_id = {c["candidate_id"]: c for c in candidates}
+    ledger_path = os.path.join(layout.repair_dir, "formula_agent_ledger.jsonl")
+    verdicts_path = os.path.join(layout.repair_dir, "formula_agent_verdicts.jsonl")
+
+    # --- 调度(断点续跑 + 逐批落 ledger)---
+    todo = resume_pending(load_ledger(ledger_path), candidates, batch_size=batch_size)
+    batches = chunk_candidates(todo, batch_size)
+    state = DispatchState.for_adapters(adapters, per_provider=per_provider)
+
+    outcomes: list[BatchOutcome] = []
+    if batches:
+        with ThreadPoolExecutor(max_workers=max(1, len(batches))) as pool:
+            futures = [pool.submit(dispatch_with_fallback, b, adapters, state=state,
+                                   confidence_threshold=confidence_threshold)
+                       for b in batches]
+            for fut in futures:
+                oc = fut.result()
+                outcomes.append(oc)
+                append_ledger(ledger_path, {
+                    "batch_id": oc.batch_id, "candidate_ids": oc.candidate_ids,
+                    "attempts": oc.attempts,
+                    "resolved": [r.__dict__ for r in oc.resolved],
+                    "pending_ids": oc.pending_ids, "status": oc.status,
+                })
+
+    results = [r for oc in outcomes for r in oc.resolved]
+    report.pending_ids = [cid for oc in outcomes for cid in oc.pending_ids]
+
+    # 全部 verdict 落证据台账(不进 md)
+    for r in results:
+        append_ledger(verdicts_path, r.__dict__)
+
+    # --- 闸 3 → 闸 2 → 闸 1 ---
+    survivors: list[AgentResult] = []
+    for r in results:
+        rej = gates.degenerate_gate(r)
+        if rej is None:
+            rej = gates.similarity_gate(
+                r, (by_id.get(r.candidate_id) or {}).get("engine_latex", ""))
+        if rej is not None:
+            report.rejected.append(rej)
+        else:
+            survivors.append(r)
+
+    try:
+        survivors, katex_rejected = gates.katex_gate(
+            survivors, by_id, work_dir=layout.repair_dir, scan_fn=scan_fn)
+        report.rejected.extend(katex_rejected)
+    except gates.KatexUnavailable as e:
+        mode = report.mode = "propose"
+        report.reason = str(e)
+
+    mutating = [r for r in survivors if r.verdict == _CORRECT]
+
+    # --- 闸 4: 全局熔断 ---
+    if mode == "apply":
+        tripped = gates.circuit_breaker(len(mutating), len(candidates),
+                                        ratio=circuit_ratio)
+        if tripped:
+            mode = report.mode = "propose"
+            report.circuit_broken = True
+            report.reason = tripped
+
+    # --- propose: 只落 pending,md 一字不动 ---
+    if mode != "apply":
+        write_corrections(layout.corrections_path, build_corrections_payload(
+            survivors, by_id, stem=layout.stem, today=today, status="pending"))
+        return report
+
+    # --- 无可应用条目(如全 provider 失败/全部 pending/全被前四闸拒收):
+    #     不动 md、不重建、不做回归检查 —— 没有要写的东西就不该碰 md,
+    #     这正是"最坏结果是没改"这条不变量本身,不是可选优化。---
+    if not mutating:
+        write_corrections(layout.corrections_path, build_corrections_payload(
+            survivors, by_id, stem=layout.stem, today=today, status="accepted"))
+        report.applied = 0
+        return report
+
+    # --- apply: baseline → 快照 → 写 accepted → 重建 → 闸 5 ---
+    base = scan(layout.md_path,
+                os.path.join(layout.repair_dir, ".katex_baseline.json"))
+    baseline = len(base.get("errors", [])) if base else 0
+
+    snap = gates.snapshot_md(layout.md_path)
+
+    write_corrections(layout.corrections_path, build_corrections_payload(
+        survivors, by_id, stem=layout.stem, today=today, status="accepted"))
+    reassemble(layout, pdf_path, dpi)
+
+    regression = gates.regression_guard(
+        layout.md_path, work_dir=layout.repair_dir,
+        baseline_hard_errors=baseline, scan_fn=scan_fn)
+    if regression:
+        if snap:
+            gates.rollback_md(layout.md_path, snap)
+        report.rolled_back = True
+        report.reason = regression
+        report.applied = 0
+        return report
+
+    report.applied = len(mutating)
+    return report
