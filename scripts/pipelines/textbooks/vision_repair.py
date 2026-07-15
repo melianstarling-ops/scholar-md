@@ -133,8 +133,10 @@ def parse_batch_vision_response(stdout: str) -> dict:
     }
 
 
-def _resolve_claude_bin() -> list[str]:
-    """解析可被 subprocess 直接调用的 claude 前缀。
+def resolve_claude_bin() -> list[str]:
+    """解析可被 subprocess 直接调用的 claude 前缀。(原 _resolve_claude_bin,
+    2026-07-14 提升为公开 API:formula_agents 的 Claude adapter 需复用它,
+    跨模块 import 私有名是坏味道。)
 
     Windows 上 `claude` 是 npm 的 `.cmd` shim,Python subprocess(CreateProcess)不认
     `.cmd`;优先 `node <node_modules 入口.cjs>` 绕开 shim,同 Project_MRI_Safety
@@ -152,6 +154,9 @@ def _resolve_claude_bin() -> list[str]:
             return [shim]
         return ["cmd", "/c", shim]
     return [shim or "claude"]
+
+
+_resolve_claude_bin = resolve_claude_bin   # 向后兼容:保留旧私有名,现有调用不受影响
 
 
 def call_claude_vision(crop_path: str, timeout: int = 120,
