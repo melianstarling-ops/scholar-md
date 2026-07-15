@@ -182,6 +182,15 @@ def dispatch_with_fallback(batch: list[dict], adapters, *, state: DispatchState,
                 escalate.append(by_id[cid])
                 continue
 
+            if (r.verdict == _CORRECT
+                    and gates.is_pure_token_reorder(
+                        r.latex, by_id[cid].get("engine_latex", ""))):
+                # 高置信但属"保序重排"—— 闸2(similarity_gate)的已知盲区,
+                # 强制交叉验证,不因高置信直接采用。
+                awaiting_cross[cid] = r
+                escalate.append(by_id[cid])
+                continue
+
             settled.append(r)   # accept / not_formula_error / 高置信 correct
 
         out.resolved.extend(settled)

@@ -57,6 +57,16 @@ def _tokens(latex: str) -> list[str]:
     return _TOKEN.findall(normalize_latex(latex))
 
 
+def is_pure_token_reorder(new_latex: str, old_latex: str) -> bool:
+    """归一化后 token 集合相同、但序列不同 = 纯符号重排/身份对调。
+
+    这是 similarity_gate 的已知盲区(a+b=c -> c+b=a: 新符号 0、重合度 1.0 全过)。
+    命中者应被强制交叉验证,不因高置信直接采用。
+    """
+    new_seq, old_seq = _tokens(new_latex), _tokens(old_latex)
+    return bool(new_seq) and set(new_seq) == set(old_seq) and new_seq != old_seq
+
+
 def degenerate_gate(result: AgentResult) -> GateRejection | None:
     """闸 3:空值 / 错误话术 / 拒答文本冒充公式。返回 None = 通过。"""
     if result.verdict not in _MUTATING:

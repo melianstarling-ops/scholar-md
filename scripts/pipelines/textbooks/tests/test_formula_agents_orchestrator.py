@@ -30,6 +30,18 @@ def _go(batch, ads, **kw):
     return dispatch_with_fallback(batch, ads, **kw)
 
 
+def _cand(cid, engine_latex):
+    return {"candidate_id": cid, "page": 1, "block_id": 1,
+            "engine_latex": engine_latex, "crop_path": "/tmp/x.png"}
+
+
+def _resp(cid, verdict, confidence, latex):
+    """单条 candidate 的响应,latex 可显式指定(不依赖 _ok 的默认改写规则)。"""
+    return RawResponse(json.dumps([
+        {"candidate_id": cid, "verdict": verdict, "latex": latex,
+         "confidence": confidence, "note": ""}]), "", 0)
+
+
 # --- 分批 ---
 
 def test_chunk_39_into_10_10_10_9_preserving_order():
@@ -168,6 +180,61 @@ def test_low_confidence_correct_never_applied_when_providers_disagree():
 
     assert out.resolved == []
     assert out.pending_ids == [batch[0]["candidate_id"]]
+
+
+# --- 重排型高置信修正强制交叉验证(堵 similarity_gate 盲区)---
+
+def test_high_confidence_pure_reorder_forces_cross_check_and_accepts_when_second_agrees():
+    """闸2(similarity_gate)的已知盲区:纯符号重排/身份对调(a+b=c -> c+b=a)
+    新符号 0、重合度 1.0,三重判据全过。高置信也不能直接采用,必须强制交叉验证;
+    第二家给出同一重排才采用。"""
+    batch = [_cand("p0001-b0001", "a+b=c")]
+    kimi = FakeAdapter("kimi", [_resp("p0001-b0001", "correct", 0.95, "c+b=a")])
+    gemini = FakeAdapter("gemini", [_resp("p0001-b0001", "correct", 0.9, "c+b=a")])
+
+    out = _go(batch, [kimi, gemini])
+
+    assert gemini.calls == 1        # 不是"高置信直接采用",第二家确实被调用
+    assert len(out.resolved) == 1
+    assert out.resolved[0].cross_checked_by == "gemini"
+
+
+def test_high_confidence_pure_reorder_stays_pending_when_second_disagrees():
+    """第二家给回不同结果(不是同一个重排)-> 说明第一家疑似幻觉了重排,
+    宁可不改:最终 pending,md 不动。"""
+    batch = [_cand("p0001-b0001", "a+b=c")]
+    kimi = FakeAdapter("kimi", [_resp("p0001-b0001", "correct", 0.95, "c+b=a")])
+    gemini = FakeAdapter("gemini", [_resp("p0001-b0001", "correct", 0.9, "a+b=c")])
+
+    out = _go(batch, [kimi, gemini])
+
+    assert out.resolved == []
+    assert out.pending_ids == ["p0001-b0001"]
+
+
+def test_high_confidence_normal_correction_not_a_reorder_uses_first_provider_only():
+    """普通修改(含新符号,非重排)不受这道加固影响:第一家高置信直接定案,
+    第二家不该被调用(不做无谓投票)。"""
+    batch = [_cand("p0001-b0001", "r_{nf}+1")]
+    kimi = FakeAdapter("kimi", [_resp("p0001-b0001", "correct", 0.95, "r_{hf}+1")])
+    gemini = FakeAdapter("gemini", [_resp("p0001-b0001", "correct", 0.9, "r_{hf}+1")])
+
+    out = _go(batch, [kimi, gemini])
+
+    assert gemini.calls == 0
+    assert len(out.resolved) == 1
+    assert out.resolved[0].provider == "kimi"
+
+
+def test_high_confidence_pure_reorder_pending_when_no_further_provider():
+    """重排但链上没有下一家可交叉验证 —— 安全默认:pending,不采用。"""
+    batch = [_cand("p0001-b0001", "a+b=c")]
+    kimi = FakeAdapter("kimi", [_resp("p0001-b0001", "correct", 0.95, "c+b=a")])
+
+    out = _go(batch, [kimi])
+
+    assert out.resolved == []
+    assert out.pending_ids == ["p0001-b0001"]
 
 
 # --- 并发隔离(F6:历史上踩过全局三槽的坑)---

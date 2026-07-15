@@ -2,7 +2,8 @@ import pytest
 
 from scripts.pipelines.textbooks.formula_agents.gates import (
     KatexUnavailable, build_katex_probe_md, circuit_breaker, degenerate_gate,
-    katex_gate, regression_guard, rollback_md, similarity_gate, snapshot_md,
+    is_pure_token_reorder, katex_gate, regression_guard, rollback_md,
+    similarity_gate, snapshot_md,
 )
 from scripts.pipelines.textbooks.formula_agents.protocol import AgentResult
 
@@ -133,6 +134,27 @@ def test_similarity_gate_accepted_tradeoff_rejects_garbled_engine_rescue():
     rej = similarity_gate(_r("\\int_{0}^{\\infty} e^{-x^2}\\,dx"), "0 infty e x2 dx")
     assert rej is not None
     assert rej.gate == "similarity"
+
+
+# --- 重排判据(similarity_gate 盲区的加固前置判据)---
+
+def test_is_pure_token_reorder_detects_identity_swap():
+    """a+b=c -> c+b=a:token 集合相同,序列不同 = 纯重排。"""
+    assert is_pure_token_reorder("c+b=a", "a+b=c") is True
+
+
+def test_is_pure_token_reorder_false_when_unchanged():
+    """完全相同、无改动 —— 不是重排。"""
+    assert is_pure_token_reorder("a+b=c", "a+b=c") is False
+
+
+def test_is_pure_token_reorder_false_when_new_symbol_introduced():
+    """r_{hf} 相对 r_{nf} 引入了新符号 h(非集合相同),不是纯重排。"""
+    assert is_pure_token_reorder("r_{hf}", "r_{nf}") is False
+
+
+def test_is_pure_token_reorder_false_when_new_latex_empty():
+    assert is_pure_token_reorder("", "x") is False
 
 
 @pytest.mark.parametrize("n,total,tripped", [
