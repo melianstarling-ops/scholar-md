@@ -49,9 +49,16 @@ def set_correction_status(doc_dir: str, page: int, block_id, status: str) -> boo
 
 def apply_corrections(blocks: list[dict], page: int, corrections: list[dict]) -> list[dict]:
     """返回新 blocks 列表(不原地改动入参);(page, block_id) 命中、fingerprint 与当前
-    block_content 一致、且 status=="accepted" 才替换 block_content。fingerprint 不匹配
-    (res.json 漂移/重跑变了内容)或未经人工采纳(pending/rejected/缺 status,含加此
-    字段之前产出的旧文件)则不应用——人工确认门是红线,宁可不修,不错配、不代人拍板。"""
+    block_content 一致、且 status=="accepted" 才替换 block_content。
+
+    status=="accepted" 的两个来源(2026-07-14 起):
+      1. 人工在 debug 视图采纳(propose / 熔断模式);
+      2. formula_agents 编排层通过五道准入闸后自动置为 accepted(默认全自动模式)。
+
+    fingerprint 不匹配(res.json 漂移/重跑变了内容)或未采纳(pending/rejected/缺 status)
+    则不应用 —— 宁可不修,不错配。这道指纹门在全自动模式下依然是红线:它防的是
+    "md 中途漂移导致改错位置",与谁拍板无关。
+    """
     by_block_id = {c["block_id"]: c for c in corrections
                    if c.get("page") == page and c.get("status") == "accepted"}
     out = []
