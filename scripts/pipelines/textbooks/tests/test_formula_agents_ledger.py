@@ -1,5 +1,7 @@
+import json
+
 from scripts.pipelines.textbooks.formula_agents.adapters import (
-    FROZEN_CHAIN, build_prompt,
+    FROZEN_CHAIN, _unwrap_stdout, build_prompt,
 )
 from scripts.pipelines.textbooks.formula_agents.ledger import (
     append_ledger, batch_id, load_ledger, resume_pending,
@@ -8,6 +10,21 @@ from scripts.pipelines.textbooks.formula_agents.ledger import (
 
 def _cands(n):
     return [{"candidate_id": f"p{i:04d}-b{i:04d}"} for i in range(1, n + 1)]
+
+
+def test_claude_json_envelope_is_unwrapped_to_inner_result():
+    """claude --output-format json 把结果数组包在 {"result": "<文本>"} 里,
+    须先拆出 result 交给核心校验(真机 smoke:不拆则找不到顶层数组、整批误判协议失败)。"""
+    arr = '[{"candidate_id": "p0001-b0001", "verdict": "accept", "latex": "x", "confidence": 0.9, "note": ""}]'
+    envelope = json.dumps({"type": "result", "is_error": False, "result": arr})
+    assert _unwrap_stdout("claude", envelope) == arr
+
+
+def test_unwrap_is_noop_for_non_claude_and_non_json():
+    raw = '[{"candidate_id": "p0001-b0001"}]'
+    assert _unwrap_stdout("kimi", raw) == raw          # 非 claude 原样
+    assert _unwrap_stdout("claude", "not json at all") == "not json at all"  # 非 JSON 原样
+    assert _unwrap_stdout("claude", '{"type":"x"}') == '{"type":"x"}'        # 无 result 字段原样
 
 
 def test_ledger_roundtrip_and_skips_corrupt_lines(tmp_path):

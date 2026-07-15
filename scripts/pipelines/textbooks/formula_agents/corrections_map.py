@@ -15,6 +15,27 @@ from scripts.pipelines.textbooks.vision_repair import content_fingerprint
 
 _MUTATING = "correct"
 
+_MATH_WRAPPERS = ("$$", "\\[", "\\]", "$")
+
+
+def _strip_math_wrappers(latex: str) -> str:
+    """剥掉模型可能自带的外层数学定界符,避免与下面的 $$ 包裹重复成双层。
+
+    prompt 已要求 latex 只放本体,但模型未必遵守(真机 smoke 见 claude 自带 $$);
+    这里兜底,只剥外层、不动公式内容。
+    """
+    s = (latex or "").strip()
+    for _ in range(3):
+        changed = False
+        for w in _MATH_WRAPPERS:
+            if s.startswith(w):
+                s = s[len(w):].strip(); changed = True
+            if s.endswith(w):
+                s = s[: -len(w)].strip(); changed = True
+        if not changed:
+            break
+    return s
+
 
 def to_correction(result: AgentResult, candidate: dict, *, today: str,
                   status: str = "accepted") -> dict:
@@ -25,7 +46,7 @@ def to_correction(result: AgentResult, candidate: dict, *, today: str,
         "block_id": candidate["block_id"],
         "kind": "+".join(candidate.get("reasons", [])),
         "engine_latex": engine_latex,
-        "corrected_latex": f"$$ {result.latex} $$",
+        "corrected_latex": f"$$ {_strip_math_wrappers(result.latex)} $$",
         "source": f"agent:{result.provider}:{result.model}",
         "confidence": result.confidence,
         "content_fingerprint": content_fingerprint(engine_latex),

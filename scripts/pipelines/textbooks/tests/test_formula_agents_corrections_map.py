@@ -28,6 +28,19 @@ def test_correct_maps_to_accepted_correction_with_provenance():
                          status="pending")["status"] == "pending"
 
 
+@pytest.mark.parametrize("model_latex", [
+    "$$ r_{hf} + 1 $$",      # 模型自带 $$(真机 smoke 见 claude 这么干)
+    "$ r_{hf} + 1 $",
+    "\\[ r_{hf} + 1 \\]",
+    "  $$  r_{hf} + 1  $$  ",
+    "r_{hf} + 1",            # 本就不带
+])
+def test_model_supplied_math_wrappers_are_stripped_not_doubled(model_latex):
+    """无论模型给不给外层定界符,corrected_latex 只有一层 $$,不双层。"""
+    c = to_correction(_res(latex=model_latex), CAND, today="2026-07-14")
+    assert c["corrected_latex"] == "$$ r_{hf} + 1 $$"
+
+
 @pytest.mark.parametrize("verdict", ["accept", "uncertain", "not_formula_error"])
 def test_only_correct_verdict_produces_a_correction(verdict):
     """红线一:其余 verdict 绝不改 md。"""

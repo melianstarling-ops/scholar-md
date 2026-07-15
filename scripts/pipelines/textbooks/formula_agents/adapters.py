@@ -9,6 +9,7 @@ CLI argv 参考 tests/formula_pressure_run.py::build_command —— 参考,不 i
 """
 from __future__ import annotations
 
+import json
 import shutil
 import subprocess
 from typing import Protocol
@@ -52,11 +53,17 @@ def build_prompt(entries: list[dict]) -> str:
         "候选列表:",
     ]
     for i, e in enumerate(entries, 1):
+        crop = e.get("crop_path") or ""
         lines.append(f"{i}. candidate_id={e['candidate_id']}")
-        lines.append(f"   裁图: {e['crop_path']}")
+        if crop:
+            lines.append(f"   裁图(用 Read 工具读取此路径): {crop}")
+        else:
+            lines.append("   裁图: 无(仅凭当前 LaTeX 文本判断;拿不准就返回 uncertain)")
         lines.append(f"   当前 LaTeX: {e.get('engine_latex', '')}")
     ids = ", ".join(f'"{e["candidate_id"]}"' for e in entries)
     lines += [
+        "",
+        "有裁图的候选,先用 Read 工具读取上面给的裁图路径,再与当前 LaTeX 比对。",
         "",
         "只输出一个 JSON 数组,不要任何其他文字。数组必须恰好包含下列 candidate_id,",
         f"顺序完全一致: [{ids}]",
@@ -66,6 +73,7 @@ def build_prompt(entries: list[dict]) -> str:
         ' "latex": "...", "confidence": 0.0, "note": "锚定可见符号的简短证据"}',
         "",
         "confidence 为 0.0-1.0 数值。verdict 为 accept/correct 时 latex 必须非空。",
+        "latex 字段只放公式本体,不要用 $$ 或 \\[ \\] 包裹,不要用字面换行。",
         "LaTeX 反斜杠必须按 JSON 规则正确转义。",
     ]
     return "\n".join(lines)
@@ -76,8 +84,11 @@ def build_argv(provider: str) -> list[str]:
     model = _MODELS[provider]["model"]
     effort = _MODELS[provider]["effort"]
     if provider == "claude":
-        # 复用 vision_repair 的 Windows .cmd shim 绕行方案(F8)
+        # 复用 vision_repair 的 Windows .cmd shim 绕行方案(F8)。
+        # --allowedTools Read:无头模式预授权 Read 工具,否则读裁图会被权限提示拦下
+        # (2026-07-14 真机 smoke 实测:缺此 flag 时 claude 返回“permission not granted”)。
         return resolve_claude_bin() + [
+            "--allowedTools", "Read",
             "--strict-mcp-config", "--output-format", "json", "-p"]
     if provider == "codex":
         return ["codex", "exec", "--model", model,
@@ -112,7 +123,26 @@ class CliAdapter:
             return RawResponse("", f"timeout after {timeout}s: {e}", 124)
         except OSError as e:
             return RawResponse("", f"launch failed: {e}", 127)
-        return RawResponse(proc.stdout or "", proc.stderr or "", proc.returncode)
+        stdout = _unwrap_stdout(self.name, proc.stdout or "")
+        return RawResponse(stdout, proc.stderr or "", proc.returncode)
+
+
+def _unwrap_stdout(provider: str, stdout: str) -> str:
+    """把各 CLI 的输出信封剥成“含 JSON 数组的纯文本”交给核心校验。
+
+    claude `--output-format json` 把真正结果包在 {"result": "<文本>"} 里,数组的 `[`
+    在信封字符串内部,顶层扫描找不到——须先取 result 字段(同 vision_repair 的做法)。
+    其余 CLI 暂原样返回。
+    """
+    if provider != "claude":
+        return stdout
+    try:
+        env = json.loads(stdout)
+    except (json.JSONDecodeError, TypeError):
+        return stdout
+    if isinstance(env, dict) and "result" in env:
+        return str(env.get("result") or "")
+    return stdout
 
 
 def default_adapters() -> list[CliAdapter]:
