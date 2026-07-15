@@ -431,6 +431,56 @@ def _close_known_moment_row(s: str) -> str:
     return _MOMENT_ROW_MISSING_CLOSE_RE.sub(r"\1}}}\2", s)
 
 
+# CJK 教材公式里混进的裸露"文字类" Unicode 字符——KaTeX 严格模式对这些字符会报
+# unicodeTextInMathMode / unknownSymbol 警告(不是硬错,但 debug 卡片里成百上千条噪音)。
+# 区段选取只覆盖"明显是文字/标点/符号,而非数学记号"的范围:
+#   　-〿  CJK 符号与标点(。、（）「」等全角标点)
+#   㐀-䶿  CJK 扩展 A
+#   一-鿿  CJK 统一表意文字(汉字本体)
+#   豈-﫿  CJK 兼容表意文字
+#   ︰-﹏  CJK 兼容形式
+#   ＀-￯  全角/半角形式(全角标点、全角字母数字等)
+#   ①-⓿  带圈字母数字
+#   ■-◿  几何图形(○● 等实心/空心记号,教材里常用作注号)
+# 希腊字母(α β)、数学算符(∑ ∫ × ≤ 等)不在这些区段内,天然不受影响。
+_TEXTISH = (
+    "　-〿"
+    "㐀-䶿"
+    "一-鿿"
+    "豈-﫿"
+    "︰-﹏"
+    "＀-￯"
+    "①-⓿"
+    "■-◿"
+)
+_TEXTISH_RUN_RE = re.compile(f"[{_TEXTISH}]+")
+_TEXTISH_WRAP_SAFE_PREFIXES = ("\\text{", "\\mathrm{", "\\mathbf{")
+
+
+def wrap_cjk_in_text(latex: str) -> str:
+    r"""把数学模式里连续的"文字类" Unicode 字符段包进 \text{...}。
+
+    只在这些字符已经身处 \text{}/\mathrm{}/\mathbf{} 内时跳过(幂等,不双包);
+    其余情况一律原地包裹,不改变字符本身、不改变周围的数学结构。纯 ASCII/希腊
+    字母/数学算符不落在 _TEXTISH 区段内,逐字节不变地穿过本函数。"""
+    out: list[str] = []
+    i, n = 0, len(latex)
+    while i < n:
+        m = _TEXTISH_RUN_RE.match(latex, i)
+        if m:
+            run = m.group(0)
+            prefix = latex[:i].rstrip()
+            if prefix.endswith(_TEXTISH_WRAP_SAFE_PREFIXES):
+                out.append(run)
+            else:
+                out.append("\\text{" + run + "}")
+            i = m.end()
+        else:
+            out.append(latex[i])
+            i += 1
+    return "".join(out)
+
+
 def sanitize_latex(s: str) -> str:
     r"""引擎方言清洗:删冗余命令 + 合并非法相邻双脚本 + 链式 atop→substack + \cdotd 拆合。"""
     s = _decode_latex_entities(s)
@@ -451,6 +501,7 @@ def sanitize_latex(s: str) -> str:
     s = _downgrade_split_invisible_delimiters(s)
     s = _close_known_moment_row(s)
     s = _drop_unmatched_closing_braces(s)
+    s = wrap_cjk_in_text(s)
     return s
 
 

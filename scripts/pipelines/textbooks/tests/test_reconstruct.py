@@ -6,6 +6,7 @@ from scripts.pipelines.textbooks.reconstruct import (
     reconstruct_markdown,
     restore_emphasis_dots,
     sanitize_latex,
+    wrap_cjk_in_text,
 )
 
 FIX = Path(__file__).parent / "fixtures"
@@ -646,3 +647,108 @@ def test_golden_p6_column_suspect_output_is_deterministic():
     md1, _ = reconstruct_markdown(blocks, stem="paul", page=6)
     md2, _ = reconstruct_markdown(blocks, stem="paul", page=6)
     assert md1 == md2                                     # 锁"确定性",不锁"正确性"
+
+
+# --- wrap_cjk_in_text(CJK sanitizer,清 unicodeTextInMathMode/unknownSymbol 警告) ---
+
+def test_wrap_cjk_in_text_wraps_leading_word():
+    assert wrap_cjk_in_text("峰值 MPE=x") == r"\text{峰值} MPE=x"
+
+
+def test_wrap_cjk_in_text_wraps_trailing_punctuation():
+    assert wrap_cjk_in_text("a=b。") == "a=b\\text{。}"
+
+
+def test_wrap_cjk_in_text_wraps_multiple_runs_in_one_formula():
+    src = r"峰值 MPE=\frac{MPE\times 平均时间 (s)}{5\times 脉冲宽度 (s)}"
+    expected = r"\text{峰值} MPE=\frac{MPE\times \text{平均时间} (s)}{5\times \text{脉冲宽度} (s)}"
+    assert wrap_cjk_in_text(src) == expected
+
+
+def test_wrap_cjk_in_text_leaves_pure_ascii_formula_untouched():
+    s = r"Z_{0}=\left(\frac{L}{C}\right)^{1/2}"
+    assert wrap_cjk_in_text(s) == s
+
+
+def test_wrap_cjk_in_text_leaves_greek_and_operators_untouched():
+    # 希腊字母/数学算符不在 _TEXTISH 区段内,天然不受影响
+    s = r"\alpha\beta\sum\int\times\le\Gamma\Omega"
+    assert wrap_cjk_in_text(s) == s
+
+
+def test_wrap_cjk_in_text_is_idempotent():
+    s = "峰值 MPE=x。"
+    once = wrap_cjk_in_text(s)
+    assert wrap_cjk_in_text(once) == once
+
+
+def test_wrap_cjk_in_text_does_not_double_wrap_existing_text_command():
+    assert wrap_cjk_in_text(r"\text{已包}") == r"\text{已包}"
+
+
+def test_wrap_cjk_in_text_does_not_double_wrap_existing_mathrm_command():
+    assert wrap_cjk_in_text(r"\mathrm{已包}") == r"\mathrm{已包}"
+
+
+def test_wrap_cjk_in_text_does_not_double_wrap_existing_mathbf_command():
+    assert wrap_cjk_in_text(r"\mathbf{已包}") == r"\mathbf{已包}"
+
+
+def test_wrap_cjk_in_text_wraps_circled_digit_and_geometric_shape():
+    # ①-⓿(带圈数字)与 ■-◿(几何图形,含○)是 KaTeX unknownSymbol 警告的常见来源
+    assert wrap_cjk_in_text("x^{①}") == r"x^{\text{①}}"
+    assert wrap_cjk_in_text("^{○}") == r"^{\text{○}}"
+
+
+def test_wrap_cjk_in_text_wraps_fullwidth_punctuation():
+    # 全角括号/顿号等落在全角/半角形式区段("＀-￯")
+    assert wrap_cjk_in_text("a（b）") == r"a\text{（}b\text{）}"
+
+
+def test_sanitize_latex_wraps_cjk_via_full_pipeline():
+    # sanitize_latex 是 wrap_cjk_in_text 的唯一集成点,确认串联生效
+    assert sanitize_latex("峰值 MPE=x") == r"\text{峰值} MPE=x"
+
+
+def test_sanitize_latex_ascii_formula_unaffected_by_cjk_wrap():
+    s = r"\int\displaylimits_{a}^{b}"
+    # 冗余命令仍被清洗,但纯 ASCII 结果不因新增的 CJK 包裹而改变
+    assert sanitize_latex(s) == r"\int_{a}^{b}"
+
+
+def test_reconstruct_wraps_cjk_in_display_formula():
+    blocks = [{"block_label": "display_formula",
+               "block_content": "$$ 峰值 MPE=x $$", "block_order": 1}]
+    md, _ = reconstruct_markdown(blocks)
+    assert r"\text{峰值}" in md
+    assert "峰值 MPE" not in md            # 裸露 CJK 已被包裹,不再原样出现
+
+
+def test_reconstruct_leaves_pure_formula_display_untouched():
+    blocks = [{"block_label": "display_formula",
+               "block_content": r"$$ Z_{0}=\left(\frac{L}{C}\right)^{1/2} $$", "block_order": 1}]
+    md, _ = reconstruct_markdown(blocks)
+    assert r"$$ Z_{0}=\left(\frac{L}{C}\right)^{1/2} $$" in md
+    assert r"\text{" not in md
+
+
+def test_reconstruct_wraps_cjk_inside_inline_math_span_in_text_block():
+    blocks = [{"block_label": "text",
+               "block_content": "见 $峰值 P=1$ 一节。", "block_order": 1}]
+    md, _ = reconstruct_markdown(blocks)
+    assert r"$\text{峰值} P=1$" in md
+    # 数学定界符外的正文中文本来就是文字,不应被 \text{} 包裹
+    assert md.startswith("见 ")
+    assert md.rstrip("\n").endswith("一节。")
+
+
+def test_reconstruct_wraps_cjk_inside_table_math_span():
+    blocks = [{
+        "block_label": "table",
+        "block_content": r"<table><tr><td>$ 电压 U=1 $</td></tr></table>",
+        "block_order": None,
+        "block_bbox": [0, 0, 10, 10],
+        "block_id": 3,
+    }]
+    md, _ = reconstruct_markdown(blocks)
+    assert r"$ \text{电压} U=1 $" in md
