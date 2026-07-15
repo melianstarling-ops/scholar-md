@@ -63,6 +63,13 @@ def _correction_preview(b: dict, corrections_by_id: dict) -> dict | None:
         "kind": c.get("kind", ""),
         "engine_latex": c.get("engine_latex", ""),
         "crop_b64": c.get("crop_b64", ""),
+        "provider": c.get("provider", ""),
+        "model": c.get("model", ""),
+        "effort": c.get("effort", ""),
+        "attempt": c.get("attempt", 0),
+        "verdict": c.get("verdict", ""),
+        "cross_checked_by": c.get("cross_checked_by"),
+        "note": c.get("note", ""),
     }
 
 

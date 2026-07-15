@@ -9,6 +9,8 @@ from scripts.pipelines.textbooks import debug_view as dv
 from scripts.pipelines.textbooks.paths import resolve_layout
 from scripts.pipelines.textbooks.vision_repair import content_fingerprint
 
+APP_JS = os.path.join(dv.ASSETS, "app.js")
+
 
 def _layout(tmp_path, stem="book"):
     return resolve_layout(stem, str(tmp_path / "out"), str(tmp_path / "work_root"))
@@ -388,3 +390,27 @@ def test_debug_asset_inline_math_padding_does_not_swallow_prose_between_formulas
     assert "$n$uncoupled" not in proc.stdout
     assert "vectors$\\mathbf{V}" not in proc.stdout
     assert "$and$" not in proc.stdout
+
+
+def test_correction_preview_carries_agent_provenance():
+    from scripts.pipelines.textbooks.debug_payload import _correction_preview
+    from scripts.pipelines.textbooks.vision_repair import content_fingerprint
+
+    corr = {"page": 1, "block_id": 1, "engine_latex": "r_{nf} + 1",
+            "corrected_latex": "$$ r_{hf} + 1 $$", "status": "pending",
+            "content_fingerprint": content_fingerprint("r_{nf} + 1"),
+            "provider": "kimi", "model": "kimi-coding", "effort": "thinking",
+            "confidence": 0.72, "attempt": 1, "verdict": "correct",
+            "cross_checked_by": "gemini", "note": "下标是 h"}
+    preview = _correction_preview({"block_id": 1, "block_content": "r_{nf} + 1"},
+                                  {1: corr})
+    assert preview is not None
+    assert preview["provider"] == "kimi"
+    assert preview["cross_checked_by"] == "gemini"
+
+
+def test_app_js_renders_agent_provenance():
+    with open(APP_JS, encoding="utf-8") as f:
+        src = f.read()
+    for token in ("provider", "cross_checked_by", "模型来源"):
+        assert token in src, token

@@ -674,6 +674,11 @@
       : mdit.render(c.engine_latex || "");
     const stCls = c.status === "accepted" ? "st-accepted" : c.status === "rejected" ? "st-rejected" : "st-pending";
     const stText = c.status === "accepted" ? "✓ 已采纳" : c.status === "rejected" ? "✕ 已驳回" : "待审";
+    const xchk = c.cross_checked_by ? ` · 交叉验证 ${c.cross_checked_by}` : '';
+    const conf = (c.confidence || c.confidence === 0) ? ` · 置信度 ${c.confidence}` : '';
+    const prov = c.provider
+      ? `<div class="corr-prov">模型来源: ${c.provider}/${c.model} (${c.effort})${conf}${xchk} · 第 ${c.attempt} 次尝试</div>`
+      : '';
     return `<div class="corrcard ${stCls}" data-page="${page}" data-bid="${c.block_id}" data-fi="${fi}">
       <div class="corrhead"><span class="corrtag">AI 提案</span><span class="corrstatus">${stText}</span><span class="corrconf">置信度:${esc(c.confidence || "?")}</span></div>
       <div class="corrcompare">
@@ -681,6 +686,7 @@
         <div class="corrarrow">→</div>
         <div class="corrpane"><span class="corrlabel">AI 修正</span><div class="corrmd">${mdit.render(c.corrected_latex || "")}</div></div>
       </div>
+      ${prov}
       <div class="corractions">
         <button class="corrbtn accept${c.status === "accepted" ? " active" : ""}">✓ 采纳</button>
         <button class="corrbtn reject${c.status === "rejected" ? " active" : ""}">✕ 驳回</button>
