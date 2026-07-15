@@ -379,9 +379,10 @@ def test_katex_gate_rejection_excludes_that_candidate(tmp_path):
 
 def test_circuit_breaker_downgrades_to_propose_and_md_stays_byte_identical(tmp_path):
     layout = _layout(tmp_path)
-    ads = [FakeAdapter("kimi", [_ok(_cands(2), confidence=0.95)])]   # 2/2 = 100% > 60%
+    cands = _cands(6)   # 6/6 = 100% > 60%,且 ≥ 熔断候选数下限(小集不判)
+    ads = [FakeAdapter("kimi", [_ok(cands, confidence=0.95)])]
 
-    report, rebuilt = _run(layout, ads, circuit_ratio=0.6)
+    report, rebuilt = _run(layout, ads, collect_fn=lambda _: cands, circuit_ratio=0.6)
 
     assert report.circuit_broken and report.mode == "propose"
     assert rebuilt["n"] == 0
