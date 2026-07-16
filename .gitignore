@@ -14,6 +14,8 @@
 .venv/
 .venv-textbooks/
 __pycache__/
+.pytest_cache/
+.superpowers/
 *.pyc
 *.pyo
 
@@ -35,8 +37,11 @@ TODO.md
 03_Output/
 04_Docs/
 
-# --- 私有:教科书 PDF 汇总副本(大容量源文件,不入 git) ---
-docs/textbook_pdfs/
+# --- 私有:本机教材 PDF 库(大容量,不走网盘,不入 git) ---
+/textbooks_library/
+
+# --- 历史 docs 已迁入 04_Docs/ 与 02_Source/,禁止在公开根重新生成 ---
+docs/
 
 # --- 私有:调试视图产物(内嵌文档页面图;所有者指定默认落 scripts/pipelines/patents/,
 #     故全局拦截,任何位置都不入 git) ---

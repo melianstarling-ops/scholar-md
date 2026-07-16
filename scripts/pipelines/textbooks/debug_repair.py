@@ -2,7 +2,7 @@
 
 对被 selfcheck 标记"疑似漏识别/结构错"的 display_formula 块,按 block_bbox
 高 DPI 裁成 PNG + 导出待修工作单(page/block_id/bbox/engine_latex/crop 路径),
-供下一步无头 `claude -p` 读图生成修正 LaTeX(见 docs/handoff/2026-07-04-HANDOFF-
+供下一步无头 `claude -p` 读图生成修正 LaTeX(见 04_Docs/plans/2026-07-04-HANDOFF-
 textbooks-formula-vision-repair.md §2/§4)。
 """
 from __future__ import annotations
