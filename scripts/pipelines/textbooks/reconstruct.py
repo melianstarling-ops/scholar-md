@@ -515,6 +515,110 @@ def wrap_cjk_in_text(latex: str) -> str:
     return "".join(out)
 
 
+# OCR 有时把数学(\ln、上下标、\circ 等)误包进 \text{...},KaTeX 严格模式下这些在 text
+# 模式里是硬报错("Can't use function '\ln' in text mode"、"Can't use '^' in text mode")。
+# 下面把这类误包的数学拆回数学模式,同时保留真正的文字段(CJK/单位)仍在 \text{} 内。
+_MATH_OP_NAMES = frozenset((
+    "ln sin cos tan cot sec csc log exp lim max min sup inf arg deg det dim gcd hom ker "
+    "sqrt frac sum int prod oint sinh cosh tanh coth arcsin arccos arctan"
+).split())
+# text 模式硬报错的触发符:裸 ^ / _,或数学函数/算符命令(需反斜杠,\text{max} 中的 max 不触发)
+_MATH_IN_TEXT_TRIGGER = re.compile(
+    r"[\^_]|\\(?:" + "|".join(sorted(_MATH_OP_NAMES, key=len, reverse=True)) + r")(?![a-zA-Z])")
+
+
+def _read_command(s: str, i: int) -> tuple[str, int]:
+    r"""s[i]=='\\';返回 (命令串, 下一位置)。\name(字母名)或 \<单个非字母,如 \ \, \%>。"""
+    j = i + 1
+    if j < len(s) and s[j].isalpha():
+        k = j
+        while k < len(s) and s[k].isalpha():
+            k += 1
+        return s[i:k], k
+    return s[i:j + 1], j + 1
+
+
+def _read_script_arg(s: str, i: int) -> tuple[str, int]:
+    r"""s[i] 是 ^ 或 _;读其参数(braced {..} / 命令 / 单字符),返回 (参数串, 下一位置)。"""
+    j = i + 1
+    if j >= len(s):
+        return "", j
+    if s[j] == "{":
+        end = _match_braced(s, j)
+        if end != -1:
+            return s[j:end], end
+        return s[j], j + 1
+    if s[j] == "\\":
+        return _read_command(s, j)
+    return s[j], j + 1
+
+
+def _split_math_from_text(content: str) -> str:
+    r"""把误包进 \text{} 的数学(^ _ 及数学算符)拆回数学模式,文字段仍留 \text{}。
+
+    上下标的"基座"取其前最长的 alnum 连续串一并入数学(172^{\circ} 不拆成 17+2);
+    数学算符命令(\ln 等)移出并加尾随空格,防与后文字母黏成 \lnZ。控制空格 \ 等
+    text-safe 命令留在文字段。"""
+    out: list[str] = []
+    buf: list[str] = []
+
+    def flush() -> None:
+        if buf:
+            out.append("\\text{" + "".join(buf) + "}")
+            buf.clear()
+
+    i, n = 0, len(content)
+    while i < n:
+        c = content[i]
+        if c in "^_":
+            base = ""
+            while buf and buf[-1].isalnum():
+                base = buf.pop() + base
+            flush()
+            arg, i = _read_script_arg(content, i)
+            out.append((base or "{}") + c + arg)
+            continue
+        if c == "\\":
+            cmd, j = _read_command(content, i)
+            if cmd[1:] in _MATH_OP_NAMES:
+                flush()
+                out.append(cmd + " ")           # 尾随空格防黏连
+            else:
+                buf.append(cmd)                 # \ \, \% 等 text-safe 命令留在文字
+            i = j
+            continue
+        buf.append(c)
+        i += 1
+    flush()
+    return "".join(out)
+
+
+def _repair_math_in_text(s: str) -> str:
+    r"""扫描每个 \text{...}(括号配对),含数学触发符则拆分;合法文字 \text{} 原样不动。"""
+    if "\\text{" not in s:
+        return s
+    out: list[str] = []
+    i = 0
+    while True:
+        k = s.find("\\text{", i)
+        if k == -1:
+            out.append(s[i:])
+            break
+        out.append(s[i:k])
+        brace = k + len("\\text")                # 指向 '{'
+        end = _match_braced(s, brace)
+        if end == -1:                            # 花括号不配对 → 放弃,不破坏
+            out.append(s[k:])
+            break
+        content = s[brace + 1:end - 1]
+        if _MATH_IN_TEXT_TRIGGER.search(content):
+            out.append(_split_math_from_text(content))
+        else:
+            out.append(s[k:end])
+        i = end
+    return "".join(out)
+
+
 def sanitize_latex(s: str) -> str:
     r"""引擎方言清洗:删冗余命令 + 合并非法相邻双脚本 + 链式 atop→substack + \cdotd 拆合。"""
     s = _decode_latex_entities(s)
@@ -538,6 +642,7 @@ def sanitize_latex(s: str) -> str:
     s = _downgrade_split_invisible_delimiters(s)
     s = _close_known_moment_row(s)
     s = _drop_unmatched_closing_braces(s)
+    s = _repair_math_in_text(s)
     s = wrap_cjk_in_text(s)
     return s
 

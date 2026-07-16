@@ -423,6 +423,39 @@ def test_sanitize_latex_drops_stray_display_open_delimiter():
         r"\begin{array}{l}x\end{array}"
 
 
+# --- _repair_math_in_text:OCR 把数学(\ln/^/_)错包进 \text{},KaTeX text 模式硬报错 ---
+
+def test_sanitize_latex_leaves_plain_text_command_untouched():
+    # 合法 \text{}(纯文字/单位,无 ^ _ 或数学算符)绝不改写
+    for s in (r"\text{ N p}", r"\text{d B}", r"\text{已包}", r"\mathrm{ G }"):
+        assert sanitize_latex(s) == s
+
+
+def test_sanitize_latex_splits_math_operator_out_of_text():
+    # 数学算符 \ln 被错包进 \text{}:算符移出数学模式,尾随空格防与后文 Z 黏成 \lnZ
+    assert sanitize_latex(r"n=0\text{:\ \ln}Z_{1}") == r"n=0\text{:\ }\ln Z_{1}"
+
+
+def test_sanitize_latex_splits_superscript_out_of_text():
+    # ^{\circ} 被错包 → 上标移出,基座数字随之入数学;— 留在 \text{}(text 模式合法,无警告)
+    assert sanitize_latex(r"\underline{\text{—172^{\circ}}}") == r"\underline{\text{—}172^{\circ}}"
+
+
+def test_sanitize_latex_splits_cjk_text_from_trailing_math_subscript():
+    # 有 CJK:文字留在 \text{},数学(带基座的下标 C_1)拆出到数学模式
+    assert sanitize_latex(r"\text{并联电容C_1}") == r"\text{并联电容}C_1"
+
+
+def test_sanitize_latex_splits_cjk_text_around_embedded_math():
+    # 数学夹在两段 CJK 中间:两侧文字各自保留 \text{},中间 L_f 拆出
+    assert sanitize_latex(r"\text{扼流电感L_f组成}") == r"\text{扼流电感}L_f\text{组成}"
+
+
+def test_sanitize_latex_math_in_text_pops_whole_number_as_base():
+    # 上标基座取最长 alnum 串:172 整体入数学,不把数字拆成 17+2
+    assert sanitize_latex(r"\text{—172^{\circ}}") == r"\text{—}172^{\circ}"
+
+
 def test_table_pass_through_sanitizes_inline_math_entities():
     blocks = [{
         "block_label": "table",
