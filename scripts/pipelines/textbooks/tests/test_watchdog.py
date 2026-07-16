@@ -99,3 +99,26 @@ def test_main_forwards_allow_sleep_to_convert(monkeypatch):
     with pytest.raises(SystemExit):
         wd.main()
     assert "--allow-sleep" in captured["argv"]
+
+
+def test_main_forwards_force_ocr_and_rest_schedule(monkeypatch):
+    captured = {}
+
+    def fake_run_until_done(argv, max_restarts):
+        captured["argv"] = argv
+        return 0
+
+    monkeypatch.setattr(wd, "run_until_done", fake_run_until_done)
+    monkeypatch.setattr("sys.argv", [
+        "watchdog.py", "--src", "x.pdf", "--force-ocr",
+        "--work-hours", "6", "--rest-minutes", "40",
+    ])
+
+    with pytest.raises(SystemExit) as exc:
+        wd.main()
+
+    assert exc.value.code == 0
+    argv = captured["argv"]
+    assert "--force-ocr" in argv
+    assert argv[argv.index("--work-hours") + 1] == "6.0"
+    assert argv[argv.index("--rest-minutes") + 1] == "40.0"

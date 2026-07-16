@@ -37,6 +37,12 @@ def main() -> None:
     ap.add_argument("--out", default=None, help="交付根(md+assets,默认就地)")
     ap.add_argument("--work-dir", default=None, help="过程根(默认 <out>/_work_root,转发给 convert.py)")
     ap.add_argument("--dpi", type=int, default=cp.DEFAULT_DPI, help="栅格化 DPI(默认150)")
+    ap.add_argument("--force-ocr", action="store_true",
+                    help="忽略优质文本层并强制逐页栅格化 OCR")
+    ap.add_argument("--work-hours", type=float, default=6,
+                    help="每轮连续 OCR 时长(小时，默认6)")
+    ap.add_argument("--rest-minutes", type=float, default=40,
+                    help="每轮结束后的 GPU 空闲时长(分钟，默认40)")
     ap.add_argument("--max-restarts", type=int, default=cp.MAX_RESTARTS,
                     help="累计重启兜底上限")
     ap.add_argument("--no-selfcheck-json", action="store_true",
@@ -44,6 +50,8 @@ def main() -> None:
     ap.add_argument("--allow-sleep", action="store_true",
                     help="允许系统按电源计划睡眠(默认转换期间阻止睡眠)")
     args = ap.parse_args()
+    if args.work_hours <= 0 or args.rest_minutes <= 0:
+        ap.error("--work-hours 与 --rest-minutes 必须大于 0")
     argv = ["--src", args.src, "--dpi", str(args.dpi)]
     if args.out:
         argv += ["--out", args.out]
@@ -51,6 +59,10 @@ def main() -> None:
         argv += ["--work-dir", args.work_dir]
     if args.no_selfcheck_json:
         argv.append("--no-selfcheck-json")
+    if args.force_ocr:
+        argv.append("--force-ocr")
+    argv += ["--work-hours", str(args.work_hours),
+             "--rest-minutes", str(args.rest_minutes)]
     if args.allow_sleep:
         argv.append("--allow-sleep")
     with keep_system_awake(enabled=not args.allow_sleep):

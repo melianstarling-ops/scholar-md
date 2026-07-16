@@ -320,6 +320,16 @@ def test_job_argv_passes_allow_sleep_to_convert_subprocess(tmp_path):
     assert "--allow-sleep" in argv
 
 
+def test_job_argv_passes_force_ocr_and_rest_schedule(tmp_path):
+    argv = bp._job_argv(tmp_path / "A.pdf", tmp_path / "out", None, 150,
+                        no_selfcheck_json=False, force_ocr=True,
+                        work_hours=6, rest_minutes=40)
+
+    assert "--force-ocr" in argv
+    assert argv[argv.index("--work-hours") + 1] == "6"
+    assert argv[argv.index("--rest-minutes") + 1] == "40"
+
+
 def test_run_invokes_katex_scan_by_default(tmp_path, monkeypatch):
     d = tmp_path / "src"
     d.mkdir()
@@ -419,3 +429,25 @@ def test_main_no_katex_scan_threads_disabled_to_run(monkeypatch):
 
     assert rc == 0
     assert captured["kwargs"]["katex_scan_enabled"] is False
+
+
+def test_main_forwards_force_ocr_and_rest_schedule(monkeypatch):
+    captured = {}
+
+    def fake_run(src_paths, **kwargs):
+        captured["src_paths"] = src_paths
+        captured["kwargs"] = kwargs
+        return 0, []
+
+    monkeypatch.setattr(bp, "run", fake_run)
+    monkeypatch.setattr("sys.argv", [
+        "batch.py", "--src", "src", "--force-ocr",
+        "--work-hours", "6", "--rest-minutes", "40",
+    ])
+
+    rc = bp.main()
+
+    assert rc == 0
+    assert captured["kwargs"]["force_ocr"] is True
+    assert captured["kwargs"]["work_hours"] == 6
+    assert captured["kwargs"]["rest_minutes"] == 40

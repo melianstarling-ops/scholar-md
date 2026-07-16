@@ -17,6 +17,17 @@ def _make_scan_pdf(tmp_path, n_pages):
     return str(p)
 
 
+def _make_text_pdf(tmp_path, n_pages):
+    """干净文本层 PDF → triage 判 B。"""
+    doc = fitz.open()
+    for _ in range(n_pages):
+        page = doc.new_page()
+        page.insert_text((72, 72), "clean born-digital text " * 20)
+    p = tmp_path / "text.pdf"
+    doc.save(str(p))
+    return str(p)
+
+
 def _stub_engine(monkeypatch, behavior):
     """behavior: page(1-indexed)->blocks 或抛异常的可调用。桩掉 predict_page,
     并模拟 engine 对非空结果落 res.json 的副作用(空结果不落,复刻真 engine)。"""
@@ -51,6 +62,46 @@ def test_convert_full_run_A(tmp_path, monkeypatch):
     md = open(res["md_path"], encoding="utf-8").read()
     assert "page 1 content" in md and "page 3 content" in md
     assert res["failed_pages"] == []
+
+
+def test_convert_force_ocr_processes_clean_text_pdf(tmp_path, monkeypatch):
+    pdf = _make_text_pdf(tmp_path, 1)
+    _stub_engine(monkeypatch, _one_text_block)
+
+    res = cv.convert_pdf(pdf, str(tmp_path / "out"), dpi=100, force_ocr=True)
+
+    assert res["route"] == "F"
+    assert os.path.exists(res["md_path"])
+
+
+def test_scheduled_rest_sleeps_after_active_window():
+    times = iter((0.0, 21600.0, 24000.0))
+    sleeps = []
+    scheduler = cv.ScheduledRest(21600, 2400, clock=lambda: next(times),
+                                 sleeper=sleeps.append)
+
+    assert scheduler.rest_if_due() is True
+    assert sleeps == [2400]
+
+
+def test_convert_checks_scheduled_rest_after_each_page(tmp_path, monkeypatch):
+    pdf = _make_scan_pdf(tmp_path, 2)
+    _stub_engine(monkeypatch, _one_text_block)
+    checks = []
+
+    class FakeScheduledRest:
+        def __init__(self, work_seconds, rest_seconds):
+            assert (work_seconds, rest_seconds) == (21600, 2400)
+
+        def rest_if_due(self):
+            checks.append(True)
+            return False
+
+    monkeypatch.setattr(cv, "ScheduledRest", FakeScheduledRest)
+
+    cv.convert_pdf(pdf, str(tmp_path / "out"), dpi=100)
+
+    assert checks == [True, True]
 
 
 def test_convert_disk_bounded(tmp_path, monkeypatch):
@@ -269,7 +320,7 @@ def test_convert_no_selfcheck_json_when_disabled(tmp_path, monkeypatch):
 def test_convert_cli_no_selfcheck_json_forwards_flag(monkeypatch):
     captured = {}
     def fake_convert_pdf(pdf_path, deliverables_dir, work_dir=None, dpi=150,
-                         write_selfcheck=True):
+                         write_selfcheck=True, **_kwargs):
         captured["write_selfcheck"] = write_selfcheck
         captured["work_dir"] = work_dir
         return {"route": "A", "md_path": "x.md",
@@ -278,6 +329,28 @@ def test_convert_cli_no_selfcheck_json_forwards_flag(monkeypatch):
     monkeypatch.setattr("sys.argv", ["convert.py", "--src", "x.pdf", "--no-selfcheck-json"])
     cv.main()
     assert captured["write_selfcheck"] is False
+
+
+def test_convert_cli_forwards_force_ocr_and_rest_schedule(monkeypatch):
+    captured = {}
+
+    def fake_convert_pdf(*_args, **kwargs):
+        captured.update(kwargs)
+        return {"route": "F", "md_path": "x.md",
+                "selfcheck": {"total": 0, "in_md": 0, "missing": []},
+                "failed_pages": []}
+
+    monkeypatch.setattr(cv, "convert_pdf", fake_convert_pdf)
+    monkeypatch.setattr("sys.argv", [
+        "convert.py", "--src", "x.pdf", "--force-ocr",
+        "--work-hours", "6", "--rest-minutes", "40",
+    ])
+
+    cv.main()
+
+    assert captured["force_ocr"] is True
+    assert captured["work_seconds"] == 21600
+    assert captured["rest_seconds"] == 2400
 
 
 def _one_image_block(page):

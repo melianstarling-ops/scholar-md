@@ -21,6 +21,30 @@ from scripts.pipelines.textbooks import checkpoint as cp
 from scripts.pipelines.textbooks import images
 from scripts.pipelines.textbooks.power import keep_system_awake
 
+DEFAULT_WORK_SECONDS = 6 * 60 * 60
+DEFAULT_REST_SECONDS = 40 * 60
+
+
+class ScheduledRest:
+    """在页边界执行的活跃时长节流，不中断正在进行的 OCR 调用。"""
+
+    def __init__(self, work_seconds: float, rest_seconds: float, *,
+                 clock=time.monotonic, sleeper=time.sleep):
+        self.work_seconds = work_seconds
+        self.rest_seconds = rest_seconds
+        self.clock = clock
+        self.sleeper = sleeper
+        self.window_started = clock()
+
+    def rest_if_due(self) -> bool:
+        if self.clock() - self.window_started < self.work_seconds:
+            return False
+        print(f"[rest] 已连续运行 {self.work_seconds / 3600:g}h，"
+              f"休息 {self.rest_seconds / 60:g}min...")
+        self.sleeper(self.rest_seconds)
+        self.window_started = self.clock()
+        return True
+
 
 def _expected_visual_filenames(blocks: list[dict], page: int) -> list[str]:
     return [images.crop_filename(page, b.get("block_id"))
@@ -114,11 +138,14 @@ def _register_deferred(pdf_path: str, out_dir: str, stem: str) -> dict:
 
 def convert_pdf(pdf_path: str, deliverables_dir: str | None = None,
                 work_dir: str | None = None, dpi: int = cp.DEFAULT_DPI,
-                write_selfcheck: bool = True) -> dict:
+                write_selfcheck: bool = True, force_ocr: bool = False,
+                work_seconds: float = DEFAULT_WORK_SECONDS,
+                rest_seconds: float = DEFAULT_REST_SECONDS) -> dict:
     stem = os.path.splitext(os.path.basename(pdf_path))[0]
     deliverables_dir = deliverables_dir or os.path.dirname(os.path.abspath(pdf_path))
     layout = resolve_layout(stem, deliverables_dir, work_dir)
-    route = triage(pdf_path)
+    detected_route = triage(pdf_path)
+    route = "F" if force_ocr and detected_route == "B" else detected_route
     if route == "B":
         return _register_deferred(pdf_path, deliverables_dir, stem)
 
@@ -154,6 +181,7 @@ def convert_pdf(pdf_path: str, deliverables_dir: str | None = None,
     todo = [p for p in cp.pages_todo(work_dir_, total) if p not in poisoned]
     done = sum(1 for i in range(1, total + 1) if cp.is_page_done(work_dir_, i))
     durations: list[float] = []
+    scheduled_rest = ScheduledRest(work_seconds, rest_seconds)
     for page in todo:
         t = time.time()
         cp.set_in_progress(manifest, page)   # predict 前留痕:进程硬崩后可检出毒页
@@ -182,6 +210,7 @@ def convert_pdf(pdf_path: str, deliverables_dir: str | None = None,
         nfail = len(manifest["failed_pages"])
         print(f"[page {page}/{total}] {durations[-1]:.0f}s "
               f"(完成 {done} 失败 {nfail} ETA {eta_h:.1f}h)")
+        scheduled_rest.rest_if_due()
 
     # 陈旧失败清理 + 去重:已完成的页移除;同页多次失败只留最后一条(含 process-killed)
     dedup: dict[int, dict] = {}
@@ -218,14 +247,25 @@ def main() -> None:
     ap.add_argument("--out", default=None, help="交付根(md+assets,默认就地)")
     ap.add_argument("--work-dir", default=None, help="过程根(默认 <out>/_work_root)")
     ap.add_argument("--dpi", type=int, default=cp.DEFAULT_DPI, help="栅格化 DPI(默认150)")
+    ap.add_argument("--force-ocr", action="store_true",
+                    help="忽略优质文本层并强制逐页栅格化 OCR")
+    ap.add_argument("--work-hours", type=float, default=6,
+                    help="每轮连续 OCR 时长(小时，默认6)")
+    ap.add_argument("--rest-minutes", type=float, default=40,
+                    help="每轮结束后的 GPU 空闲时长(分钟，默认40)")
     ap.add_argument("--no-selfcheck-json", action="store_true",
                     help="不写 <stem>_selfcheck.json(控制台摘要仍输出)")
     ap.add_argument("--allow-sleep", action="store_true",
                     help="允许系统按电源计划睡眠(默认转换期间阻止睡眠)")
     args = ap.parse_args()
+    if args.work_hours <= 0 or args.rest_minutes <= 0:
+        ap.error("--work-hours 与 --rest-minutes 必须大于 0")
     with keep_system_awake(enabled=not args.allow_sleep):
         res = convert_pdf(args.src, args.out, args.work_dir, dpi=args.dpi,
-                          write_selfcheck=not args.no_selfcheck_json)
+                          write_selfcheck=not args.no_selfcheck_json,
+                          force_ocr=args.force_ocr,
+                          work_seconds=args.work_hours * 3600,
+                          rest_seconds=args.rest_minutes * 60)
     print(f"[route={res['route']}] md={res['md_path']}")
     if res.get("failed_pages"):
         print(f"[textbooks] 失败页 {len(res['failed_pages'])}:",
