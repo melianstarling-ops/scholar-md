@@ -1,0 +1,60 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>{{TITLE}}</title>
+  <style>{{KATEX_CSS}}</style>
+  <style>{{REPORT_CSS}}</style>
+</head>
+<body>
+  <header class="hero">
+    <div>
+      <p class="eyebrow">FORMULA OCR BENCHMARK · HUMAN REVIEW</p>
+      <h1>39张裁图，两轮模型，一处完成核对</h1>
+      <p class="lede">原图是证据，ROOT是审阅基准；相同转写自动归并，不同之处保持展开。</p>
+    </div>
+    <div id="summary" class="summary" aria-label="运行概览"></div>
+  </header>
+
+  <main>
+    <section class="run-panel" aria-labelledby="run-title">
+      <div class="section-head">
+        <div><p class="section-kicker">RUN LEDGER</p><h2 id="run-title">模型与协议状态</h2></div>
+        <button id="toggle-ledger" class="quiet-button" type="button" aria-expanded="false">展开状态</button>
+      </div>
+      <div id="run-ledger" class="run-ledger" hidden></div>
+    </section>
+
+    <section class="review-section" aria-labelledby="review-title">
+      <div class="review-toolbar">
+        <div>
+          <p class="section-kicker">REVIEW MATRIX</p>
+          <h2 id="review-title">逐项横向核对</h2>
+        </div>
+        <div class="control-groups">
+          <div class="segmented" role="group" aria-label="候选筛选">
+            <button id="filter-all" class="active" data-filter="all" type="button">全部保留项</button>
+            <button id="filter-differences" data-filter="differences" type="button">只看错误项</button>
+          </div>
+          <div class="segmented" role="group" aria-label="结果显示方式">
+            <button id="view-grouped" class="active" data-view="grouped" type="button">归并相同答案</button>
+            <button id="view-all-models" data-view="models" type="button">展开全部模型</button>
+          </div>
+        </div>
+      </div>
+      <p id="visible-count" class="visible-count" aria-live="polite"></p>
+      <div id="review-list" class="review-list"></div>
+    </section>
+  </main>
+
+  <dialog id="image-dialog" class="image-dialog">
+    <button id="close-dialog" class="dialog-close" type="button" aria-label="关闭">×</button>
+    <img id="dialog-image" alt="公式原始裁图放大">
+  </dialog>
+
+  <script id="report-data" type="application/json">{{PAYLOAD_JSON}}</script>
+  <script>{{KATEX_JS}}</script>
+  <script>{{REPORT_JS}}</script>
+</body>
+</html>
