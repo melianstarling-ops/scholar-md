@@ -45,10 +45,26 @@ function findInlineEnd(md, start) {
 }
 
 // 左到右分词:先认 $$ 再认 $;\$ 转义不当分隔符;<!-- page: N --> 更新当前页。
+// 跳过 ``` / ~~~ 围栏代码块:代码里的 $(如 BASIC 字符串变量 A$=INKEY$)不是数学,
+// Typora 也不当公式渲染;不跳会把整段代码误判成 $…$ 报红(假阳性)。
 export function extractMath(md) {
   const out = [];
   let i = 0, page = null, block_ids = [];
+  let inFence = false, fenceChar = '';
+  const atLineStart = (pos) => pos === 0 || md[pos - 1] === '\n';
   while (i < md.length) {
+    if (atLineStart(i)) {
+      const m = md.slice(i).match(/^[ \t]*(`{3,}|~{3,})/);
+      if (m) {
+        const ch = m[1][0];
+        if (!inFence) { inFence = true; fenceChar = ch; }
+        else if (ch === fenceChar) { inFence = false; fenceChar = ''; }
+        const nl = md.indexOf('\n', i);
+        i = nl === -1 ? md.length : nl + 1;
+        continue;
+      }
+    }
+    if (inFence) { i++; continue; }
     if (md.startsWith('<!-- page:', i)) {
       const end = md.indexOf('-->', i);
       if (end !== -1) {

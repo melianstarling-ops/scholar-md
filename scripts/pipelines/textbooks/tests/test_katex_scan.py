@@ -144,3 +144,42 @@ def test_js_scanner_keeps_tagged_display_math_out_of_inline_scan(tmp_path):
     assert all("figure" not in f["latex"] for f in formulas)
     assert not any("tag works only in display equations" in e["error"]
                    for e in payload["result"]["errors"])
+
+
+def test_js_scanner_skips_dollars_inside_code_fence(tmp_path):
+    # ``` 围栏代码里的 $(如 BASIC 字符串变量 A$=INKEY$)不是数学,不该报红(假阳性);
+    # 围栏之外的真公式仍要被扫到。
+    node = shutil.which("node")
+    if not node:
+        import pytest
+        pytest.skip("node not available")
+
+    scanner = os.path.abspath(ks._MJS)
+    md = "\n".join([
+        "```",
+        'Spcbr$=INKEY$',
+        'IF Spcbr$=CHR$(32) THEN GOTO Loop:',
+        "E2#=0",
+        "```",
+        "",
+        "真公式在围栏外 $a_b_c$ 应被扫到。",
+    ])
+    probe = tmp_path / "probe_fence.mjs"
+    probe.write_text(
+        "\n".join([
+            "import { pathToFileURL } from 'node:url';",
+            f"const scanner = {json.dumps(scanner)};",
+            f"const md = {json.dumps(md)};",
+            "const mod = await import(pathToFileURL(scanner).href);",
+            "console.log(JSON.stringify({ formulas: mod.extractMath(md), result: mod.scan(md) }));",
+        ]),
+        encoding="utf-8",
+    )
+    proc = subprocess.run([node, str(probe)], capture_output=True, text=True,
+                          encoding="utf-8", check=True)
+    payload = json.loads(proc.stdout)
+    formulas = payload["formulas"]
+    # 围栏内的 $ 不产生任何公式;只认出围栏外那一个
+    assert [f["latex"] for f in formulas] == ["a_b_c"]
+    # 围栏内代码没有被误判成公式报红
+    assert not any("INKEY" in e.get("latex_head", "") for e in payload["result"]["errors"])
