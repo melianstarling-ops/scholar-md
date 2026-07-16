@@ -183,3 +183,32 @@ def test_js_scanner_skips_dollars_inside_code_fence(tmp_path):
     assert [f["latex"] for f in formulas] == ["a_b_c"]
     # 围栏内代码没有被误判成公式报红
     assert not any("INKEY" in e.get("latex_head", "") for e in payload["result"]["errors"])
+
+
+def test_js_scanner_stops_inline_span_at_crlf_paragraph_break(tmp_path):
+    # md 是 \r\n 换行:两个价格里的字面 $($5.00 / $25.00)分属不同段落,不该跨 \r\n\r\n
+    # 段落界配成一个 $…$ 数学(否则把 ___ 之类当公式报红,纯假阳性)。
+    node = shutil.which("node")
+    if not node:
+        import pytest
+        pytest.skip("node not available")
+
+    scanner = os.path.abspath(ks._MJS)
+    md = "The kit costs $5.00 today.\r\n\r\nYes, on disk ___ ($25.00) please."
+    probe = tmp_path / "probe_crlf.mjs"
+    probe.write_text(
+        "\n".join([
+            "import { pathToFileURL } from 'node:url';",
+            f"const scanner = {json.dumps(scanner)};",
+            f"const md = {json.dumps(md)};",
+            "const mod = await import(pathToFileURL(scanner).href);",
+            "console.log(JSON.stringify({ formulas: mod.extractMath(md), result: mod.scan(md) }));",
+        ]),
+        encoding="utf-8",
+    )
+    proc = subprocess.run([node, str(probe)], capture_output=True, text=True,
+                          encoding="utf-8", check=True)
+    payload = json.loads(proc.stdout)
+    # 单个未配对的 $ 各自开不成 span(段落界处终止)→ 无公式、无报红
+    assert payload["formulas"] == []
+    assert payload["result"]["errors"] == []

@@ -22,6 +22,7 @@ function isEscaped(md, pos) {
 function isMarkdownBoundary(md, pos) {
   if (md.startsWith('<!--', pos)) return true;
   if (md.startsWith('\n\n', pos)) return true;
+  if (md.startsWith('\r\n\r\n', pos)) return true;   // CRLF 段落分隔(md 为 \r\n 换行)
   if (md.startsWith('![', pos)) return true;
   if (md.startsWith('\n![', pos)) return true;
   return false;
