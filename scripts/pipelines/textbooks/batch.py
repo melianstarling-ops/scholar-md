@@ -17,6 +17,7 @@ import sys
 from pathlib import Path
 
 from scripts.pipelines.textbooks import checkpoint as cp
+from scripts.pipelines.textbooks import katex_triage
 from scripts.pipelines.textbooks.katex_scan import scan_katex_work_pages
 from scripts.pipelines.textbooks.paths import resolve_layout
 from scripts.pipelines.textbooks.power import keep_system_awake
@@ -82,12 +83,18 @@ def _already_done(out_root: Path, work_root: Path | None, pdf_path: Path, dpi: i
 
 
 def _job_argv(pdf: Path, out_root: Path, work_root: Path | None, dpi: int,
-              no_selfcheck_json: bool, allow_sleep: bool = False) -> list[str]:
+              no_selfcheck_json: bool, allow_sleep: bool = False,
+              force_ocr: bool = False, work_hours: float = 6,
+              rest_minutes: float = 40) -> list[str]:
     argv = ["--src", str(pdf), "--out", str(out_root), "--dpi", str(dpi)]
     if work_root:
         argv.extend(["--work-dir", str(work_root)])
     if no_selfcheck_json:
         argv.append("--no-selfcheck-json")
+    if force_ocr:
+        argv.append("--force-ocr")
+    argv.extend(["--work-hours", str(work_hours),
+                 "--rest-minutes", str(rest_minutes)])
     if allow_sleep:
         argv.append("--allow-sleep")
     return argv
@@ -117,7 +124,10 @@ def run(src_paths: list[str], out: str | None = None, dpi: int = cp.DEFAULT_DPI,
         work_dir: str | None = None, resume: bool = False, limit: int | None = None,
         max_restarts: int = cp.MAX_RESTARTS, no_selfcheck_json: bool = False,
         katex_scan_enabled: bool = True, allow_sleep: bool = False,
-        runner=None) -> tuple[int, list[dict]]:
+        force_ocr: bool = False, work_hours: float = 6,
+        rest_minutes: float = 40, runner=None) -> tuple[int, list[dict]]:
+    if work_hours <= 0 or rest_minutes <= 0:
+        raise ValueError("work_hours 与 rest_minutes 必须大于 0")
     pdfs = discover(src_paths)
     if limit is not None:
         pdfs = pdfs[:limit]
@@ -140,7 +150,8 @@ def run(src_paths: list[str], out: str | None = None, dpi: int = cp.DEFAULT_DPI,
             results.append({"stem": pdf.stem, "status": "SKIP",
                              "route": None, "failed_pages": 0, "selfcheck": None})
             continue
-        argv = _job_argv(pdf, out_root, work_root, dpi, no_selfcheck_json, allow_sleep)
+        argv = _job_argv(pdf, out_root, work_root, dpi, no_selfcheck_json, allow_sleep,
+                         force_ocr, work_hours, rest_minutes)
         rc = run_until_done(argv, max_restarts=max_restarts, runner=runner)
         if rc != 0:
             n_giveup += 1
@@ -159,6 +170,12 @@ def run(src_paths: list[str], out: str | None = None, dpi: int = cp.DEFAULT_DPI,
                 katex_result = {}
             if katex_result is None:
                 print(f"[katex] node 缺失,跳过 {pdf.stem}")
+            elif katex_result:
+                # 硬错分桶 + 视觉工单(SOP-09):有硬错时打印各桶 + 落工单,指引后续修复
+                try:
+                    katex_triage.report_for_batch(layout, katex_result)
+                except Exception as e:
+                    print(f"[triage] 分桶跳过 {pdf.stem}: {e}")
         results.append(summary)
         if summary["status"] == "B":
             print(f"  [B] {pdf.stem} — 已登记 deferred")
@@ -185,6 +202,12 @@ def main() -> int:
     ap.add_argument("--out", default=None, help="产物根目录(省略=仓库 03_Output/textbooks/)")
     ap.add_argument("--work-dir", default=None, help="过程根(默认 <out>/_work_root)")
     ap.add_argument("--dpi", type=int, default=cp.DEFAULT_DPI, help="栅格化 DPI(默认150)")
+    ap.add_argument("--force-ocr", action="store_true",
+                    help="忽略优质文本层并强制逐页栅格化 OCR")
+    ap.add_argument("--work-hours", type=float, default=6,
+                    help="每轮连续 OCR 时长(小时，默认6)")
+    ap.add_argument("--rest-minutes", type=float, default=40,
+                    help="每轮结束后的 GPU 空闲时长(分钟，默认40)")
     ap.add_argument("--resume", action="store_true", help="跳过已全部跑完的书")
     ap.add_argument("--limit", type=int, default=None, help="只处理发现列表的前 N 本(调试/小样验证)")
     ap.add_argument("--max-restarts", type=int, default=cp.MAX_RESTARTS,
@@ -195,6 +218,8 @@ def main() -> int:
                     help="允许系统按电源计划睡眠(默认转换期间阻止睡眠)")
     ap.add_argument("--list", action="store_true", help="只列出待处理 PDF,不转换")
     args = ap.parse_args()
+    if args.work_hours <= 0 or args.rest_minutes <= 0:
+        ap.error("--work-hours 与 --rest-minutes 必须大于 0")
 
     src_paths = args.src if args.src else [str(DEFAULT_SOURCE_ROOT)]
     try:
@@ -212,7 +237,10 @@ def main() -> int:
                         limit=args.limit, max_restarts=args.max_restarts,
                         no_selfcheck_json=args.no_selfcheck_json,
                         katex_scan_enabled=not args.no_katex_scan,
-                        allow_sleep=args.allow_sleep)
+                        allow_sleep=args.allow_sleep,
+                        force_ocr=args.force_ocr,
+                        work_hours=args.work_hours,
+                        rest_minutes=args.rest_minutes)
         return rc
     except ValueError as e:
         print(f"[ERROR] {e}", file=sys.stderr)

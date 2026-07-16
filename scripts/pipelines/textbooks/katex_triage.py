@@ -108,6 +108,37 @@ def _attribute(layout, errors: list[dict]) -> None:
             e["attribution"] = "ambiguous" if hits else "unmatched"
 
 
+def bucketize(errors: list[dict], crops_dir: str | None = None) -> dict:
+    r"""把一批扫描错误就地分桶(填 bucket/signature/needs_vision)+ 统计 + 组视觉工单。
+
+    每项需含 error/latex_head;若含 page + block_id(triage 归属后)或 block_ids(render_errors),
+    且给了 crops_dir,则补 crop_path。返回 {buckets, undefined_commands, worklist}。
+    triage() 与 batch.py 收尾共用此核心,保证分桶口径一致。
+    """
+    for e in errors:
+        bucket, sig = classify_error(e.get("error", ""), e.get("latex_head", ""))
+        e["bucket"] = bucket
+        e["signature"] = sig
+        e["needs_vision"] = _BUCKETS[bucket][1]
+        if crops_dir and e.get("crop_path") is None:
+            bid = e.get("block_id")
+            if bid is None:
+                bids = e.get("block_ids") or []
+                bid = bids[0] if bids else None
+            pg = e.get("page")
+            if pg is not None and bid is not None:
+                crop = os.path.join(crops_dir, f"page_{int(pg):04d}_block_{bid}.png")
+                e["crop_path"] = crop if os.path.exists(crop) else None
+    bucket_counts: dict[str, int] = {}
+    undef_counts: dict[str, int] = {}
+    for e in errors:
+        bucket_counts[e["bucket"]] = bucket_counts.get(e["bucket"], 0) + 1
+        if e["bucket"] == "undefined_command" and e.get("signature"):
+            undef_counts[e["signature"]] = undef_counts.get(e["signature"], 0) + 1
+    return {"buckets": bucket_counts, "undefined_commands": undef_counts,
+            "worklist": [e for e in errors if e.get("needs_vision")]}
+
+
 def triage(layout, *, scan_fn=None, attribute: bool = True) -> dict:
     """扫 deliverable md → 分桶 → (可选)填块归属。返回 report。"""
     scan = scan_fn or katex_scan.scan_katex
@@ -118,27 +149,44 @@ def triage(layout, *, scan_fn=None, attribute: bool = True) -> dict:
         return {"stem": layout.stem, "scanned": False, "errors": [], "warnings": 0,
                 "buckets": {}, "worklist": []}
     errors = d.get("errors", [])
-    for e in errors:
-        bucket, tag = classify_error(e.get("error", ""), e.get("latex_head", ""))
-        e["bucket"] = bucket
-        e["signature"] = tag
-        e["needs_vision"] = _BUCKETS[bucket][1]
     if attribute and errors:
         _attribute(layout, errors)
-
-    bucket_counts: dict[str, int] = {}
-    undef_counts: dict[str, int] = {}
-    for e in errors:
-        bucket_counts[e["bucket"]] = bucket_counts.get(e["bucket"], 0) + 1
-        if e["bucket"] == "undefined_command" and e.get("signature"):
-            undef_counts[e["signature"]] = undef_counts.get(e["signature"], 0) + 1
-    worklist = [e for e in errors if e.get("needs_vision")]
+    agg = bucketize(errors, crops_dir=os.path.join(layout.repair_dir, "crops"))
     return {
         "stem": layout.stem, "scanned": True,
         "hard_errors": len(errors), "warnings": len(d.get("warnings", [])),
-        "buckets": bucket_counts, "undefined_commands": undef_counts,
-        "errors": errors, "worklist": worklist,
+        "buckets": agg["buckets"], "undefined_commands": agg["undefined_commands"],
+        "errors": errors, "worklist": agg["worklist"],
     }
+
+
+def report_for_batch(layout, katex_result: dict) -> str | None:
+    """batch.py 收尾用:对已有 render_errors 分桶,打印摘要 + 写视觉工单。返回工单路径或 None。
+
+    复用 batch 已跑出的 render_errors(带 block_ids 归属),不二次扫描。硬错为 0 时静默。
+    """
+    errors = (katex_result or {}).get("errors", [])
+    if not errors:
+        return None
+    agg = bucketize(errors, crops_dir=os.path.join(layout.repair_dir, "crops"))
+    print(f"  [triage] {layout.stem} 硬错 {len(errors)} 分桶:")
+    for key, n in sorted(agg["buckets"].items(), key=lambda kv: -kv[1]):
+        name, needs = _BUCKETS[key]
+        flag = "需视觉" if needs else "确定性(评估加规则)"
+        extra = ""
+        if key == "undefined_command":
+            top = sorted(agg["undefined_commands"].items(), key=lambda kv: -kv[1])
+            extra = "  " + ", ".join(f"{c}×{n2}" for c, n2 in top[:6])
+        print(f"    {name:22} {n:3} [{flag}]{extra}")
+    worklist = agg["worklist"]
+    if not worklist:
+        return None
+    os.makedirs(layout.repair_dir, exist_ok=True)
+    wl = os.path.join(layout.repair_dir, f"{layout.stem}_vision_worklist.json")
+    with open(wl, "w", encoding="utf-8") as f:
+        json.dump({"stem": layout.stem, "worklist": worklist}, f, ensure_ascii=False, indent=2)
+    print(f"    视觉工单 {len(worklist)} 条 -> {wl}  (处置见 SOP-09_KaTeX_Error_Triage)")
+    return wl
 
 
 def _print_report(rep: dict, worklist_path: str | None) -> None:
