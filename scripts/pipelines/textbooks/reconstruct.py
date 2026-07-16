@@ -74,86 +74,75 @@ def _unwrap_ensuremath(s: str) -> str:
         s = s[:m.start()] + s[brace + 1:end - 1] + s[end:]
 
 
-def _collapse_double_subscript(s: str) -> str:
-    r"""合并同一节点上相邻的多个下标 _{A}_{B}(…) → _{A\ B(…)}。
+def _read_script_body(s: str, i: int, n: int) -> tuple[str, int]:
+    r"""s[i] 是 _ 或 ^;读其紧跟的脚本体,返回 (体内容不含花括号, 体后位置)。
+    braced {A}→A;命令 \name→\name;单字符→该字符。花括号不配对/越界返回 ("", -1)。"""
+    j = i + 1
+    if j >= n:
+        return "", -1
+    if s[j] == "{":
+        end = _match_braced(s, j)
+        if end == -1:
+            return "", -1
+        return s[j + 1:end - 1], end
+    if s[j] == "\\":
+        cmd, k = _read_command(s, j)
+        return cmd, k
+    return s[j], j + 1
 
-    §3 已证正则区分不出"真双下标"和"多层嵌套后接单下标",故走括号配对扫描:
-    只有当一个 _{…}(花括号配对完整)后紧跟(允许中间空白)另一个 _{…} 时才合并;
-    单下标、下标后接上标(_{A}^{B})、嵌套花括号(\overrightarrow{\mathcal{H}}_{\mathrm{t}})
-    都不会误触。合并只为消除 KaTeX 硬报错(double subscript),不猜原书断行。"""
+
+def _collapse_adjacent_scripts(s: str, mark: str) -> str:
+    r"""合并同一节点上相邻的多个下标/上标(mark 为 '_' 或 '^')→ {A\ B}。
+
+    首个及后续脚本体均可为 braced {A} 或裸 token(单字符/命令,如 V_g_{\max} 的 _g);
+    只有紧邻(允许中间空白)的同类脚本才合并,单脚本、下标后接上标都不误触。合并只为
+    消除 KaTeX double subscript/superscript 硬报错,不猜原书断行。上标全为 prime/数字时
+    用空格拼接(还原 x'^2 类),否则用 \ 。"""
     out: list[str] = []
     i, n = 0, len(s)
     while i < n:
-        if s[i] == "_" and i + 1 < n and s[i + 1] == "{":
-            end = _match_braced(s, i + 1)
-            if end == -1:                       # 花括号不配对,原样放行不改写
+        if s[i] == mark:
+            first, end = _read_script_body(s, i, n)
+            if end == -1:                       # 花括号不配对/越界,原样放行
                 out.append(s[i])
                 i += 1
                 continue
-            inners = [s[i + 2:end - 1]]         # 第一个下标体
+            inners = [first]
             j = end
             while True:
                 k = j
-                while k < n and s[k] in " \t":  # 跳过下标间空白
+                while k < n and s[k] in " \t":  # 跳过脚本间空白
                     k += 1
-                if not (k < n and s[k] == "_" and k + 1 < n and s[k + 1] == "{"):
+                if not (k < n and s[k] == mark):
                     break
-                nxt = _match_braced(s, k + 1)
+                body, nxt = _read_script_body(s, k, n)
                 if nxt == -1:
                     break
-                inners.append(s[k + 2:nxt - 1])
+                inners.append(body)
                 j = nxt
-            if len(inners) > 1:                 # 命中相邻双(多)下标 → 合并
-                out.append("_{" + r"\ ".join(inners) + "}")
+            if len(inners) > 1:                 # 命中相邻双(多)脚本 → 合并
+                if mark == "^" and all(p in (r"\prime", r"\prime\prime") or p.isdigit()
+                                       for p in inners):
+                    joiner = " "
+                else:
+                    joiner = r"\ "
+                out.append(mark + "{" + joiner.join(inners) + "}")
                 i = j
-            else:                               # 仅单下标,原样保留
+            else:                               # 仅单脚本,原样保留
                 out.append(s[i:end])
                 i = end
             continue
         out.append(s[i])
         i += 1
     return "".join(out)
+
+
+def _collapse_double_subscript(s: str) -> str:
+    return _collapse_adjacent_scripts(s, "_")
 
 
 def _collapse_double_superscript(s: str) -> str:
-    r"""合并同一节点上相邻的多个上标 ^{A}^{B}(…) → ^{A\ B(…)}。
-
-    与双下标清洗同样只处理 braced 形态,用于消除 KaTeX double superscript 硬报错;
-    `x'^{2}` 这类合法 prime+上标不触发。"""
-    out: list[str] = []
-    i, n = 0, len(s)
-    while i < n:
-        if s[i] == "^" and i + 1 < n and s[i + 1] == "{":
-            end = _match_braced(s, i + 1)
-            if end == -1:
-                out.append(s[i])
-                i += 1
-                continue
-            inners = [s[i + 2:end - 1]]
-            j = end
-            while True:
-                k = j
-                while k < n and s[k] in " \t":
-                    k += 1
-                if not (k < n and s[k] == "^" and k + 1 < n and s[k + 1] == "{"):
-                    break
-                nxt = _match_braced(s, k + 1)
-                if nxt == -1:
-                    break
-                inners.append(s[k + 2:nxt - 1])
-                j = nxt
-            if len(inners) > 1:
-                joiner = " " if all(part in (r"\prime", r"\prime\prime") or part.isdigit()
-                                    for part in inners) else r"\ "
-                out.append("^{" + joiner.join(inners) + "}")
-                i = j
-            else:
-                out.append(s[i:end])
-                i = end
-            continue
-        out.append(s[i])
-        i += 1
-    return "".join(out)
+    return _collapse_adjacent_scripts(s, "^")
 
 
 def _decode_latex_entities(s: str) -> str:

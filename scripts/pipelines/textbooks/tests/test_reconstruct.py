@@ -174,6 +174,28 @@ def test_sanitize_latex_collapses_adjacent_double_subscript():
     assert sanitize_latex(r"x_{A}_{B}") == r"x_{A\ B}"
 
 
+def test_sanitize_latex_collapses_bare_then_braced_double_subscript():
+    # V_g_{\max}:裸首下标 _g 后紧跟 _{\max} → 合并(消 KaTeX double subscript 硬错)
+    assert sanitize_latex(r"V_g_{\max} = 0.2\ V") == r"V_{g\ \max} = 0.2\ V"
+
+
+def test_sanitize_latex_collapses_bare_bare_double_subscript():
+    assert sanitize_latex(r"x_a_b") == r"x_{a\ b}"
+
+
+def test_sanitize_latex_leaves_single_bare_subscript_untouched():
+    assert sanitize_latex(r"x_i") == r"x_i"
+    assert sanitize_latex(r"\int_a^b") == r"\int_a^b"
+
+
+def test_sanitize_latex_bare_subscript_then_superscript_untouched():
+    assert sanitize_latex(r"x_a^b") == r"x_a^b"
+
+
+def test_sanitize_latex_collapses_bare_then_braced_double_superscript():
+    assert sanitize_latex(r"x^a^{b}") == r"x^{a\ b}"
+
+
 def test_sanitize_latex_collapses_triple_subscript():
     # 连续三下标也应全部合并进一个下标(循环直到稳定)
     assert sanitize_latex(r"x_{A}_{B}_{C}") == r"x_{A\ B\ C}"
