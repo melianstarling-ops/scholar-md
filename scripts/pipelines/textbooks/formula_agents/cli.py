@@ -55,6 +55,11 @@ def main(argv: list[str] | None = None) -> int:
             print(f"[formula_agents] 无快照可回滚: {snap}", file=sys.stderr)
             return 1
         gates.rollback_md(layout.md_path, snap)
+        # 同步还原 corrections.json(apply 时留下的快照),否则下次 reassemble 会重新引入。
+        # 仅在快照存在时还原;手动回滚下"无快照"不等于"该删",绝不盲删既有修正。
+        corr_snap = layout.corrections_path + ".pre_agent.bak"
+        if os.path.exists(corr_snap):
+            gates.rollback_corrections(layout.corrections_path, corr_snap)
         print(f"[formula_agents] 已回滚 → {layout.md_path}")
         return 0
 

@@ -369,6 +369,7 @@ def run_agents(layout, *, adapters, pdf_path: str, dpi: int = 300,
     baseline = len(base.get("errors", [])) if base else 0
 
     snap = gates.snapshot_md(layout.md_path)
+    corr_snap = gates.snapshot_corrections(layout.corrections_path)
 
     write_corrections(layout.corrections_path, build_corrections_payload(
         survivors, by_id, stem=layout.stem, today=today, status="accepted"))
@@ -380,6 +381,7 @@ def run_agents(layout, *, adapters, pdf_path: str, dpi: int = 300,
     if regression:
         if snap:
             gates.rollback_md(layout.md_path, snap)
+        gates.rollback_corrections(layout.corrections_path, corr_snap)
         report.rolled_back = True
         report.reason = regression
         report.applied = 0

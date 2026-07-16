@@ -418,6 +418,43 @@ def test_regression_after_apply_triggers_automatic_rollback(tmp_path):
     assert _md(layout) == MD_BEFORE                       # 已自动回滚
 
 
+def test_regression_rollback_also_reverts_corrections_when_file_was_absent(tmp_path):
+    # 回归回滚必须同时还原 corrections.json:原本不存在 → 回滚后不该残留本轮坏修正,
+    # 否则下次 reassemble 会重新引入回归(核心不变量"最坏=没改")。
+    layout = _layout(tmp_path)
+    ads = [FakeAdapter("kimi", [_ok(_cands(2), confidence=0.95)])]
+    calls = {"n": 0}
+
+    def scan(md_path, out_path, **kw):
+        calls["n"] += 1
+        return {"errors": [{"error": "boom"}]} if calls["n"] >= 3 else {"errors": []}
+
+    report, _ = _run(layout, ads, scan_fn=scan)
+
+    assert report.rolled_back
+    assert not os.path.exists(layout.corrections_path)   # 刚写的坏修正已随回滚清除
+
+
+def test_regression_rollback_restores_prior_corrections(tmp_path):
+    # 回滚要还原到写入前的 corrections.json,而非删光:历史 accepted 修正必须保留。
+    layout = _layout(tmp_path)
+    prior = [{"candidate_id": "p0009-b0009", "status": "accepted",
+              "corrected_latex": "OLD", "content_fingerprint": "fp"}]
+    with open(layout.corrections_path, "w", encoding="utf-8") as f:
+        json.dump({"corrections": prior}, f, ensure_ascii=False)
+    ads = [FakeAdapter("kimi", [_ok(_cands(2), confidence=0.95)])]
+    calls = {"n": 0}
+
+    def scan(md_path, out_path, **kw):
+        calls["n"] += 1
+        return {"errors": [{"error": "boom"}]} if calls["n"] >= 3 else {"errors": []}
+
+    report, _ = _run(layout, ads, scan_fn=scan)
+
+    assert report.rolled_back
+    assert _corrections(layout) == prior                 # 逐字还原,不含本轮坏修正
+
+
 def test_all_providers_failing_leaves_md_byte_identical(tmp_path):
     """核心不变量:额度耗尽/调用全挂 → 最坏结果是"没改",绝不是"改坏"。"""
     layout = _layout(tmp_path)

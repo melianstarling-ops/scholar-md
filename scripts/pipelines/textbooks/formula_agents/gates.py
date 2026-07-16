@@ -273,6 +273,26 @@ def rollback_md(md_path: str, snapshot_path: str) -> None:
     shutil.copy2(snapshot_path, md_path)
 
 
+def snapshot_corrections(path: str) -> str | None:
+    """写 corrections 前快照(与 md 快照对称)。文件不存在返回 None(编码"原本没有")。"""
+    if not os.path.exists(path):
+        return None
+    snap = path + ".pre_agent.bak"
+    shutil.copy2(path, snap)
+    return snap
+
+
+def rollback_corrections(path: str, snapshot_path: str | None) -> None:
+    """回滚 corrections.json:有快照则逐字还原;快照为 None(原本不存在)则删除本轮写的。
+
+    只回滚 md 而留下已写入的坏 correction,会让下次 reassemble 重新引入回归 —— 破坏
+    "回滚后最坏结果=没改"这条不变量。故回归回滚时必须同步还原本文件。"""
+    if snapshot_path and os.path.exists(snapshot_path):
+        shutil.copy2(snapshot_path, path)
+    elif os.path.exists(path):
+        os.remove(path)
+
+
 def regression_guard(md_path: str, *, work_dir: str, baseline_hard_errors: int,
                      scan_fn=None) -> str | None:
     """闸 5:应用并重建后,KaTeX 硬错不得增加。
