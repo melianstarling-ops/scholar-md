@@ -735,6 +735,8 @@ def test_route_b_hybrid_falls_back_whole_book_on_adoption_error(tmp_path, monkey
 
 
 def test_audit_failure_keeps_checkpoints_and_returns_suspect(tmp_path, monkeypatch):
+    # hybrid 中纯审计步骤(audit_document)异常:采信已成功 → 保留已采信 md、
+    # 记 audit_error、SUSPECT、检查点完好;不回退内容、adoption_error=False。
     _inject_thresholds(monkeypatch)
     pdf = _make_prose_pdf(tmp_path, 2)
     _stub_engine_adopt(monkeypatch)
@@ -745,13 +747,15 @@ def test_audit_failure_keeps_checkpoints_and_returns_suspect(tmp_path, monkeypat
 
     out = str(tmp_path / "out")
     res = cv.convert_pdf(pdf, out, dpi=100, born_digital_mode="hybrid")
-    assert res["adoption_error"] is True
-    assert res["source_audit"]["summary"]["status"] == "SUSPECT"
+    assert res["adoption_error"] is False               # 采信本身成功
+    report = res["source_audit"]
+    assert report["summary"]["status"] == "SUSPECT"
+    assert any(iss["code"] == "audit_error" for iss in report.get("issues", []))
     layout = resolve_layout("born", out)
     assert cp.is_page_done(layout.work_dir, 1)          # 审计崩溃不删检查点
     assert cp.is_page_done(layout.work_dir, 2)
     md = open(res["md_path"], encoding="utf-8").read()
-    assert "browm" in md                                # 回退 OCR 内容
+    assert "brown" in md and "browm" not in md          # 保留已采信 md,不回退
 
 
 def test_resume_rebuilds_missing_audit_without_reocr(tmp_path, monkeypatch):
@@ -876,3 +880,98 @@ def test_route_b_hybrid_resume_byte_identical(tmp_path, monkeypatch):
 
     assert md1 == md2                                    # 逐字节一致
     assert "brown" in md2                                # 采信生效
+
+
+def test_audit_report_route_field_reflects_true_route_c_and_f(tmp_path, monkeypatch):
+    # Important 1:audit_document 内部硬编码 route="B";convert 落盘前覆写为真实路由。
+    _inject_thresholds(monkeypatch)
+    _stub_engine(monkeypatch, _one_text_block)
+    # F 路(force_ocr 把 detected B 降级为 F)——真实 triage
+    pdf_f = _make_prose_pdf(tmp_path, 1)
+    out_f = str(tmp_path / "outf")
+    res_f = cv.convert_pdf(pdf_f, out_f, dpi=100, force_ocr=True)
+    assert res_f["route"] == "F"
+    rep_f = json.load(open(resolve_layout("born", out_f).source_audit_path, encoding="utf-8"))
+    assert rep_f["route"] == "F"                         # 落盘报告 route 真实
+    assert res_f["source_audit"]["route"] == "F"
+    # C 路(注入 triage→C)
+    monkeypatch.setattr(cv, "triage", lambda _p: "C")
+    pdf_c = _make_prose_pdf(tmp_path, 1)
+    out_c = str(tmp_path / "outc")
+    res_c = cv.convert_pdf(pdf_c, out_c, dpi=100)
+    assert res_c["route"] == "C"
+    rep_c = json.load(open(resolve_layout("born", out_c).source_audit_path, encoding="utf-8"))
+    assert rep_c["route"] == "C"                         # 落盘报告 route 真实
+    assert res_c["source_audit"]["route"] == "C"
+
+
+def test_ocr_audit_failure_writes_suspect_and_removes_marker(tmp_path, monkeypatch):
+    # Important 2:任何路的纯审计异常 → SUSPECT(audit_error)落盘 + 文档计为完成 +
+    # marker 正常删除(绝不因审计崩溃留 marker 造成每轮批处理活锁重跑)+ 检查点完好。
+    _inject_thresholds(monkeypatch)
+    pdf = _make_prose_pdf(tmp_path, 2)
+    out = str(tmp_path / "out")
+    marker = os.path.join(out, "_deferred_born_digital", "born.txt")
+    cv.convert_pdf(pdf, out, dpi=100, born_digital_mode="defer")     # 建 marker
+    assert os.path.exists(marker)
+
+    _stub_engine_adopt(monkeypatch)
+
+    def boom(*_a, **_k):
+        raise RuntimeError("audit boom")
+    monkeypatch.setattr(cv, "audit_document", boom)
+
+    res = cv.convert_pdf(pdf, out, dpi=100, born_digital_mode="ocr")
+    report = res["source_audit"]
+    assert report is not None and report["summary"]["status"] == "SUSPECT"
+    assert any(iss["code"] == "audit_error" for iss in report.get("issues", []))
+    assert not os.path.exists(marker)                    # 审计崩溃仍算完成 → marker 删
+    layout = resolve_layout("born", out)
+    assert cp.is_page_done(layout.work_dir, 1) and cp.is_page_done(layout.work_dir, 2)
+
+
+def test_error_report_not_reused_as_fresh(tmp_path, monkeypatch):
+    # Minor 3:指纹一致但含 adoption_error/audit_error 的 SUSPECT 报告不得当 fresh 复用,
+    # 下次 resume 必须重算(否则采信/审计已能成功仍顶着陈旧错误报告)。
+    _inject_thresholds(monkeypatch)
+    pdf = _make_prose_pdf(tmp_path, 2)
+    _stub_engine_adopt(monkeypatch)
+    out = str(tmp_path / "out")
+    layout = resolve_layout("born", out)
+    for pg in (1, 2):
+        _write_adopt_checkpoint(layout.work_dir, pg)
+    cp.save_manifest(layout.work_dir, cp.new_manifest(pdf, cp.pdf_fingerprint(pdf), 100, "B"))
+    os.makedirs(layout.doc_work_dir, exist_ok=True)
+    fp = cp.pdf_fingerprint(pdf)
+    stale_err = {
+        "schema_version": cv.AUDIT_SCHEMA_VERSION, "stem": "born", "route": "B",
+        "pdf_fingerprint": {"size_bytes": fp["size_bytes"], "page_count": fp["page_count"]},
+        "ocr_fingerprint": {"dpi": 100, "page_count": fp["page_count"]},
+        "summary": {"status": "SUSPECT", "issue_counts": {"audit_error": 1}},
+        "issues": [{"code": "audit_error", "block_id": None, "detail": "上轮审计崩溃残留"}],
+    }
+    with open(layout.source_audit_path, "w", encoding="utf-8") as f:
+        json.dump(stale_err, f)
+
+    res = cv.convert_pdf(pdf, out, dpi=100, born_digital_mode="ocr")
+
+    report = res["source_audit"]
+    assert report["summary"]["issue_counts"].get("audit_error") is None  # 已重算,非复用
+    assert report["adoption_source"] == "dry_run"
+
+
+def test_audit_write_failure_does_not_escape(tmp_path, monkeypatch):
+    # Minor 4:错误/正常路径的 write_audit_report 写盘失败(OSError)记日志返回 None,
+    # 绝不逃逸破坏批处理隔离;md 照常产出。
+    _inject_thresholds(monkeypatch)
+    pdf = _make_prose_pdf(tmp_path, 2)
+    _stub_engine_adopt(monkeypatch)
+
+    def boom(*_a, **_k):
+        raise OSError("disk full")
+    monkeypatch.setattr(cv, "write_audit_report", boom)
+
+    out = str(tmp_path / "out")
+    res = cv.convert_pdf(pdf, out, dpi=100, born_digital_mode="ocr")   # 不抛
+    assert res["source_audit"] is None                   # 写盘失败 → None
+    assert os.path.exists(res["md_path"])                 # md 照常产出

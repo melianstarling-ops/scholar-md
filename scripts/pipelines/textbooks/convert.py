@@ -217,6 +217,11 @@ def _audit_fresh(report: dict | None, pdf_path: str, dpi: int) -> bool:
         return False
     if (report.get("ocr_fingerprint") or {}).get("dpi") != dpi:
         return False
+    # 采信/审计异常留下的 SUSPECT 报告不得当 fresh 复用——下次 resume 必须重算,
+    # 否则采信/审计已能成功仍顶着陈旧错误报告(Minor 3)。
+    issue_counts = (report.get("summary") or {}).get("issue_counts") or {}
+    if issue_counts.get("adoption_error") or issue_counts.get("audit_error"):
+        return False
     return True
 
 
@@ -243,23 +248,38 @@ def _not_applicable_report(pdf_path: str, layout: DocLayout, dpi: int) -> dict:
     }
 
 
-def _adoption_error_report(pdf_path: str, layout: DocLayout, dpi: int,
-                           mode: str, detail: str) -> dict:
-    """采信/审计异常整本回退时的 SUSPECT 报告:记 adoption_error,产物标 SUSPECT。"""
+def _error_audit_report(pdf_path: str, layout: DocLayout, dpi: int, *,
+                        route: str, mode: str | None, code: str, detail: str) -> dict:
+    """convert 层错误的 SUSPECT 审计报告:文档计为完成(SUSPECT 是完成状态),
+    marker 正常删除,避免每轮批处理活锁重跑。code 区分来源:
+      - adoption_error:hybrid 采信/组装步骤异常(内容已整本回退等价 ocr)。
+      - audit_error:纯审计步骤异常(ocr/C/F 的 _finalize_audit,或 hybrid 中
+        audit_document 调用本身)——内容不动,仅审计未完成。"""
     pdf_fp, ocr_fp = _fingerprint_fields(pdf_path, dpi)
-    issue = {"code": "adoption_error", "block_id": None, "detail": detail}
+    issue = {"code": code, "block_id": None, "detail": detail}
     return {
         "schema_version": AUDIT_SCHEMA_VERSION,
-        "stem": layout.stem, "route": "B", "born_digital_mode": mode,
+        "stem": layout.stem, "route": route, "born_digital_mode": mode,
         "pdf_fingerprint": pdf_fp, "ocr_fingerprint": ocr_fp,
         "threshold_profile": None, "adoption_source": "recorded",
         "summary": {"status": "SUSPECT", "pages": ocr_fp["page_count"],
                     "scorable_pages": 0, "suspect_pages": [],
                     "adoption": {"prose_blocks": 0, "adopted": 0,
                                  "fallback_ocr": 0, "fallback_reasons": {}},
-                    "issue_counts": {"adoption_error": 1}},
+                    "issue_counts": {code: 1}},
         "issues": [issue], "pages": [],
     }
+
+
+def _write_audit_safely(report: dict, path: str) -> bool:
+    """错误/正常路径统一的审计落盘:写盘失败(OSError 等)记日志、返回 False,
+    绝不逃逸破坏批处理隔离(Minor 4)。"""
+    try:
+        write_audit_report(report, path)
+        return True
+    except Exception as e:                     # noqa: BLE001 写盘失败不逃逸
+        print(f"[textbooks] 审计报告写盘失败,跳过: {type(e).__name__}: {e}")
+        return False
 
 
 def _maybe_remove_deferred_marker(out_dir: str, stem: str, *,
@@ -407,12 +427,16 @@ def convert_pdf(pdf_path: str, deliverables_dir: str | None = None,
 
 
 def _finalize_hybrid(pdf_path: str, layout: DocLayout, work_dir: str, total: int,
-                     stem: str, assets_dir: str, dpi: int) -> tuple[dict, dict, bool]:
-    """路线 B hybrid 的采信 + 审计,整本崩溃隔离。返回 (assemble 结果, 审计报告, adoption_error)。
+                     stem: str, assets_dir: str, dpi: int) -> tuple[dict, dict | None, bool]:
+    """路线 B hybrid 的采信 + 审计,分步崩溃隔离。返回 (assemble 结果, 审计报告, adoption_error)。
 
-    采信/审计任一页抛异常 → 整本回退等价 ocr 模式重建内容(用原始 blocks reconstruct),
-    产物标 SUSPECT + 记 adoption_error;异常绝不逃逸破坏批处理隔离,也绝不半页采信半页丢。
-    采信/审计异常路径下不触碰任何 OCR checkpoint。"""
+    两段独立隔离(异常绝不逃逸、绝不半页采信半页丢、不触碰任何 OCR checkpoint):
+      - 采信/组装步骤异常 → 整本回退等价 ocr 模式重建内容(原始 blocks reconstruct),
+        SUSPECT + issue adoption_error,adoption_error=True。
+      - 采信成功但审计步骤(audit_document/写盘)异常 → 保留已采信 md(内容已安全产出,
+        仅审计未完成),SUSPECT + issue audit_error,adoption_error=False。
+    两种情形均计为完成状态,marker 正常删除(避免批处理活锁)。"""
+    # ---- 第一段:采信 + 组装 ----
     try:
         pdf_doc = fitz.open(pdf_path)
         try:
@@ -422,23 +446,31 @@ def _finalize_hybrid(pdf_path: str, layout: DocLayout, work_dir: str, total: int
             decisions_by_page = ctx.decisions_by_page
         finally:
             pdf_doc.close()
-        existing = _load_audit_report(layout.source_audit_path)
-        if _audit_fresh(existing, pdf_path, dpi):
-            audit_report = existing            # 断点恢复:指纹新鲜则复用(内容等价,确定性)
-        else:
-            audit_report = audit_document(
-                pdf_path, layout, ROUTE_B_AUDIT_THRESHOLDS,
-                decisions_by_page, born_digital_mode="hybrid")
-            write_audit_report(audit_report, layout.source_audit_path)
-        return result, audit_report, False
-    except Exception as e:                     # noqa: BLE001 采信/审计整本回退,绝不逃逸
-        print(f"[textbooks] 采信/审计异常,整本回退等价 ocr 重建: {type(e).__name__}: {e}")
+    except Exception as e:                     # noqa: BLE001 采信/组装整本回退,绝不逃逸
+        print(f"[textbooks] 采信/组装异常,整本回退等价 ocr 重建: {type(e).__name__}: {e}")
         result = assemble(work_dir, total, stem, assets_dir, pdf_path, dpi,
                           corrections_dir=layout.doc_work_dir)
-        audit_report = _adoption_error_report(
-            pdf_path, layout, dpi, "hybrid", f"{type(e).__name__}: {e}")
-        write_audit_report(audit_report, layout.source_audit_path)
-        return result, audit_report, True
+        report = _error_audit_report(pdf_path, layout, dpi, route="B", mode="hybrid",
+                                     code="adoption_error", detail=f"{type(e).__name__}: {e}")
+        return result, (report if _write_audit_safely(report, layout.source_audit_path)
+                        else None), True
+
+    # ---- 第二段:审计(采信已成功,内容不再回退) ----
+    try:
+        existing = _load_audit_report(layout.source_audit_path)
+        if _audit_fresh(existing, pdf_path, dpi):
+            return result, existing, False     # 断点恢复:指纹新鲜则复用(内容等价,确定性)
+        report = audit_document(pdf_path, layout, ROUTE_B_AUDIT_THRESHOLDS,
+                                decisions_by_page, born_digital_mode="hybrid")
+        report["route"] = "B"
+        return result, (report if _write_audit_safely(report, layout.source_audit_path)
+                        else None), False
+    except Exception as e:                     # noqa: BLE001 纯审计异常,保留已采信 md
+        print(f"[textbooks] 审计异常(采信已成功,保留 md): {type(e).__name__}: {e}")
+        report = _error_audit_report(pdf_path, layout, dpi, route="B", mode="hybrid",
+                                     code="audit_error", detail=f"{type(e).__name__}: {e}")
+        return result, (report if _write_audit_safely(report, layout.source_audit_path)
+                        else None), False
 
 
 def _finalize_audit(route: str, born_digital_mode: str, pdf_path: str,
@@ -446,27 +478,30 @@ def _finalize_audit(route: str, born_digital_mode: str, pdf_path: str,
     """非 hybrid 路由的审计落盘(仅在缺失/指纹过期时重算——断点恢复不重跑 OCR)。
 
     A 路:NOT_APPLICABLE 最小报告。B-ocr/C/F 路:dry-run 决策审计(绝不 apply);
-    C 路借此保存页级 source health,但不用坏文本层覆盖率作硬判断、不采信。审计异常
-    不逃逸、不影响已写好的 md/checkpoint。"""
+    C 路借此保存页级 source health,但不用坏文本层覆盖率作硬判断、不采信。审计步骤异常
+    → 写 audit_error SUSPECT 报告(文档计为完成、marker 正常删除,避免活锁),不逃逸、
+    不影响已写好的 md/checkpoint。落盘报告的 route 字段覆写为真实路由(audit_document
+    内部硬编码 "B",约束 7 禁改它,故在此覆盖)。"""
     existing = _load_audit_report(layout.source_audit_path)
     if route == "A":
         if _audit_fresh(existing, pdf_path, dpi) and \
                 (existing.get("summary") or {}).get("status") == "NOT_APPLICABLE":
             return existing
         report = _not_applicable_report(pdf_path, layout, dpi)
-        write_audit_report(report, layout.source_audit_path)
-        return report
+        return report if _write_audit_safely(report, layout.source_audit_path) else None
     if _audit_fresh(existing, pdf_path, dpi):
         return existing
     mode_label = born_digital_mode if route == "B" else None
     try:
         report = audit_document(pdf_path, layout, ROUTE_B_AUDIT_THRESHOLDS,
                                 None, born_digital_mode=mode_label)
-        write_audit_report(report, layout.source_audit_path)
-        return report
-    except Exception as e:                     # noqa: BLE001 审计异常不逃逸、不影响 md
-        print(f"[textbooks] 审计(dry-run)异常,跳过审计报告: {type(e).__name__}: {e}")
-        return None
+        report["route"] = route                # Important 1:落盘报告 route 字段失实修正
+        return report if _write_audit_safely(report, layout.source_audit_path) else None
+    except Exception as e:                     # noqa: BLE001 审计异常写 SUSPECT、不逃逸
+        print(f"[textbooks] 审计(dry-run)异常,写 audit_error 报告: {type(e).__name__}: {e}")
+        report = _error_audit_report(pdf_path, layout, dpi, route=route, mode=mode_label,
+                                     code="audit_error", detail=f"{type(e).__name__}: {e}")
+        return report if _write_audit_safely(report, layout.source_audit_path) else None
 
 
 def main() -> None:
