@@ -866,6 +866,101 @@ def test_stale_audit_fingerprint_recomputed(tmp_path, monkeypatch):
     assert res2["source_audit"]["pdf_fingerprint"]["page_count"] == 2  # 已重算
 
 
+def test_hybrid_then_ocr_rerun_recomputes_audit_no_stale_provenance(tmp_path, monkeypatch):
+    # F1(a):hybrid 跑完后按 README 用 ocr 模式重跑(失灵回退路径)——md 变纯 OCR,
+    # 旧 hybrid 报告(mode=hybrid/adoption_source=recorded)绝不得复用,必须强制重算。
+    _inject_thresholds(monkeypatch)
+    pdf = _make_prose_pdf(tmp_path, 2)
+    _stub_engine_adopt(monkeypatch)
+    out = str(tmp_path / "out")
+
+    r1 = cv.convert_pdf(pdf, out, dpi=100, born_digital_mode="hybrid")
+    assert r1["source_audit"]["born_digital_mode"] == "hybrid"
+    assert r1["source_audit"]["adoption_source"] == "recorded"
+    assert r1["source_audit"]["summary"]["adoption"]["adopted"] >= 1
+
+    r2 = cv.convert_pdf(pdf, out, dpi=100, born_digital_mode="ocr")
+    report = r2["source_audit"]
+    assert report["born_digital_mode"] == "ocr"           # 模式切换 → 强制重算,非复用
+    # 无采信 provenance 残留:dry_run(而非陈旧 hybrid 的 recorded)。ocr 报告里
+    # adopted 反映的是"若采信会怎样"的 dry-run 推演计数,不代表 md 已落地采信——
+    # md 变纯 OCR 才是内容未采信的权威证据。
+    assert report["adoption_source"] == "dry_run"
+    md = open(r2["md_path"], encoding="utf-8").read()
+    assert "browm" in md and "brown" not in md             # md 已变纯 OCR,无源文本采信
+
+
+def test_ocr_then_hybrid_rerun_recomputes_recorded_audit(tmp_path, monkeypatch):
+    # F1(b):ocr 跑完后 hybrid 重跑——md 变采信内容,旧 ocr 报告(mode=ocr/dry_run)
+    # 绝不得复用,报告须重算为 mode=hybrid/adoption_source=recorded。
+    _inject_thresholds(monkeypatch)
+    pdf = _make_prose_pdf(tmp_path, 2)
+    _stub_engine_adopt(monkeypatch)
+    out = str(tmp_path / "out")
+
+    r1 = cv.convert_pdf(pdf, out, dpi=100, born_digital_mode="ocr")
+    assert r1["source_audit"]["born_digital_mode"] == "ocr"
+    assert r1["source_audit"]["adoption_source"] == "dry_run"
+
+    r2 = cv.convert_pdf(pdf, out, dpi=100, born_digital_mode="hybrid")
+    report = r2["source_audit"]
+    assert report["born_digital_mode"] == "hybrid"         # 模式切换 → 强制重算
+    assert report["adoption_source"] == "recorded"          # 采信 provenance 正确
+    assert report["summary"]["adoption"]["adopted"] >= 1
+    md = open(r2["md_path"], encoding="utf-8").read()
+    assert "brown" in md and "browm" not in md             # md 已采信源文本
+
+
+def test_cli_dry_run_recorded_then_resume_recomputes(tmp_path, monkeypatch):
+    # F1:独立 CLI dry_run 覆写出 recorded=否 的报告后,hybrid resume 同样应识别
+    # adoption_source 不符(dry_run≠recorded)而重算,不复用陈旧 dry_run 报告。
+    _inject_thresholds(monkeypatch)
+    pdf = _make_prose_pdf(tmp_path, 2)
+    _stub_engine_adopt(monkeypatch)
+    out = str(tmp_path / "out")
+    layout = resolve_layout("born", out)
+
+    # 先 hybrid 跑完(recorded 报告在盘),再用一份 dry_run 报告覆写(模拟独立 CLI)。
+    cv.convert_pdf(pdf, out, dpi=100, born_digital_mode="hybrid")
+    with open(layout.source_audit_path, encoding="utf-8") as f:
+        rep = json.load(f)
+    rep["adoption_source"] = "dry_run"                     # 独立 CLI 只跑 dry-run 覆写
+    with open(layout.source_audit_path, "w", encoding="utf-8") as f:
+        json.dump(rep, f)
+
+    r2 = cv.convert_pdf(pdf, out, dpi=100, born_digital_mode="hybrid")
+    assert r2["source_audit"]["adoption_source"] == "recorded"  # 识别 dry_run 陈旧 → 重算
+
+
+def test_hybrid_adoption_error_report_adoption_source_recorded(tmp_path, monkeypatch):
+    # #15:hybrid 采信/组装异常的错误报告 adoption_source 为 "recorded"(采信已尝试)。
+    _inject_thresholds(monkeypatch)
+    pdf = _make_prose_pdf(tmp_path, 2)
+    _stub_engine_adopt(monkeypatch)
+    monkeypatch.setattr(cv, "adopt_prose_blocks",
+                        lambda *_a, **_k: (_ for _ in ()).throw(RuntimeError("boom")))
+    out = str(tmp_path / "out")
+    res = cv.convert_pdf(pdf, out, dpi=100, born_digital_mode="hybrid")
+    report = res["source_audit"]
+    assert any(iss["code"] == "adoption_error" for iss in report.get("issues", []))
+    assert report["adoption_source"] == "recorded"
+
+
+def test_ocr_audit_error_report_adoption_source_dry_run(tmp_path, monkeypatch):
+    # #15:非 hybrid(ocr)审计异常的错误报告 adoption_source 为 "dry_run"——
+    # 那条路只跑 dry-run 推演,从不落地采信,硬编码 "recorded" 会失实。
+    _inject_thresholds(monkeypatch)
+    pdf = _make_prose_pdf(tmp_path, 2)
+    _stub_engine_adopt(monkeypatch)
+    monkeypatch.setattr(cv, "audit_document",
+                        lambda *_a, **_k: (_ for _ in ()).throw(RuntimeError("boom")))
+    out = str(tmp_path / "out")
+    res = cv.convert_pdf(pdf, out, dpi=100, born_digital_mode="ocr")
+    report = res["source_audit"]
+    assert any(iss["code"] == "audit_error" for iss in report.get("issues", []))
+    assert report["adoption_source"] == "dry_run"
+
+
 def test_deferred_marker_removed_only_after_success(tmp_path, monkeypatch):
     _inject_thresholds(monkeypatch)
     pdf = _make_prose_pdf(tmp_path, 2)

@@ -26,6 +26,7 @@ from scripts.pipelines.textbooks.source_audit import (
     extract_source_page, page_geometry, assign_source_words,
     audit_document, write_audit_report,
     ROUTE_B_V1_THRESHOLDS, THRESHOLD_PROFILE_V1,
+    DRY_RUN_ADOPTION_THRESHOLDS,
 )
 from scripts.pipelines.textbooks.prose_adoption import (
     AdoptionThresholds, adopt_prose_blocks, apply_adoption,
@@ -43,11 +44,9 @@ AUDIT_SCHEMA_VERSION = 2
 # 路线 B 采信/审计生产 profile——Task 13 标定冻结(所有者 2026-07-17 批准)。
 # 采信阈值维持标定前取值(fixture 证据:构造错误页采信 NED 0.0097,NED 0.2 是
 # 20× 余量的安全阀);审计阈值见 source_audit.ROUTE_B_V1_THRESHOLDS 的标定注释。
-ROUTE_B_ADOPTION_THRESHOLDS = AdoptionThresholds(
-    adoption_min_char_ratio=0.5,
-    adoption_max_char_ratio=2.0,
-    adoption_max_ned=0.2,
-)
+# F5:生产采信阈值与审计 dry-run 采信阈值同值,单一来源在 source_audit——本处
+# 直接引用,不再双写三个字面量(值不变,冻结锁行为一致)。
+ROUTE_B_ADOPTION_THRESHOLDS = DRY_RUN_ADOPTION_THRESHOLDS
 ROUTE_B_AUDIT_THRESHOLDS = ROUTE_B_V1_THRESHOLDS
 
 
@@ -205,12 +204,21 @@ def _load_audit_report(path: str) -> dict | None:
         return None
 
 
-def _audit_fresh(report: dict | None, pdf_path: str, dpi: int) -> bool:
-    """审计报告是否新鲜:schema_version / PDF 指纹(页数+字节)/ DPI 均未变。
-    任一变化即判过期,调用方据此只重算 adoption+reconstruct+audit(不重跑 OCR)。"""
+def _audit_fresh(report: dict | None, pdf_path: str, dpi: int,
+                 expected_mode: str) -> bool:
+    """审计报告是否新鲜:schema_version / born_digital_mode / PDF 指纹(页数+字节)/
+    DPI 均未变。任一变化即判过期,调用方据此只重算 adoption+reconstruct+audit
+    (不重跑 OCR)。
+
+    expected_mode 是本轮运行会落盘的模式标签(hybrid/ocr/"n/a"/"unknown")。
+    模式与报告的 born_digital_mode 不符即判过期(F1):hybrid 成功后按回退路径改用
+    ocr 重跑(反之亦然),md 内容已换但旧报告仍顶着上一模式的采信 provenance——
+    强制重算,不让陈旧报告误导操作者。"""
     if not report:
         return False
     if report.get("schema_version") != AUDIT_SCHEMA_VERSION:
+        return False
+    if report.get("born_digital_mode") != expected_mode:
         return False
     cur = cp.pdf_fingerprint(pdf_path)
     fp = report.get("pdf_fingerprint") or {}
@@ -250,19 +258,24 @@ def _not_applicable_report(pdf_path: str, layout: DocLayout, dpi: int) -> dict:
 
 
 def _error_audit_report(pdf_path: str, layout: DocLayout, dpi: int, *,
-                        route: str, mode: str | None, code: str, detail: str) -> dict:
+                        route: str, mode: str | None, code: str, detail: str,
+                        adoption_source: str) -> dict:
     """convert 层错误的 SUSPECT 审计报告:文档计为完成(SUSPECT 是完成状态),
     marker 正常删除,避免每轮批处理活锁重跑。code 区分来源:
       - adoption_error:hybrid 采信/组装步骤异常(内容已整本回退等价 ocr)。
       - audit_error:纯审计步骤异常(ocr/C/F 的 _finalize_audit,或 hybrid 中
-        audit_document 调用本身)——内容不动,仅审计未完成。"""
+        audit_document 调用本身)——内容不动,仅审计未完成。
+
+    adoption_source 由调用点传入真实值(#15),不再硬编码 "recorded":hybrid 两条
+    错误路径为 "recorded"(采信已记录/已尝试),非 hybrid(ocr/C/F)的审计错误
+    路径为 "dry_run"(那些路只跑 dry-run 推演,从不落地采信)。"""
     pdf_fp, ocr_fp = _fingerprint_fields(pdf_path, dpi)
     issue = {"code": code, "block_id": None, "detail": detail}
     return {
         "schema_version": AUDIT_SCHEMA_VERSION,
         "stem": layout.stem, "route": route, "born_digital_mode": mode,
         "pdf_fingerprint": pdf_fp, "ocr_fingerprint": ocr_fp,
-        "threshold_profile": None, "adoption_source": "recorded",
+        "threshold_profile": None, "adoption_source": adoption_source,
         "summary": {"status": "SUSPECT", "pages": ocr_fp["page_count"],
                     "scorable_pages": 0, "suspect_pages": [],
                     "adoption": {"prose_blocks": 0, "adopted": 0,
@@ -458,14 +471,16 @@ def _finalize_hybrid(pdf_path: str, layout: DocLayout, work_dir: str, total: int
         result = assemble(work_dir, total, stem, assets_dir, pdf_path, dpi,
                           corrections_dir=layout.doc_work_dir)
         report = _error_audit_report(pdf_path, layout, dpi, route="B", mode="hybrid",
-                                     code="adoption_error", detail=f"{type(e).__name__}: {e}")
+                                     code="adoption_error", detail=f"{type(e).__name__}: {e}",
+                                     adoption_source="recorded")
         return result, (report if _write_audit_safely(report, layout.source_audit_path)
                         else None), True
 
     # ---- 第二段:审计(采信已成功,内容不再回退) ----
     try:
         existing = _load_audit_report(layout.source_audit_path)
-        if _audit_fresh(existing, pdf_path, dpi):
+        if _audit_fresh(existing, pdf_path, dpi, "hybrid") and \
+                existing.get("adoption_source") == "recorded":
             return result, existing, False     # 断点恢复:指纹新鲜则复用(内容等价,确定性)
         report = audit_document(pdf_path, layout, ROUTE_B_AUDIT_THRESHOLDS,
                                 decisions_by_page, born_digital_mode="hybrid",
@@ -476,7 +491,8 @@ def _finalize_hybrid(pdf_path: str, layout: DocLayout, work_dir: str, total: int
     except Exception as e:                     # noqa: BLE001 纯审计异常,保留已采信 md
         print(f"[textbooks] 审计异常(采信已成功,保留 md): {type(e).__name__}: {e}")
         report = _error_audit_report(pdf_path, layout, dpi, route="B", mode="hybrid",
-                                     code="audit_error", detail=f"{type(e).__name__}: {e}")
+                                     code="audit_error", detail=f"{type(e).__name__}: {e}",
+                                     adoption_source="recorded")
         return result, (report if _write_audit_safely(report, layout.source_audit_path)
                         else None), False
 
@@ -492,14 +508,16 @@ def _finalize_audit(route: str, born_digital_mode: str, pdf_path: str,
     内部硬编码 "B",约束 7 禁改它,故在此覆盖)。"""
     existing = _load_audit_report(layout.source_audit_path)
     if route == "A":
-        if _audit_fresh(existing, pdf_path, dpi) and \
+        if _audit_fresh(existing, pdf_path, dpi, "n/a") and \
                 (existing.get("summary") or {}).get("status") == "NOT_APPLICABLE":
             return existing
         report = _not_applicable_report(pdf_path, layout, dpi)
         return report if _write_audit_safely(report, layout.source_audit_path) else None
-    if _audit_fresh(existing, pdf_path, dpi):
-        return existing
     mode_label = born_digital_mode if route == "B" else None
+    # audit_document 把 None 归一为 "unknown"(C/F 路),freshness 校验须比对同一标签。
+    expected_mode = mode_label if mode_label is not None else "unknown"
+    if _audit_fresh(existing, pdf_path, dpi, expected_mode):
+        return existing
     try:
         report = audit_document(pdf_path, layout, ROUTE_B_AUDIT_THRESHOLDS,
                                 None, born_digital_mode=mode_label,
@@ -509,7 +527,8 @@ def _finalize_audit(route: str, born_digital_mode: str, pdf_path: str,
     except Exception as e:                     # noqa: BLE001 审计异常写 SUSPECT、不逃逸
         print(f"[textbooks] 审计(dry-run)异常,写 audit_error 报告: {type(e).__name__}: {e}")
         report = _error_audit_report(pdf_path, layout, dpi, route=route, mode=mode_label,
-                                     code="audit_error", detail=f"{type(e).__name__}: {e}")
+                                     code="audit_error", detail=f"{type(e).__name__}: {e}",
+                                     adoption_source="dry_run")
         return report if _write_audit_safely(report, layout.source_audit_path) else None
 
 

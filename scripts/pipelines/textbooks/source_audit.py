@@ -737,11 +737,33 @@ ROUTE_B_V1_UNCALIBRATED_THRESHOLDS = AuditThresholds(
 )
 
 # 独立重跑无 Task 9 记录决策时,audit_document 现场跑 adopt_prose_blocks 的
-# dry-run 采信推演阈值——同样是占位值(待 Task 13 标定),只用于审计分派,
-# 绝不是采信主链的判定依据(hybrid 主链的真实采信由 Task 9 传入 decisions_by_page)。
-_DRY_RUN_ADOPTION_MIN_CHAR_RATIO = 0.5
-_DRY_RUN_ADOPTION_MAX_CHAR_RATIO = 2.0
-_DRY_RUN_ADOPTION_MAX_NED = 0.2
+# dry-run 采信推演阈值——只用于审计分派,绝不是采信主链的判定依据(hybrid 主链
+# 的真实采信由 Task 9 传入 decisions_by_page)。
+#
+# F5:这与生产采信阈值 convert.ROUTE_B_ADOPTION_THRESHOLDS 同值,单一来源在此
+# (convert 直接引用 DRY_RUN_ADOPTION_THRESHOLDS)。AdoptionThresholds 定义在
+# prose_adoption,而 prose_adoption 顶层 import 本模块——顶层反向 import 会成环,
+# 故惰性构造 + 缓存(首次访问才 import prose_adoption),并经 PEP 562 module
+# __getattr__ 暴露为模块级常量 DRY_RUN_ADOPTION_THRESHOLDS 供外部引用。
+_DRY_RUN_ADOPTION_THRESHOLDS_CACHE = None
+
+
+def _dry_run_adoption_thresholds():
+    global _DRY_RUN_ADOPTION_THRESHOLDS_CACHE
+    if _DRY_RUN_ADOPTION_THRESHOLDS_CACHE is None:
+        from scripts.pipelines.textbooks.prose_adoption import AdoptionThresholds
+        _DRY_RUN_ADOPTION_THRESHOLDS_CACHE = AdoptionThresholds(
+            adoption_min_char_ratio=0.5,
+            adoption_max_char_ratio=2.0,
+            adoption_max_ned=0.2,
+        )
+    return _DRY_RUN_ADOPTION_THRESHOLDS_CACHE
+
+
+def __getattr__(name):
+    if name == "DRY_RUN_ADOPTION_THRESHOLDS":
+        return _dry_run_adoption_thresholds()
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
 
 # Task 13 标定冻结(所有者 2026-07-17 批准)。证据:13 个 golden fixtures 实测 +
 # 全 corpus 1,858 页 source_health 分布(sdd-archive/2026-07-16-textbooks-route-b/
@@ -1581,7 +1603,6 @@ def audit_document(
     # 这里若在模块顶层反向 import 会成环——沿用 audit_prose 已有的局部 import
     # 惯例。
     from scripts.pipelines.textbooks.prose_adoption import (
-        AdoptionThresholds as _AdoptionThresholds,
         adopt_prose_blocks as _adopt_prose_blocks,
     )
     from scripts.pipelines.textbooks.table_audit import (
@@ -1594,11 +1615,7 @@ def audit_document(
         pdf_bytes = f.read()
 
     dry_run = decisions_by_page is None
-    adoption_thresholds = _AdoptionThresholds(
-        adoption_min_char_ratio=_DRY_RUN_ADOPTION_MIN_CHAR_RATIO,
-        adoption_max_char_ratio=_DRY_RUN_ADOPTION_MAX_CHAR_RATIO,
-        adoption_max_ned=_DRY_RUN_ADOPTION_MAX_NED,
-    )
+    adoption_thresholds = _dry_run_adoption_thresholds()
 
     manifest = _checkpoint.load_manifest(layout.work_dir) or {}
     dpi = manifest.get("dpi", _checkpoint.DEFAULT_DPI)

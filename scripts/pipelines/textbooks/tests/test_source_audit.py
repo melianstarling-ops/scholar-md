@@ -2237,6 +2237,17 @@ def test_convert_production_profile_is_v1():
     assert convert.ROUTE_B_AUDIT_THRESHOLDS is ROUTE_B_V1_THRESHOLDS
 
 
+def test_dry_run_and_production_adoption_thresholds_single_source():
+    # F5:审计 dry-run 采信阈值(source_audit)与生产采信阈值(convert)单一来源,
+    # 不再双写——两者必须是同一对象,避免任一处改动使二者失同步。
+    from scripts.pipelines.textbooks import convert
+    from scripts.pipelines.textbooks.source_audit import DRY_RUN_ADOPTION_THRESHOLDS
+    assert convert.ROUTE_B_ADOPTION_THRESHOLDS is DRY_RUN_ADOPTION_THRESHOLDS
+    assert DRY_RUN_ADOPTION_THRESHOLDS.adoption_min_char_ratio == 0.5
+    assert DRY_RUN_ADOPTION_THRESHOLDS.adoption_max_char_ratio == 2.0
+    assert DRY_RUN_ADOPTION_THRESHOLDS.adoption_max_ned == 0.2
+
+
 # ---- 15b-bonus. audit_document/_audit_one_page 层:furniture_prose_noise 独占
 # 一页的 issues 时,页级/文档级 status 也不得被拉成 SUSPECT(_audit_one_page 用
 # 自己的 issues 聚合重算 status,必须同样扩展判定集合,不能只改 audit_prose)。
