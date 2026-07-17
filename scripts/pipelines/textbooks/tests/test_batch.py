@@ -331,6 +331,19 @@ def test_job_argv_passes_force_ocr_and_rest_schedule(tmp_path):
     assert argv[argv.index("--rest-minutes") + 1] == "40"
 
 
+def test_job_argv_passes_born_digital_mode_to_convert_subprocess(tmp_path):
+    argv = bp._job_argv(tmp_path / "A.pdf", tmp_path / "out", None, 150,
+                        no_selfcheck_json=False, born_digital_mode="hybrid")
+    assert "--born-digital-mode" in argv
+    assert argv[argv.index("--born-digital-mode") + 1] == "hybrid"
+
+
+def test_job_argv_defaults_born_digital_mode_to_defer(tmp_path):
+    argv = bp._job_argv(tmp_path / "A.pdf", tmp_path / "out", None, 150,
+                        no_selfcheck_json=False)
+    assert argv[argv.index("--born-digital-mode") + 1] == "defer"
+
+
 def test_run_invokes_katex_scan_by_default(tmp_path, monkeypatch):
     d = tmp_path / "src"
     d.mkdir()
@@ -740,3 +753,46 @@ def test_main_forwards_force_ocr_and_rest_schedule(monkeypatch):
     assert captured["kwargs"]["force_ocr"] is True
     assert captured["kwargs"]["work_hours"] == 6
     assert captured["kwargs"]["rest_minutes"] == 40
+
+
+def test_main_forwards_born_digital_mode(monkeypatch):
+    captured = {}
+
+    def fake_run(src_paths, **kwargs):
+        captured["kwargs"] = kwargs
+        return 0, []
+
+    monkeypatch.setattr(bp, "run", fake_run)
+    monkeypatch.setattr("sys.argv", [
+        "batch.py", "--src", "src", "--born-digital-mode", "hybrid",
+    ])
+
+    rc = bp.main()
+
+    assert rc == 0
+    assert captured["kwargs"]["born_digital_mode"] == "hybrid"
+
+
+def test_main_born_digital_mode_defaults_to_defer(monkeypatch):
+    captured = {}
+
+    def fake_run(src_paths, **kwargs):
+        captured["kwargs"] = kwargs
+        return 0, []
+
+    monkeypatch.setattr(bp, "run", fake_run)
+    monkeypatch.setattr("sys.argv", ["batch.py", "--src", "src"])
+
+    rc = bp.main()
+
+    assert rc == 0
+    assert captured["kwargs"]["born_digital_mode"] == "defer"
+
+
+def test_main_rejects_invalid_born_digital_mode(monkeypatch):
+    monkeypatch.setattr("sys.argv", [
+        "batch.py", "--src", "src", "--born-digital-mode", "bogus",
+    ])
+    with pytest.raises(SystemExit) as exc:
+        bp.main()
+    assert exc.value.code != 0

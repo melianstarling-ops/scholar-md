@@ -50,6 +50,9 @@ DEFAULT_SUSPECT_PRINT_LIMIT = 5
 # "只读参考,独立维护"惯例)。
 AUDIT_SCHEMA_VERSION = 2
 
+# 与 convert.py 的 BORN_DIGITAL_MODES 同步维护(独立常量,同上惯例)。
+BORN_DIGITAL_MODES = ("defer", "ocr", "hybrid")
+
 # selfcheck.json 里紧凑 source_audit 字段做分级要用到的最小键集合——用来判断该字段
 # 是否结构完好,而非"字段存在就信"(Review Important 1:字段存在但类型/结构损坏时,
 # 必须转磁盘兜底读取,不能悄悄漏报)。
@@ -111,7 +114,7 @@ def _already_done(out_root: Path, work_root: Path | None, pdf_path: Path, dpi: i
 def _job_argv(pdf: Path, out_root: Path, work_root: Path | None, dpi: int,
               no_selfcheck_json: bool, allow_sleep: bool = False,
               force_ocr: bool = False, work_hours: float = 6,
-              rest_minutes: float = 40) -> list[str]:
+              rest_minutes: float = 40, born_digital_mode: str = "defer") -> list[str]:
     argv = ["--src", str(pdf), "--out", str(out_root), "--dpi", str(dpi)]
     if work_root:
         argv.extend(["--work-dir", str(work_root)])
@@ -123,6 +126,7 @@ def _job_argv(pdf: Path, out_root: Path, work_root: Path | None, dpi: int,
                  "--rest-minutes", str(rest_minutes)])
     if allow_sleep:
         argv.append("--allow-sleep")
+    argv.extend(["--born-digital-mode", born_digital_mode])
     return argv
 
 
@@ -241,7 +245,8 @@ def run(src_paths: list[str], out: str | None = None, dpi: int = cp.DEFAULT_DPI,
         force_ocr: bool = False, work_hours: float = 6,
         rest_minutes: float = 40, runner=None,
         severe_issue_codes: frozenset = DEFAULT_SEVERE_ISSUE_CODES,
-        suspect_print_limit: int = DEFAULT_SUSPECT_PRINT_LIMIT) -> tuple[int, list[dict]]:
+        suspect_print_limit: int = DEFAULT_SUSPECT_PRINT_LIMIT,
+        born_digital_mode: str = "defer") -> tuple[int, list[dict]]:
     if work_hours <= 0 or rest_minutes <= 0:
         raise ValueError("work_hours 与 rest_minutes 必须大于 0")
     pdfs = discover(src_paths)
@@ -267,7 +272,7 @@ def run(src_paths: list[str], out: str | None = None, dpi: int = cp.DEFAULT_DPI,
                              "failed_pages": 0, "selfcheck": None, "source_audit_grade": None})
             continue
         argv = _job_argv(pdf, out_root, work_root, dpi, no_selfcheck_json, allow_sleep,
-                         force_ocr, work_hours, rest_minutes)
+                         force_ocr, work_hours, rest_minutes, born_digital_mode)
         rc = run_until_done(argv, max_restarts=max_restarts, runner=runner)
         if rc != 0:
             n_giveup += 1
@@ -343,6 +348,9 @@ def main() -> int:
     ap.add_argument("--allow-sleep", action="store_true",
                     help="允许系统按电源计划睡眠(默认转换期间阻止睡眠)")
     ap.add_argument("--list", action="store_true", help="只列出待处理 PDF,不转换")
+    ap.add_argument("--born-digital-mode", choices=list(BORN_DIGITAL_MODES), default="defer",
+                    help="路线 B(born-digital)采信模式:defer=登记不转(默认)/"
+                         "ocr=完全走 OCR 忽略文本层/hybrid=块级混合采信(转发给每本书的 convert.py)")
     args = ap.parse_args()
     if args.work_hours <= 0 or args.rest_minutes <= 0:
         ap.error("--work-hours 与 --rest-minutes 必须大于 0")
@@ -366,7 +374,8 @@ def main() -> int:
                         allow_sleep=args.allow_sleep,
                         force_ocr=args.force_ocr,
                         work_hours=args.work_hours,
-                        rest_minutes=args.rest_minutes)
+                        rest_minutes=args.rest_minutes,
+                        born_digital_mode=args.born_digital_mode)
         return rc
     except ValueError as e:
         print(f"[ERROR] {e}", file=sys.stderr)

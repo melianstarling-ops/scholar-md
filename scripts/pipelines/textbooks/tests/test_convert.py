@@ -353,6 +353,48 @@ def test_convert_cli_forwards_force_ocr_and_rest_schedule(monkeypatch):
     assert captured["rest_seconds"] == 2400
 
 
+def test_convert_cli_forwards_born_digital_mode(monkeypatch):
+    captured = {}
+
+    def fake_convert_pdf(*_args, **kwargs):
+        captured.update(kwargs)
+        return {"route": "B", "md_path": None, "selfcheck": None, "failed_pages": []}
+
+    monkeypatch.setattr(cv, "convert_pdf", fake_convert_pdf)
+    monkeypatch.setattr("sys.argv", [
+        "convert.py", "--src", "x.pdf", "--born-digital-mode", "hybrid",
+    ])
+
+    cv.main()
+
+    assert captured["born_digital_mode"] == "hybrid"
+
+
+def test_convert_cli_born_digital_mode_defaults_to_defer(monkeypatch):
+    captured = {}
+
+    def fake_convert_pdf(*_args, **kwargs):
+        captured.update(kwargs)
+        return {"route": "A", "md_path": "x.md",
+                "selfcheck": {"total": 0, "in_md": 0, "missing": []}, "failed_pages": []}
+
+    monkeypatch.setattr(cv, "convert_pdf", fake_convert_pdf)
+    monkeypatch.setattr("sys.argv", ["convert.py", "--src", "x.pdf"])
+
+    cv.main()
+
+    assert captured["born_digital_mode"] == "defer"
+
+
+def test_convert_cli_rejects_invalid_born_digital_mode(monkeypatch, capsys):
+    monkeypatch.setattr("sys.argv", [
+        "convert.py", "--src", "x.pdf", "--born-digital-mode", "bogus",
+    ])
+    with pytest.raises(SystemExit) as exc:
+        cv.main()
+    assert exc.value.code != 0
+
+
 def _one_image_block(page):
     return [{"block_order": None, "block_label": "image", "block_id": 1,
              "block_content": "", "block_bbox": [5, 5, 15, 15]}]

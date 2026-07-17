@@ -526,6 +526,9 @@ def main() -> None:
                     help="不写 <stem>_selfcheck.json(控制台摘要仍输出)")
     ap.add_argument("--allow-sleep", action="store_true",
                     help="允许系统按电源计划睡眠(默认转换期间阻止睡眠)")
+    ap.add_argument("--born-digital-mode", choices=list(BORN_DIGITAL_MODES), default="defer",
+                    help="路线 B(born-digital)采信模式:defer=登记不转(默认)/"
+                         "ocr=完全走 OCR 忽略文本层/hybrid=块级混合采信")
     args = ap.parse_args()
     if args.work_hours <= 0 or args.rest_minutes <= 0:
         ap.error("--work-hours 与 --rest-minutes 必须大于 0")
@@ -534,7 +537,8 @@ def main() -> None:
                           write_selfcheck=not args.no_selfcheck_json,
                           force_ocr=args.force_ocr,
                           work_seconds=args.work_hours * 3600,
-                          rest_seconds=args.rest_minutes * 60)
+                          rest_seconds=args.rest_minutes * 60,
+                          born_digital_mode=args.born_digital_mode)
     print(f"[route={res['route']}] md={res['md_path']}")
     if res.get("failed_pages"):
         print(f"[textbooks] 失败页 {len(res['failed_pages'])}:",

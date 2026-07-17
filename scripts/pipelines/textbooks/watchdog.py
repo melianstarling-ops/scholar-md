@@ -8,6 +8,10 @@ import sys
 from scripts.pipelines.textbooks import checkpoint as cp
 from scripts.pipelines.textbooks.power import keep_system_awake
 
+# 与 convert.py 的 BORN_DIGITAL_MODES 同步维护(独立常量,不跨模块 import
+# convert.py 制造不必要耦合;风格同 batch.py 的 AUDIT_SCHEMA_VERSION 惯例)。
+BORN_DIGITAL_MODES = ("defer", "ocr", "hybrid")
+
 
 def _default_runner(argv: list[str]) -> int:
     cmd = [sys.executable, "-m", "scripts.pipelines.textbooks.convert", *argv]
@@ -49,6 +53,9 @@ def main() -> None:
                     help="不写 <stem>_selfcheck.json(转发给 convert.py)")
     ap.add_argument("--allow-sleep", action="store_true",
                     help="允许系统按电源计划睡眠(默认转换期间阻止睡眠)")
+    ap.add_argument("--born-digital-mode", choices=list(BORN_DIGITAL_MODES), default="defer",
+                    help="路线 B(born-digital)采信模式:defer=登记不转(默认)/"
+                         "ocr=完全走 OCR 忽略文本层/hybrid=块级混合采信(转发给 convert.py)")
     args = ap.parse_args()
     if args.work_hours <= 0 or args.rest_minutes <= 0:
         ap.error("--work-hours 与 --rest-minutes 必须大于 0")
@@ -65,6 +72,7 @@ def main() -> None:
              "--rest-minutes", str(args.rest_minutes)]
     if args.allow_sleep:
         argv.append("--allow-sleep")
+    argv += ["--born-digital-mode", args.born_digital_mode]
     with keep_system_awake(enabled=not args.allow_sleep):
         rc = run_until_done(argv, max_restarts=args.max_restarts)
     sys.exit(rc)

@@ -122,3 +122,39 @@ def test_main_forwards_force_ocr_and_rest_schedule(monkeypatch):
     assert "--force-ocr" in argv
     assert argv[argv.index("--work-hours") + 1] == "6.0"
     assert argv[argv.index("--rest-minutes") + 1] == "40.0"
+
+
+def test_main_forwards_born_digital_mode_to_convert(monkeypatch):
+    captured = {}
+    def fake_run_until_done(argv, max_restarts):
+        captured["argv"] = argv
+        return 0
+    monkeypatch.setattr(wd, "run_until_done", fake_run_until_done)
+    monkeypatch.setattr("sys.argv",
+                        ["watchdog.py", "--src", "x.pdf", "--born-digital-mode", "hybrid"])
+    with pytest.raises(SystemExit):
+        wd.main()
+    argv = captured["argv"]
+    assert "--born-digital-mode" in argv
+    assert argv[argv.index("--born-digital-mode") + 1] == "hybrid"
+
+
+def test_main_born_digital_mode_defaults_to_defer(monkeypatch):
+    captured = {}
+    def fake_run_until_done(argv, max_restarts):
+        captured["argv"] = argv
+        return 0
+    monkeypatch.setattr(wd, "run_until_done", fake_run_until_done)
+    monkeypatch.setattr("sys.argv", ["watchdog.py", "--src", "x.pdf"])
+    with pytest.raises(SystemExit):
+        wd.main()
+    argv = captured["argv"]
+    assert argv[argv.index("--born-digital-mode") + 1] == "defer"
+
+
+def test_main_rejects_invalid_born_digital_mode(monkeypatch):
+    monkeypatch.setattr("sys.argv",
+                        ["watchdog.py", "--src", "x.pdf", "--born-digital-mode", "bogus"])
+    with pytest.raises(SystemExit) as exc:
+        wd.main()
+    assert exc.value.code != 0
