@@ -650,21 +650,46 @@ def _weighted_ratio(pairs) -> float | None:
     return overlap_sum / total_sum
 
 
-def _single_column_sequence_ratio(words) -> float | None:
+def _single_column_proxy_confirmed(words) -> bool:
     """多栏代理(计划 §6.4):源 words(source_page['words'] 原始顺序)的
-    block_no 序列(fitz 原生段落分组编号)单调不减才可信,否则(多栏/交错)
-    返回 None——调用方据此跳过 sequence_ratio,绝不作硬门。
-
-    代理条件本身即要求全序,故一旦确认单栏,ratio 恒为 1.0;该指标只做记录用,
-    不参与 status 判定,后续任务如需更细粒度的排序偏差量化可在此扩展。
+    block_no 序列(fitz 原生段落分组编号)单调不减才可信——多栏/交错页返回
+    False,调用方据此完全跳过 sequence_ratio(不计算、不比较、不作硬门)。
     """
     if len(words) < 2:
-        return None
+        return False
     seq = [w.block_no for w in words]
-    for a, b in zip(seq, seq[1:]):
-        if a > b:
-            return None
-    return 1.0
+    return all(a <= b for a, b in zip(seq, seq[1:]))
+
+
+def _block_sequence_ratio(
+    words, assignments_by_block: dict[int, list], prose_block_indices
+) -> float | None:
+    """真实的块级顺序一致率(计划 §6.4):按 OCR 块顺序(blocks 下标升序)排列
+    参与对账的正文块,取每块归属源 words 在全页原生 (block_no, line_no,
+    word_no) 排序秩中的中位数作为该块的"源序秩";统计相邻块对里源序秩非
+    递减的比例。可比块(有归属 words 的块)少于 2 个 → 返回 None,不发指标
+    ——绝不返回占位值。
+    """
+    ordered_words = sorted(words, key=lambda w: (w.block_no, w.line_no, w.word_no))
+    rank_of = {id(w): rank for rank, w in enumerate(ordered_words)}
+
+    medians: list[float] = []
+    for i in sorted(prose_block_indices):
+        block_words = assignments_by_block.get(i, [])
+        ranks = sorted(rank_of[id(w)] for w in block_words if id(w) in rank_of)
+        if not ranks:
+            continue
+        mid = len(ranks) // 2
+        if len(ranks) % 2 == 1:
+            median = float(ranks[mid])
+        else:
+            median = (ranks[mid - 1] + ranks[mid]) / 2.0
+        medians.append(median)
+
+    if len(medians) < 2:
+        return None
+    agree = sum(1 for a, b in zip(medians, medians[1:]) if b >= a)
+    return agree / (len(medians) - 1)
 
 
 def audit_prose(
@@ -931,12 +956,31 @@ def audit_prose(
         ),
         "ngram_repetition_score": repetition_score,
     }
-    seq_ratio = _single_column_sequence_ratio(words)
-    if seq_ratio is not None:
-        # 记录用,绝不据此产生 issue 或改变 status(计划 §6.4:多栏跳过/绝不作硬门)。
-        metrics["sequence_ratio"] = seq_ratio
+    if _single_column_proxy_confirmed(words):
+        seq_ratio = _block_sequence_ratio(words, assignments_by_block, block_metrics.keys())
+        if seq_ratio is not None:
+            metrics["sequence_ratio"] = seq_ratio
+            if seq_ratio < thresholds.minimum_single_column_sequence_ratio:
+                issues.append(
+                    {
+                        "code": "sequence_disorder",
+                        "block_id": None,
+                        "detail": (
+                            f"块级源序一致率={seq_ratio:.2f} 低于下限 "
+                            f"{thresholds.minimum_single_column_sequence_ratio},疑似块顺序错乱"
+                        ),
+                    }
+                )
+    # 多栏页(代理条件不满足)完全跳过:不计算、不比较、不产生 issue(计划
+    # §6.4,brief 原规则不变——sequence_ratio 绝不对多栏页作硬门)。
 
-    if not issues:
+    if page_geometry_unscorable:
+        # 页级几何不可标定的独立短路:不依赖"每个受影响块的 decision.reasons
+        # 都正确传播了 geometry_unscorable"这一 Task 5 上游不变量——哪怕因为
+        # 某种原因一个 issue 都没产生(例如页面全是非正文 label 块),只要
+        # assignment 的权威信号为真,页面就必须是 UNSCORABLE。
+        status = "UNSCORABLE"
+    elif not issues:
         status = "OK"
     elif (
         fallback_prose_count > 0

@@ -1008,7 +1008,8 @@ def test_audit_prose_sequence_ratio_absent_when_multi_column_proxy_fails():
 
 
 def test_audit_prose_sequence_ratio_present_when_single_column_confirmed():
-    # 正例对照:block_no 单调不减(全序)→ 单栏代理条件成立,ratio 应出现。
+    # 正例对照:block_no 单调不减(全序)→ 单栏代理条件成立,ratio 应出现
+    # 且是真实计算值(块 0 的源序秩中位数 0.5 < 块 1 的 2.5,顺序一致)。
     words = [
         _sw("a", (0, 0, 1, 1), block_no=0, line_no=0, word_no=0),
         _sw("b", (0, 0, 1, 1), block_no=0, line_no=0, word_no=1),
@@ -1027,6 +1028,54 @@ def test_audit_prose_sequence_ratio_present_when_single_column_confirmed():
     thresholds = _audit_thresholds()
     result = audit_prose(_audit_page(words), blocks, decisions, assignment, thresholds)
     assert result["metrics"]["sequence_ratio"] == 1.0
+    assert result["issues"] == []
+    assert result["status"] == "OK"
+
+
+def test_audit_prose_reversed_block_order_flags_sequence_disorder():
+    # 单栏代理条件成立(alpha_words 全在前、beta_words 全在后,block_no 序列
+    # [0,0,0,0,1,1,1,1] 单调不减),但 OCR 块归属被人为"倒序"——OCR 块 0 拿到
+    # 的是源里排在后面的 beta 段,OCR 块 1 拿到的是源里排在前面的 alpha 段。
+    # 两块各自内容与其归属源 words 完全匹配(recall/NED 均满分),不放行
+    # 任何其它 issue,专测 sequence_disorder 是否真的走到目标分支。
+    alpha_words = [
+        _sw(t, (0, 0, 1, 1), block_no=0, line_no=0, word_no=i)
+        for i, t in enumerate("Alpha comes first here".split())
+    ]
+    beta_words = [
+        _sw(t, (0, 0, 1, 1), block_no=1, line_no=0, word_no=i)
+        for i, t in enumerate("Beta comes second here".split())
+    ]
+    blocks = [
+        _block("text", [0, 0, 100, 100], content="Beta comes second here"),
+        _block("text", [0, 100, 100, 200], content="Alpha comes first here"),
+    ]
+    decisions = [
+        _decision(0, "ocr", reasons=["adoption_disagreement"]),
+        _decision(1, "ocr", reasons=["adoption_disagreement"]),
+    ]
+    # 归属"倒序":OCR 块 0 ← beta(源序靠后),OCR 块 1 ← alpha(源序靠前)。
+    assignment = _assignment({0: beta_words, 1: alpha_words})
+    thresholds = _audit_thresholds(
+        minimum_reliable_chars=5,
+        maximum_bad_char_ratio=0.5,
+        maximum_block_ned=0.9,
+        minimum_char_recall=0.5,
+        minimum_token_recall=0.5,
+        maximum_addition_ratio=0.5,
+        maximum_repetition_score=0.9,
+        minimum_single_column_sequence_ratio=0.8,
+    )
+    result = audit_prose(
+        _audit_page(alpha_words + beta_words), blocks, decisions, assignment, thresholds
+    )
+    # 两块内容各自完美匹配自己的归属 words——确认其它 issue 门确实放行,
+    # 负例真的是靠"顺序"这一条命中,不是被其它门顺带带出来的。
+    assert result["block_metrics"][0]["char_recall"] == 1.0
+    assert result["block_metrics"][1]["char_recall"] == 1.0
+    assert result["metrics"]["sequence_ratio"] == 0.0
+    assert _issue_codes(result) == {"sequence_disorder"}
+    assert result["status"] == "SUSPECT"
 
 
 # ---- 11. 源坏码过多 → 块 source_unreliable;全页如此 → 页 UNSCORABLE -------
@@ -1081,6 +1130,24 @@ def test_audit_prose_geometry_unscorable_page_is_unscorable():
     assert result["status"] == "UNSCORABLE"
     assert _issue_codes(result) == {"source_unreliable"}
     assert result["block_metrics"][0]["source_unreliable"] is True
+
+
+def test_audit_prose_geometry_unscorable_flag_forces_unscorable_independent_of_issues():
+    # 直达测试(Minor 3):页面唯一的块是非正文 label(table),会在门 0 就被
+    # 跳过、完全不参与 prose 对账——因此不会有任何 block 产生
+    # source_unreliable/其它 issue,issues 列表天然为空。若 status 判定只
+    # 依赖 issues 推导,这种页会被误判成 OK。assignment["geometry_unscorable"]
+    # 是独立于 decisions/issues 的权威页级信号,必须单独短路成 UNSCORABLE,
+    # 不依赖"每个受影响块的 decision.reasons 都正确传播了 geometry_unscorable"
+    # 这条 Task 5 上游不变量。
+    blocks = [_block("table", [0, 0, 100, 100], content="| a | b |")]
+    decisions = [_decision(0, "ocr", reasons=["label_not_adoptable"])]
+    assignment = _assignment({}, geometry_unscorable=True)
+    thresholds = _audit_thresholds()
+    result = audit_prose(_audit_page([]), blocks, decisions, assignment, thresholds)
+    assert result["issues"] == []
+    assert result["block_metrics"] == {}
+    assert result["status"] == "UNSCORABLE"
 
 
 # ---- 12. 字符量加权:长块丢失在页级指标可见 ---------------------------------
