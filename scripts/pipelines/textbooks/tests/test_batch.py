@@ -1,4 +1,5 @@
 import json
+import os
 from pathlib import Path
 
 import fitz
@@ -582,6 +583,141 @@ def test_run_not_applicable_audit_keeps_a_route_output_unchanged(tmp_path, monke
     out = capsys.readouterr().out
     assert "  [OK] A — route=A failed_pages=0 coverage=1/1\n" in out
     assert "audit=" not in out
+
+
+# ---------------------------------------------------------------------------
+# Review fix(Important 1):selfcheck.json 缺失(--no-selfcheck-json)或其
+# source_audit 字段缺失/结构损坏时,_read_summary 必须直接兜底读磁盘上的
+# <stem>_source_audit.json(convert 主链独立管理,Task 9 保证总会写),不能因为
+# selfcheck 没落盘/字段坏了就把"其实是 SUSPECT"漏报成 OK。
+# ---------------------------------------------------------------------------
+
+def _write_real_audit_report(layout, pdf, dpi, status, suspect_pages=None, issue_counts=None):
+    fp = cp.pdf_fingerprint(str(pdf))
+    report = {
+        "schema_version": bp.AUDIT_SCHEMA_VERSION,
+        "stem": layout.stem, "route": "B", "born_digital_mode": "hybrid",
+        "pdf_fingerprint": {"size_bytes": fp["size_bytes"], "page_count": fp["page_count"]},
+        "ocr_fingerprint": {"dpi": dpi, "page_count": fp["page_count"]},
+        "threshold_profile": "route_b_v1_uncalibrated",
+        "adoption_source": "recorded",
+        "summary": {
+            "status": status, "pages": fp["page_count"], "scorable_pages": fp["page_count"],
+            "suspect_pages": suspect_pages or [],
+            "adoption": {"prose_blocks": 0, "adopted": 0, "fallback_ocr": 0, "fallback_reasons": {}},
+            "issue_counts": issue_counts or {},
+        },
+        "pages": [],
+    }
+    os.makedirs(layout.doc_work_dir, exist_ok=True)
+    with open(layout.source_audit_path, "w", encoding="utf-8") as f:
+        json.dump(report, f)
+
+
+def test_read_summary_falls_back_to_disk_audit_when_selfcheck_json_absent(tmp_path):
+    # 模拟 --no-selfcheck-json:selfcheck.json 从不落盘,但 audit 报告仍由 convert
+    # 主链独立写盘——batch 必须直接读磁盘兜底,不能漏报 SUSPECT。
+    pdf = _make_pdf(tmp_path, 2, name="book")
+    out_root = tmp_path / "out"
+    layout = resolve_layout(pdf.stem, str(out_root))
+    work = Path(layout.work_dir)
+    _mark_page_done(work, 1)
+    _mark_page_done(work, 2)
+    cp.save_manifest(str(work),
+                     cp.new_manifest(str(pdf), cp.pdf_fingerprint(str(pdf)), 150, "B"))
+    _write_real_audit_report(layout, pdf, 150, "SUSPECT", suspect_pages=[2],
+                             issue_counts={"prose_mismatch": 1})
+    assert not os.path.exists(layout.selfcheck_path)      # 确认真的没有 selfcheck.json
+
+    summary = bp._read_summary(out_root, None, pdf, dpi=150)
+
+    assert summary["status"] == "SUSPECT"
+    assert summary["source_audit_grade"]["suspect_page_count"] == 1
+    assert summary["source_audit_grade"]["mild_issue_count"] == 1
+
+
+def test_run_no_selfcheck_json_still_reports_audit_suspect(tmp_path, monkeypatch):
+    # 端到端:--no-selfcheck-json 批跑 + audit 落盘 SUSPECT → batch 状态仍是 SUSPECT。
+    d = tmp_path / "src"
+    d.mkdir()
+    pdf = _make_pdf(d, 2, name="book")
+    out_root = tmp_path / "out"
+
+    def fake_runner(argv):
+        assert "--no-selfcheck-json" in argv
+        layout = resolve_layout("book", str(out_root))
+        work = Path(layout.work_dir)
+        Path(layout.doc_deliverable_dir).mkdir(parents=True, exist_ok=True)
+        Path(layout.md_path).write_text("# book\n", encoding="utf-8")
+        _mark_page_done(work, 1)
+        _mark_page_done(work, 2)
+        cp.save_manifest(str(work),
+                         cp.new_manifest(str(pdf), cp.pdf_fingerprint(str(pdf)), 150, "B"))
+        _write_real_audit_report(layout, pdf, 150, "SUSPECT", suspect_pages=[2],
+                                 issue_counts={"prose_mismatch": 1})
+        # 真实 convert.py 在 --no-selfcheck-json 下不写 selfcheck.json,这里刻意不写。
+        return 0
+
+    monkeypatch.setattr(bp, "scan_katex_work_pages", lambda layout, out_path: {"errors": []})
+
+    rc, results = bp.run([str(d)], out=str(out_root), dpi=150, runner=fake_runner,
+                        no_selfcheck_json=True)
+
+    assert results[0]["status"] == "SUSPECT"
+
+
+def test_read_summary_falls_back_when_selfcheck_source_audit_field_corrupt(tmp_path):
+    # selfcheck.json 存在,但其 source_audit 字段结构损坏(非 dict/缺关键键)——
+    # 兜底读磁盘上的真实 audit 报告(SUSPECT),覆盖"corrupt 降级为 OK"这个边角。
+    pdf = _make_pdf(tmp_path, 2, name="book")
+    out_root = tmp_path / "out"
+    layout = resolve_layout(pdf.stem, str(out_root))
+    work = Path(layout.work_dir)
+    _mark_page_done(work, 1)
+    _mark_page_done(work, 2)
+    cp.save_manifest(str(work),
+                     cp.new_manifest(str(pdf), cp.pdf_fingerprint(str(pdf)), 150, "B"))
+    _write_real_audit_report(layout, pdf, 150, "SUSPECT", suspect_pages=[1],
+                             issue_counts={"sign_flip": 1})
+    Path(layout.doc_work_dir).mkdir(parents=True, exist_ok=True)
+    with open(layout.selfcheck_path, "w", encoding="utf-8") as f:
+        json.dump({"in_md": 1, "total": 1, "source_audit": "CORRUPTED_NOT_A_DICT"}, f)
+
+    summary = bp._read_summary(out_root, None, pdf, dpi=150)
+
+    assert summary["status"] == "SUSPECT"
+    assert summary["source_audit_grade"]["severe_issue_count"] == 1
+
+
+# ---------------------------------------------------------------------------
+# Review 顺手改进:rollup 汇总行单列 UNSCORABLE 计数,不再与"审计通过"共享 OK。
+# ---------------------------------------------------------------------------
+
+def test_run_rollup_line_lists_unscorable_separately(tmp_path, monkeypatch, capsys):
+    d = tmp_path / "src"
+    d.mkdir()
+    pdf = _make_pdf(d, 1, name="A")
+    out_root = tmp_path / "out"
+
+    def fake_runner(argv):
+        layout = resolve_layout("A", str(out_root))
+        work = Path(layout.work_dir)
+        Path(layout.doc_deliverable_dir).mkdir(parents=True, exist_ok=True)
+        Path(layout.md_path).write_text("# A\n", encoding="utf-8")
+        _mark_page_done(work, 1)
+        cp.save_manifest(str(work),
+                         cp.new_manifest(str(pdf), cp.pdf_fingerprint(str(pdf)), 150, "A"))
+        # 不写 selfcheck.json、不写 audit 报告 → 兜底判 UNSCORABLE(audit_report_missing),
+        # 文档状态仍是 OK(failed_pages 为空),但 rollup 不应把它计进"审计通过"的 OK 桶。
+        return 0
+
+    monkeypatch.setattr(bp, "scan_katex_work_pages", lambda layout, out_path: {"errors": []})
+
+    rc, results = bp.run([str(d)], out=str(out_root), dpi=150, runner=fake_runner)
+
+    assert results[0]["status"] == "OK"
+    out = capsys.readouterr().out
+    assert "批处理完成: 0 OK/B / 0 SUSPECT / 1 UNSCORABLE / 0 GIVEUP / 0 SKIP" in out
 
 
 def test_main_forwards_force_ocr_and_rest_schedule(monkeypatch):

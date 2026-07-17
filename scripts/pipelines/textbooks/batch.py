@@ -21,6 +21,7 @@ from scripts.pipelines.textbooks import katex_triage
 from scripts.pipelines.textbooks.katex_scan import scan_katex_work_pages
 from scripts.pipelines.textbooks.paths import resolve_layout
 from scripts.pipelines.textbooks.power import keep_system_awake
+from scripts.pipelines.textbooks.selfcheck import build_source_audit_field
 from scripts.pipelines.textbooks.watchdog import run_until_done
 
 PROJECT_ROOT = Path(__file__).resolve().parents[3]
@@ -43,6 +44,16 @@ DEFAULT_SEVERE_ISSUE_CODES = frozenset({
 # 批处理摘要打印的 suspect 页码上限:只列页码 + issue 类别名,绝不打印审计报告
 # 原文/源文本本身,避免刷屏也避免间接泄露敏感源文本。
 DEFAULT_SUSPECT_PRINT_LIMIT = 5
+
+# audit 报告 schema 版本——与 convert.py/source_audit.py 的 schema_version 同步维护
+# (独立常量,不跨模块 import convert.py 制造不必要耦合;风格同 selfcheck.py 里类似的
+# "只读参考,独立维护"惯例)。
+AUDIT_SCHEMA_VERSION = 2
+
+# selfcheck.json 里紧凑 source_audit 字段做分级要用到的最小键集合——用来判断该字段
+# 是否结构完好,而非"字段存在就信"(Review Important 1:字段存在但类型/结构损坏时,
+# 必须转磁盘兜底读取,不能悄悄漏报)。
+_COMPACT_AUDIT_REQUIRED_KEYS = {"status", "suspect_pages", "issue_counts"}
 
 
 def discover(src_paths: list[str]) -> list[Path]:
@@ -140,12 +151,42 @@ def _grade_source_audit(source_audit: dict | None, total_pages: int, *,
     }
 
 
+def _is_valid_compact_audit(field) -> bool:
+    """selfcheck.json 里 source_audit 字段的最小结构校验(不是完整 schema 校验)——
+    只确保分级要用到的键都在、且是 dict。字段缺失(旧式 selfcheck.json)或结构损坏
+    (非 dict/缺关键键)时返回 False,调用方据此转磁盘兜底读取,不能悄悄漏报。"""
+    return isinstance(field, dict) and _COMPACT_AUDIT_REQUIRED_KEYS <= field.keys()
+
+
+def _disk_audit_fallback(layout, pdf: Path, dpi: int) -> dict:
+    """selfcheck.json 缺失(如 --no-selfcheck-json)或其 source_audit 字段缺失/结构
+    损坏时的兜底:audit 报告由 convert 主链独立管理(Task 9 保证总会写),直接读磁盘
+    上的 <stem>_source_audit.json,不能因为 selfcheck 没落盘/字段坏了就把"其实是
+    SUSPECT"漏报成 OK。
+
+    只有报告文件确实存在时才需要真实 PDF 指纹做新鲜度比对——报告不存在时
+    build_source_audit_field 在比对指纹前就已短路返回 audit_report_missing,不需要
+    也不应该为此打开 PDF(测试常用的占位/非法 PDF 字节在此路径下不会被触碰)。
+    """
+    pdf_fingerprint: dict = {}
+    if os.path.exists(layout.source_audit_path):
+        try:
+            pdf_fingerprint = cp.pdf_fingerprint(str(pdf))
+        except Exception:                          # noqa: BLE001 兜底读取不逃逸
+            pdf_fingerprint = {}
+    return build_source_audit_field(
+        layout.source_audit_path, pdf_fingerprint, dpi, AUDIT_SCHEMA_VERSION)
+
+
 def _read_summary(out_root: Path, work_root: Path | None, pdf: Path, *,
-                  severe_issue_codes: frozenset = DEFAULT_SEVERE_ISSUE_CODES) -> dict:
+                  severe_issue_codes: frozenset = DEFAULT_SEVERE_ISSUE_CODES,
+                  dpi: int = cp.DEFAULT_DPI) -> dict:
     """跑完一本书(rc==0)后从磁盘读回结构化结果,供汇总报告用(拿不到 Python 返回值)。
 
     文档状态综合 failed_pages / selfcheck / source audit 三者:有产物但 audit
-    判 SUSPECT(即便 failed_pages 为空)也不能计入 OK(Task 10)。"""
+    判 SUSPECT(即便 failed_pages 为空)也不能计入 OK(Task 10)。selfcheck.json
+    缺失或其 source_audit 字段缺失/结构损坏时,直接读磁盘上的审计报告兜底
+    (Review Important 1),不依赖 selfcheck.json 是否落盘。"""
     deferred_marker = out_root / "_deferred_born_digital" / f"{pdf.stem}.txt"
     if deferred_marker.exists():
         return {"stem": pdf.stem, "status": "B", "route": "B",
@@ -160,7 +201,10 @@ def _read_summary(out_root: Path, work_root: Path | None, pdf: Path, *,
     if os.path.exists(layout.selfcheck_path):
         with open(layout.selfcheck_path, encoding="utf-8") as f:
             selfcheck = json.load(f)
-    grade = _grade_source_audit((selfcheck or {}).get("source_audit"), total_pages,
+    source_audit_field = (selfcheck or {}).get("source_audit")
+    if not _is_valid_compact_audit(source_audit_field):
+        source_audit_field = _disk_audit_fallback(layout, pdf, dpi)
+    grade = _grade_source_audit(source_audit_field, total_pages,
                                 severe_issue_codes=severe_issue_codes)
     status = "SUSPECT" if failed_pages else "OK"
     if grade and grade["status"] == "SUSPECT":
@@ -231,7 +275,8 @@ def run(src_paths: list[str], out: str | None = None, dpi: int = cp.DEFAULT_DPI,
             results.append({"stem": pdf.stem, "status": "GIVEUP", "route": None,
                              "failed_pages": 0, "selfcheck": None, "source_audit_grade": None})
             continue
-        summary = _read_summary(out_root, work_root, pdf, severe_issue_codes=severe_issue_codes)
+        summary = _read_summary(out_root, work_root, pdf,
+                                severe_issue_codes=severe_issue_codes, dpi=dpi)
         if katex_scan_enabled and summary["status"] != "B":
             layout = resolve_layout(pdf.stem, str(out_root),
                                     str(work_root) if work_root else None)
@@ -261,11 +306,18 @@ def run(src_paths: list[str], out: str | None = None, dpi: int = cp.DEFAULT_DPI,
             print(f"  [{summary['status']}] {pdf.stem} — route={summary['route']} "
                   f"failed_pages={summary['failed_pages']}{cov}{audit_line}")
 
-    n_ok = sum(1 for r in results if r["status"] in ("OK", "B"))
+    def _is_unscorable(result: dict) -> bool:
+        # 审计"读不出"(报告缺失/半截/过期)不该悄悄跟"审计判 OK"共享 OK 计数——
+        # rollup 顺手改进(Review):单列 UNSCORABLE,不动逐本(per-line)输出。
+        grade = result.get("source_audit_grade")
+        return bool(grade) and grade.get("status") == "UNSCORABLE"
+
+    n_unscorable = sum(1 for r in results if r["status"] == "OK" and _is_unscorable(r))
+    n_ok = sum(1 for r in results if r["status"] in ("OK", "B")) - n_unscorable
     n_suspect = sum(1 for r in results if r["status"] == "SUSPECT")
     n_skip = sum(1 for r in results if r["status"] == "SKIP")
     print(f"\n{'=' * 56}\n批处理完成: {n_ok} OK/B / {n_suspect} SUSPECT / "
-          f"{n_giveup} GIVEUP / {n_skip} SKIP → {out_root}")
+          f"{n_unscorable} UNSCORABLE / {n_giveup} GIVEUP / {n_skip} SKIP → {out_root}")
     return (1 if n_giveup else 0), results
 
 
