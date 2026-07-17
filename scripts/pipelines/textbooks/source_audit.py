@@ -264,6 +264,104 @@ def normalize_prose_for_compare(text: str) -> str:
     return _WS_RE.sub(" ", t).strip()
 
 
+_LATEX_COMMAND_RE = re.compile(r"\\[A-Za-z]+")
+
+
+def _consume_brace_group(text: str, start: int) -> int:
+    """text[start] 必须是 '{':返回匹配的 '}' 之后的下标(支持嵌套花括号)。
+
+    到字符串结尾都未配平(未闭合)→ 消费到末尾,容错优先,不抛异常。
+    """
+    depth = 0
+    i = start
+    n = len(text)
+    while i < n:
+        if text[i] == "{":
+            depth += 1
+        elif text[i] == "}":
+            depth -= 1
+            if depth == 0:
+                return i + 1
+        i += 1
+    return n
+
+
+def _strip_residual_latex_commands(text: str) -> str:
+    """去掉残留 LaTeX 命令(\\word)及其紧跟的花括号参数(计划 Task 15b)。
+
+    命令后可有多组连续的 {...} 参数(如 \\frac{1}{2}),逐组吃掉;命令后没有
+    花括号参数则只去命令本身,不动后面的普通字符。
+    """
+    out: list[str] = []
+    i = 0
+    n = len(text)
+    while i < n:
+        m = _LATEX_COMMAND_RE.match(text, i)
+        if m:
+            j = m.end()
+            while j < n and text[j] == "{":
+                j = _consume_brace_group(text, j)
+            i = j
+            continue
+        out.append(text[i])
+        i += 1
+    return "".join(out)
+
+
+def strip_inline_math(text: str) -> str:
+    """剥离内联数学段与残留 LaTeX 命令(计划 Task 15b),不动普通文本。
+
+    剥离范围:$...$、\\(...\\)、\\[...\\] 整段(含定界符),以及残留的 \\word
+    命令及其花括号参数。用于内联公式回退块(reasons 含 math_in_prose_block)
+    的 OCR 侧对账文本——源文本是 Unicode(3.25×10⁻³),OCR 内容是 LaTeX
+    ($3.25\\times10^{-3}$),两侧表示法不同,直接对账会把内容本身正确的块
+    误判成 prose_mismatch/numeric_mismatch(NGX p13 人工核实数值正确)。
+    """
+    if not text:
+        return text or ""
+    kept: list[str] = []
+    i = 0
+    n = len(text)
+    while i < n:
+        if text[i] == "$":
+            j = i + 1
+            while j < n and text[j] != "$":
+                j += 1
+            i = (j + 1) if j < n else n
+            continue
+        if text.startswith("\\(", i):
+            j = text.find("\\)", i + 2)
+            i = (j + 2) if j != -1 else n
+            continue
+        if text.startswith("\\[", i):
+            j = text.find("\\]", i + 2)
+            i = (j + 2) if j != -1 else n
+            continue
+        kept.append(text[i])
+        i += 1
+    return _strip_residual_latex_commands("".join(kept))
+
+
+# 上标/下标数字与常见数学符号——用于内联公式回退块的"源侧剥离"(计划
+# Task 15b):含这些字符的 token 判定为数学记号,整 token 从对账源文本剔除
+# (与 OCR 侧 strip_inline_math 的剥离范围呼应,两侧比较空间才落在一致的
+# "剥离数学符号后"的文字上)。
+_MATH_MARK_CHARS = frozenset("⁰¹²³⁴⁵⁶⁷⁸⁹⁺⁻₀₁₂₃₄₅₆₇₈₉₊₋×÷")
+
+
+def _token_has_math_marks(token: str) -> bool:
+    return any(ch in _MATH_MARK_CHARS for ch in token)
+
+
+def _strip_math_tokens_from_source(text: str) -> str:
+    """源侧剥离(计划 Task 15b):按空白分词,丢弃含数学码点/上标簇的整个
+    token——与 OCR 侧 strip_inline_math 呼应,使内联公式回退块两侧对账文本
+    落在同一(剥离数学符号后)的比较空间。"""
+    tokens = (text or "").split()
+    kept = [t for t in tokens if not _token_has_math_marks(t)]
+    return " ".join(kept)
+
+
 def _looks_like_unit(candidate: str) -> bool:
     """结构特征粗筛,不维护封闭专业词典——允许一定误报(计划 §6.4)。"""
     return bool(candidate) and (
@@ -782,6 +880,18 @@ def _block_sequence_ratio(
     return agree / (len(medians) - 1)
 
 
+# 家具标签(计划 Task 15b,审计降噪):PaddleOCR 分类学中 content=目录
+# (TOC)、reference_content=参考文献列表——这两类块的文本层按绘制顺序/点
+# 引线/页码分栏,NED/数字召回天然虚高,不是内容错误。只影响审计端(本模块
+# 的 issue 判定),采信门(prose_adoption.ADOPTABLE_LABELS)白名单行为不变。
+FURNITURE_PROSE_LABELS = frozenset({"content", "reference_content"})
+
+# 页面 status 判定里"不算 SUSPECT"的 issue code 集合(计划 Task 15b:扩展
+# "仅 source_unreliable 不算 SUSPECT"的既有分支模式)——furniture_prose_noise
+# 是版式噪声,不是内容错误,页面唯一的 issue 类型是它时不判 SUSPECT。
+_PAGE_NON_SUSPECT_ISSUE_CODES = frozenset({"furniture_prose_noise"})
+
+
 def audit_prose(
     source_page: dict,
     blocks: list[dict],
@@ -871,6 +981,9 @@ def audit_prose(
         # ---- 回退块(content_source == "ocr")且 label 属正文白名单 ----
         fallback_prose_count += 1
         src_words = list(assignments_by_block.get(i, []))
+        label = block.get("block_label") if isinstance(block, dict) else None
+        is_furniture = label in FURNITURE_PROSE_LABELS
+        is_math_fallback = "math_in_prose_block" in decision.reasons
 
         if page_geometry_unscorable:
             # 全页几何不可标定(assignment 的权威信号):归属本就不可信,不猜测,
@@ -911,8 +1024,41 @@ def audit_prose(
             )
             continue
 
-        source_compare = normalize_prose_for_compare(raw_source_text)
-        ocr_compare = normalize_prose_for_compare(ocr_content or "")
+        if is_math_fallback:
+            # 内联公式回退块(计划 Task 15b):OCR 是 LaTeX、源文本是 Unicode,
+            # 两侧表示法不同——对账前先各自剥离数学记号,落到同一比较空间。
+            source_for_compare_raw = _strip_math_tokens_from_source(raw_source_text)
+            ocr_for_compare_raw = strip_inline_math(ocr_content or "")
+            residual_source_chars = sum(
+                1 for ch in source_for_compare_raw if not ch.isspace()
+            )
+            if residual_source_chars < thresholds.minimum_reliable_chars:
+                # 剥离数学记号后残余纯文字太少,不足以对账——按现有
+                # source_unreliable 路径处理(与"字符量不足"同语义)。
+                source_unreliable_count += 1
+                block_metrics[i] = {
+                    "content_source": "ocr",
+                    "source_unreliable": True,
+                    "src_char_count": residual_source_chars,
+                    "bad_char_ratio": bad_ratio,
+                }
+                issues.append(
+                    {
+                        "code": "source_unreliable",
+                        "block_id": i,
+                        "detail": (
+                            f"内联公式回退块剥离数学记号后残余字符量={residual_source_chars},"
+                            "不足以对账,该块源不可信,不参与对账"
+                        ),
+                    }
+                )
+                continue
+        else:
+            source_for_compare_raw = raw_source_text
+            ocr_for_compare_raw = ocr_content or ""
+
+        source_compare = normalize_prose_for_compare(source_for_compare_raw)
+        ocr_compare = normalize_prose_for_compare(ocr_for_compare_raw)
 
         source_chars = [ch for ch in source_compare if not ch.isspace()]
         ocr_chars = [ch for ch in ocr_compare if not ch.isspace()]
@@ -926,13 +1072,17 @@ def audit_prose(
 
         ned = _reverse_ned(source_compare, ocr_compare)
 
-        source_numeric = extract_numeric_tokens(raw_source_text)
-        ocr_numeric = extract_numeric_tokens(ocr_content or "")
         numeric_recall = None
-        if source_numeric:
-            numeric_overlap = _multiset_overlap(source_numeric, ocr_numeric)
-            numeric_recall = _recall(numeric_overlap, len(source_numeric))
-            numeric_pairs.append((numeric_overlap, len(source_numeric)))
+        if not is_math_fallback:
+            # 内联公式回退块:数字对账整体跳过(计划 Task 15b)——数学块的
+            # 数值语义由公式链负责(KaTeX/formula agents),审计端两侧表示法
+            # (LaTeX vs Unicode)不可比,不计算也不产生 numeric_mismatch。
+            source_numeric = extract_numeric_tokens(raw_source_text)
+            ocr_numeric = extract_numeric_tokens(ocr_content or "")
+            if source_numeric:
+                numeric_overlap = _multiset_overlap(source_numeric, ocr_numeric)
+                numeric_recall = _recall(numeric_overlap, len(source_numeric))
+                numeric_pairs.append((numeric_overlap, len(source_numeric)))
 
         addition_ratio = (
             1.0 - _recall(char_overlap, len(ocr_chars)) if ocr_chars else 0.0
@@ -955,6 +1105,8 @@ def audit_prose(
             "src_char_count": len(source_chars),
             "ocr_char_count": len(ocr_chars),
         }
+        if is_math_fallback:
+            block_metrics[i]["numeric_audit_skipped_math"] = True
 
         # 定位样本(计划 §6.4):逐 token diff 取连续缺失/新增 run,只在对应
         # issue 真的触发时才附加(干净块不产样本字段——不产字段而非空列表,
@@ -970,6 +1122,44 @@ def audit_prose(
             or token_recall < thresholds.minimum_token_recall
         )
         prose_mismatch_fired = ned > thresholds.maximum_block_ned
+        addition_fired = addition_ratio > thresholds.maximum_addition_ratio
+        numeric_mismatch_fired = (
+            numeric_recall is not None
+            and numeric_recall < thresholds.minimum_numeric_token_recall
+        )
+
+        if (missing_prose_fired or prose_mismatch_fired) and missing_samples:
+            block_metrics[i]["missing_samples"] = missing_samples
+        if addition_fired and added_samples:
+            block_metrics[i]["added_samples"] = added_samples
+
+        if is_furniture:
+            # 家具标签降噪(计划 Task 15b):目录/参考文献块的这四类 issue 天然
+            # 虚高(点引线/页码分栏,非内容错误)——指标照常全部记录(见上),
+            # 但不发这四类 issue,改发单一 furniture_prose_noise(每块最多一
+            # 条,detail 含原本会触发的指标名)。
+            fired_names = []
+            if missing_prose_fired:
+                fired_names.append("missing_prose")
+            if prose_mismatch_fired:
+                fired_names.append("prose_mismatch")
+            if addition_fired:
+                fired_names.append("ocr_addition")
+            if numeric_mismatch_fired:
+                fired_names.append("numeric_mismatch")
+            if fired_names:
+                issues.append(
+                    {
+                        "code": "furniture_prose_noise",
+                        "block_id": i,
+                        "detail": (
+                            f"家具标签({label})版式噪声,原本会触发的指标:"
+                            f"{','.join(fired_names)}"
+                        ),
+                    }
+                )
+            continue
+
         if missing_prose_fired:
             issues.append(
                 {
@@ -989,9 +1179,7 @@ def audit_prose(
                     "detail": f"块级 NED={ned:.3f} 超过上限 {thresholds.maximum_block_ned}",
                 }
             )
-        if (missing_prose_fired or prose_mismatch_fired) and missing_samples:
-            block_metrics[i]["missing_samples"] = missing_samples
-        if addition_ratio > thresholds.maximum_addition_ratio:
+        if addition_fired:
             issues.append(
                 {
                     "code": "ocr_addition",
@@ -999,12 +1187,7 @@ def audit_prose(
                     "detail": f"OCR 新增比例={addition_ratio:.2f},疑似幻觉/多出内容",
                 }
             )
-            if added_samples:
-                block_metrics[i]["added_samples"] = added_samples
-        if (
-            numeric_recall is not None
-            and numeric_recall < thresholds.minimum_numeric_token_recall
-        ):
+        if numeric_mismatch_fired:
             issues.append(
                 {
                     "code": "numeric_mismatch",
@@ -1094,6 +1277,12 @@ def audit_prose(
         and all(iss["code"] == "source_unreliable" for iss in issues)
     ):
         status = "UNSCORABLE"
+    elif all(iss["code"] in _PAGE_NON_SUSPECT_ISSUE_CODES for iss in issues):
+        # 家具标签降噪(计划 Task 15b):furniture_prose_noise 语义同"仅
+        # source_unreliable 不算 SUSPECT"的既有分支模式——扩展该判定集合,
+        # 页面全部 issue 都只是版式噪声时不判 SUSPECT(真问题与噪声混杂的页
+        # 面走不到这里,all() 会因非噪声 code 存在而为 False,仍归 SUSPECT)。
+        status = "OK"
     else:
         status = "SUSPECT"
 
@@ -1342,7 +1531,11 @@ def _audit_one_page(
 
     if prose_result["status"] == "UNSCORABLE":
         status = "UNSCORABLE"
-    elif issues:
+    elif any(iss["code"] not in _PAGE_NON_SUSPECT_ISSUE_CODES for iss in issues):
+        # 家具标签降噪(计划 Task 15b):页面聚合(prose + formula + table)的
+        # issues 里如果只有 furniture_prose_noise,不得被"issues 非空即
+        # SUSPECT"的旧规则拉高——扩展判定,与 audit_prose 内部的页级 status
+        # 分支保持一致(同一常量 _PAGE_NON_SUSPECT_ISSUE_CODES)。
         status = "SUSPECT"
     else:
         status = "OK"

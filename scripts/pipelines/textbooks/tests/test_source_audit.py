@@ -10,6 +10,7 @@ from scripts.pipelines.textbooks.source_audit import (
     ROUTE_B_V1_UNCALIBRATED_THRESHOLDS,
     THRESHOLD_PROFILE_UNCALIBRATED,
     AuditThresholds,
+    FURNITURE_PROSE_LABELS,
     PageGeometry,
     SourceWord,
     _is_bad_control,
@@ -30,6 +31,7 @@ from scripts.pipelines.textbooks.source_audit import (
     overlap_ratio,
     page_geometry,
     source_health,
+    strip_inline_math,
     write_audit_report,
 )
 
@@ -1158,6 +1160,291 @@ def test_audit_prose_geometry_unscorable_flag_forces_unscorable_independent_of_i
     assert result["status"] == "UNSCORABLE"
 
 
+# ===========================================================================
+# Task 15b:审计降噪——家具标签(content/reference_content)与内联公式回退块
+# ---------------------------------------------------------------------------
+# 真实书试跑暴露的两类系统性假阳性(brief 2026-07-16-textbooks-route-b/
+# task-15b-brief.md):
+#   A. 目录/参考文献块(label=content/reference_content):文本层按绘制顺序/
+#      点引线/页码分栏,NED/数字召回天然虚高,不是内容错误。
+#   B. 内联公式回退块(reasons 含 math_in_prose_block):OCR 是 LaTeX、源文本
+#      是 Unicode,数字/字符表示法不同,直接对账会把内容本身正确的块误判。
+# ===========================================================================
+
+
+def _furniture_toc_fixture(label):
+    """目录块 fixture:两句话,OCR 只保留第一句——正常路径下会触发
+    missing_prose(字符/token 召回不足)。家具标签下应改判 furniture_prose_noise。
+    """
+    words = [
+        _sw("Sentence", (0, 0, 1, 1), line_no=0, word_no=0),
+        _sw("one", (0, 0, 1, 1), line_no=0, word_no=1),
+        _sw("is", (0, 0, 1, 1), line_no=0, word_no=2),
+        _sw("here", (0, 0, 1, 1), line_no=0, word_no=3),
+        _sw("today", (0, 0, 1, 1), line_no=0, word_no=4),
+        _sw("Sentence", (0, 0, 1, 1), line_no=1, word_no=0),
+        _sw("two", (0, 0, 1, 1), line_no=1, word_no=1),
+        _sw("follows", (0, 0, 1, 1), line_no=1, word_no=2),
+        _sw("right", (0, 0, 1, 1), line_no=1, word_no=3),
+        _sw("after", (0, 0, 1, 1), line_no=1, word_no=4),
+    ]
+    blocks = [_block(label, [0, 0, 100, 100], content="Sentence one is here today")]
+    decisions = [_decision(0, "ocr", reasons=["adoption_disagreement"])]
+    assignment = _assignment({0: words})
+    thresholds = _audit_thresholds(
+        minimum_reliable_chars=5,
+        maximum_block_ned=0.9,
+        minimum_char_recall=0.7,
+        minimum_token_recall=0.7,
+        maximum_addition_ratio=0.9,
+    )
+    return words, blocks, decisions, assignment, thresholds
+
+
+# ---- 15b-1/2. content / reference_content 标签:只发 furniture_prose_noise,
+# 页不 SUSPECT,block_metrics 仍全 -------------------------------------------
+
+
+def test_audit_prose_content_label_furniture_noise_not_suspect():
+    assert "content" in FURNITURE_PROSE_LABELS
+    words, blocks, decisions, assignment, thresholds = _furniture_toc_fixture("content")
+    result = audit_prose(_audit_page(words), blocks, decisions, assignment, thresholds)
+    assert _issue_codes(result) == {"furniture_prose_noise"}
+    issue = next(iss for iss in result["issues"] if iss["code"] == "furniture_prose_noise")
+    assert issue["block_id"] == 0
+    assert "missing_prose" in issue["detail"]
+    assert result["status"] != "SUSPECT"
+    # block_metrics 指标不丢:与普通块完整对账后的字段一致(只是不发 issue)
+    bm = result["block_metrics"][0]
+    assert bm["content_source"] == "ocr"
+    assert bm["source_unreliable"] is False
+    assert "char_recall" in bm
+    assert "token_recall" in bm
+    assert "numeric_token_recall" in bm
+    assert "addition_ratio" in bm
+
+
+def test_audit_prose_reference_content_label_furniture_noise_not_suspect():
+    assert "reference_content" in FURNITURE_PROSE_LABELS
+    words, blocks, decisions, assignment, thresholds = _furniture_toc_fixture(
+        "reference_content"
+    )
+    result = audit_prose(_audit_page(words), blocks, decisions, assignment, thresholds)
+    assert _issue_codes(result) == {"furniture_prose_noise"}
+    assert result["status"] != "SUSPECT"
+    bm = result["block_metrics"][0]
+    assert bm["source_unreliable"] is False
+    assert "char_recall" in bm
+
+
+# ---- 15b-3. 普通 text 块同样的低召回 → 照旧 missing_prose + SUSPECT(回归:
+# 降噪只限两标签) -------------------------------------------------------------
+
+
+def test_audit_prose_text_label_not_exempted_from_missing_prose():
+    words, blocks, decisions, assignment, thresholds = _furniture_toc_fixture("text")
+    result = audit_prose(_audit_page(words), blocks, decisions, assignment, thresholds)
+    assert _issue_codes(result) == {"missing_prose"}
+    assert "furniture_prose_noise" not in _issue_codes(result)
+    assert result["status"] == "SUSPECT"
+
+
+# ---- 15b-4. furniture 块与真问题块同页 → 页仍 SUSPECT(真问题不被家具豁免
+# 掩盖) -----------------------------------------------------------------------
+
+
+def test_audit_prose_furniture_noise_does_not_mask_real_problem_same_page():
+    furniture_words = [
+        _sw("Sentence", (0, 0, 1, 1), block_no=0, line_no=0, word_no=0),
+        _sw("one", (0, 0, 1, 1), block_no=0, line_no=0, word_no=1),
+        _sw("is", (0, 0, 1, 1), block_no=0, line_no=0, word_no=2),
+        _sw("here", (0, 0, 1, 1), block_no=0, line_no=0, word_no=3),
+        _sw("today", (0, 0, 1, 1), block_no=0, line_no=0, word_no=4),
+        _sw("Sentence", (0, 0, 1, 1), block_no=0, line_no=1, word_no=0),
+        _sw("two", (0, 0, 1, 1), block_no=0, line_no=1, word_no=1),
+        _sw("follows", (0, 0, 1, 1), block_no=0, line_no=1, word_no=2),
+        _sw("right", (0, 0, 1, 1), block_no=0, line_no=1, word_no=3),
+        _sw("after", (0, 0, 1, 1), block_no=0, line_no=1, word_no=4),
+    ]
+    real_words = [
+        _sw("Sentence", (0, 0, 1, 1), block_no=1, line_no=0, word_no=0),
+        _sw("one", (0, 0, 1, 1), block_no=1, line_no=0, word_no=1),
+        _sw("is", (0, 0, 1, 1), block_no=1, line_no=0, word_no=2),
+        _sw("here", (0, 0, 1, 1), block_no=1, line_no=0, word_no=3),
+        _sw("today", (0, 0, 1, 1), block_no=1, line_no=0, word_no=4),
+        _sw("Sentence", (0, 0, 1, 1), block_no=1, line_no=1, word_no=0),
+        _sw("two", (0, 0, 1, 1), block_no=1, line_no=1, word_no=1),
+        _sw("follows", (0, 0, 1, 1), block_no=1, line_no=1, word_no=2),
+        _sw("right", (0, 0, 1, 1), block_no=1, line_no=1, word_no=3),
+        _sw("after", (0, 0, 1, 1), block_no=1, line_no=1, word_no=4),
+    ]
+    blocks = [
+        _block("content", [0, 0, 100, 100], content="Sentence one is here today"),
+        _block("text", [0, 100, 100, 200], content="Sentence one is here today"),
+    ]
+    decisions = [
+        _decision(0, "ocr", reasons=["adoption_disagreement"]),
+        _decision(1, "ocr", reasons=["adoption_disagreement"]),
+    ]
+    assignment = _assignment({0: furniture_words, 1: real_words})
+    thresholds = _audit_thresholds(
+        minimum_reliable_chars=5,
+        maximum_block_ned=0.9,
+        minimum_char_recall=0.7,
+        minimum_token_recall=0.7,
+        maximum_addition_ratio=0.9,
+    )
+    result = audit_prose(
+        _audit_page(furniture_words + real_words), blocks, decisions, assignment, thresholds
+    )
+    assert "furniture_prose_noise" in _issue_codes(result)
+    assert "missing_prose" in _issue_codes(result)
+    assert result["status"] == "SUSPECT"
+
+
+# ---- 15b-5. strip_inline_math:$...$ 剥离、残留 LaTeX 命令剥离、普通文本不
+# 动、嵌套花括号参数剥净 -------------------------------------------------------
+
+
+def test_strip_inline_math_covers_all_stripping_rules():
+    # $...$ 数学段整段剥离(含定界符)
+    assert strip_inline_math("$a+b$") == ""
+    # 残留 LaTeX 命令(无花括号参数)只剥命令本身,不动后续普通字符
+    assert strip_inline_math("\\times10^{-3}") == "10^{-3}"
+    # 普通文本不动
+    assert strip_inline_math("plain text stays intact") == "plain text stays intact"
+    # 嵌套花括号参数剥净(命令+其花括号参数,含内层嵌套花括号)
+    assert strip_inline_math("prefix \\text{outer{inner}stuff} suffix") == "prefix  suffix"
+    # $...$ 内部混有 LaTeX 命令与花括号参数,整段一并剥离
+    assert strip_inline_math("Value $3.25\\times10^{-3}$ m") == "Value  m"
+
+
+# ---- 15b-6. math 回退块:LaTeX 10^{-3} vs Unicode 10⁻³ → 无 numeric_mismatch,
+# numeric_audit_skipped_math=true ---------------------------------------------
+
+
+def test_audit_prose_math_block_skips_numeric_mismatch_for_latex_vs_unicode():
+    words = [
+        _sw("The", (0, 0, 1, 1), line_no=0, word_no=0),
+        _sw("value", (0, 0, 1, 1), line_no=0, word_no=1),
+        _sw("is", (0, 0, 1, 1), line_no=0, word_no=2),
+        _sw("3.25×10⁻³", (0, 0, 1, 1), line_no=0, word_no=3),
+        _sw("units", (0, 0, 1, 1), line_no=0, word_no=4),
+    ]
+    ocr_text = "The value is $3.25\\times10^{-3}$ units"
+    blocks = [_block("text", [0, 0, 100, 100], content=ocr_text)]
+    decisions = [_decision(0, "ocr", reasons=["math_in_prose_block"])]
+    assignment = _assignment({0: words})
+    thresholds = _audit_thresholds(
+        minimum_reliable_chars=10,
+        maximum_block_ned=0.3,
+        minimum_char_recall=0.8,
+        minimum_token_recall=0.8,
+        maximum_addition_ratio=0.3,
+        minimum_numeric_token_recall=0.99,
+    )
+    result = audit_prose(_audit_page(words), blocks, decisions, assignment, thresholds)
+    assert "numeric_mismatch" not in _issue_codes(result)
+    assert result["block_metrics"][0]["numeric_audit_skipped_math"] is True
+    assert result["issues"] == []
+    assert result["status"] == "OK"
+
+
+# ---- 15b-7. math 回退块纯文字部分真实漏句 → 仍报 missing_prose(剥离不豁免
+# 真问题) -----------------------------------------------------------------------
+
+
+def test_audit_prose_math_block_still_flags_real_missing_prose():
+    words = [
+        _sw("Value", (0, 0, 1, 1), line_no=0, word_no=0),
+        _sw("is", (0, 0, 1, 1), line_no=0, word_no=1),
+        _sw("3.25×10⁻³", (0, 0, 1, 1), line_no=0, word_no=2),
+        _sw("units", (0, 0, 1, 1), line_no=0, word_no=3),
+        _sw("Sentence", (0, 0, 1, 1), line_no=1, word_no=0),
+        _sw("two", (0, 0, 1, 1), line_no=1, word_no=1),
+        _sw("follows", (0, 0, 1, 1), line_no=1, word_no=2),
+        _sw("right", (0, 0, 1, 1), line_no=1, word_no=3),
+        _sw("after", (0, 0, 1, 1), line_no=1, word_no=4),
+    ]
+    # OCR 只保留第一句(含 LaTeX 数学),第二句真实整句缺失——与数学剥离无关。
+    ocr_text = "Value is $3.25\\times10^{-3}$ units"
+    blocks = [_block("text", [0, 0, 100, 100], content=ocr_text)]
+    decisions = [_decision(0, "ocr", reasons=["math_in_prose_block"])]
+    assignment = _assignment({0: words})
+    thresholds = _audit_thresholds(
+        minimum_reliable_chars=5,
+        maximum_block_ned=0.9,
+        minimum_char_recall=0.7,
+        minimum_token_recall=0.7,
+        maximum_addition_ratio=0.9,
+    )
+    result = audit_prose(_audit_page(words), blocks, decisions, assignment, thresholds)
+    assert "missing_prose" in _issue_codes(result)
+    assert "numeric_mismatch" not in _issue_codes(result)
+    assert result["block_metrics"][0]["numeric_audit_skipped_math"] is True
+    assert result["status"] == "SUSPECT"
+
+
+# ---- 15b-8. math 回退块剥离后过短 → source_unreliable 路径 ------------------
+
+
+def test_audit_prose_math_block_too_short_after_strip_is_source_unreliable():
+    # 归属源 words 就只有一个数学 token——原始字符量够(9 ≥ 5),但剥离数学
+    # 记号后残余纯文字为空,不足以对账。
+    words = [_sw("3.25×10⁻³", (0, 0, 1, 1), line_no=0, word_no=0)]
+    ocr_text = "$3.25\\times10^{-3}$"
+    blocks = [_block("text", [0, 0, 100, 100], content=ocr_text)]
+    decisions = [_decision(0, "ocr", reasons=["math_in_prose_block"])]
+    assignment = _assignment({0: words})
+    thresholds = _audit_thresholds(minimum_reliable_chars=5, maximum_bad_char_ratio=0.5)
+    result = audit_prose(_audit_page(words), blocks, decisions, assignment, thresholds)
+    assert _issue_codes(result) == {"source_unreliable"}
+    assert result["block_metrics"][0]["source_unreliable"] is True
+    assert result["status"] == "UNSCORABLE"
+
+
+# ---- 15b-9. 非 math 普通回退块的全部指标与改动前逐字节一致(回归锁定) --------
+
+
+def test_audit_prose_ordinary_block_metrics_unchanged_by_refactor():
+    # 复用清单 4(数字改动)的 fixture:Task 15b 的分支重构不得改变普通
+    # (非 furniture、非 math)回退块的既有字段集合与既有数值。
+    words = [
+        _sw("The", (0, 0, 1, 1), line_no=0, word_no=0),
+        _sw("measured", (0, 0, 1, 1), line_no=0, word_no=1),
+        _sw("value", (0, 0, 1, 1), line_no=0, word_no=2),
+        _sw("is", (0, 0, 1, 1), line_no=0, word_no=3),
+        _sw("0.042", (0, 0, 1, 1), line_no=0, word_no=4),
+        _sw("units", (0, 0, 1, 1), line_no=0, word_no=5),
+        _sw("exactly", (0, 0, 1, 1), line_no=0, word_no=6),
+    ]
+    ocr_text = "The measured value is 0.42 units exactly"
+    blocks = [_block("text", [0, 0, 100, 100], content=ocr_text)]
+    decisions = [_decision(0, "ocr", reasons=["adoption_disagreement"])]
+    assignment = _assignment({0: words})
+    thresholds = _audit_thresholds(
+        minimum_reliable_chars=5,
+        maximum_block_ned=0.9,
+        minimum_char_recall=0.5,
+        minimum_token_recall=0.5,
+        maximum_addition_ratio=0.9,
+        minimum_numeric_token_recall=0.9,
+    )
+    result = audit_prose(_audit_page(words), blocks, decisions, assignment, thresholds)
+    bm = result["block_metrics"][0]
+    # 字段集合锁定:不多出 numeric_audit_skipped_math,不缺任何既有字段。
+    assert set(bm.keys()) == {
+        "content_source", "source_unreliable", "block_ned", "char_recall",
+        "token_recall", "numeric_token_recall", "addition_ratio",
+        "src_char_count", "ocr_char_count",
+    }
+    assert bm["numeric_token_recall"] == 0.0
+    assert _issue_codes(result) == {"numeric_mismatch"}
+    issue = next(iss for iss in result["issues"] if iss["code"] == "numeric_mismatch")
+    assert issue["block_id"] == 0
+    assert result["status"] == "SUSPECT"
+
+
 # ---- 12. 字符量加权:长块丢失在页级指标可见 ---------------------------------
 
 
@@ -1948,3 +2235,37 @@ def test_convert_production_profile_is_v1():
     from scripts.pipelines.textbooks import convert
     from scripts.pipelines.textbooks.source_audit import ROUTE_B_V1_THRESHOLDS
     assert convert.ROUTE_B_AUDIT_THRESHOLDS is ROUTE_B_V1_THRESHOLDS
+
+
+# ---- 15b-bonus. audit_document/_audit_one_page 层:furniture_prose_noise 独占
+# 一页的 issues 时,页级/文档级 status 也不得被拉成 SUSPECT(_audit_one_page 用
+# 自己的 issues 聚合重算 status,必须同样扩展判定集合,不能只改 audit_prose)。
+
+
+def test_audit_document_furniture_only_page_is_ok_not_suspect(tmp_path):
+    layout = _doc_layout(tmp_path)
+    pdf_path = str(tmp_path / "book.pdf")
+    _make_pdf(pdf_path, [[("Sentence one is here today", (72, 72))]])
+    _write_manifest(layout.work_dir, page_count=1)
+    _write_page_res(
+        layout.work_dir, 1,
+        [{"block_label": "content", "block_content": "Sentence one",
+          "block_bbox": [0, 0, 600, 800]}],
+    )
+    recorded = {
+        1: [
+            AdoptionDecision(
+                block_id=0, content_source="ocr", reasons=["adoption_disagreement"],
+                block_ned=None, adopted_text=None,
+            )
+        ]
+    }
+    report = audit_document(
+        pdf_path, layout, ROUTE_B_V1_UNCALIBRATED_THRESHOLDS,
+        decisions_by_page=recorded, born_digital_mode="hybrid",
+    )
+    page = report["pages"][0]
+    assert [iss["code"] for iss in page["issues"]] == ["furniture_prose_noise"]
+    assert page["status"] == "OK"
+    assert report["summary"]["status"] == "OK"
+    assert report["summary"]["suspect_pages"] == []
