@@ -3,12 +3,14 @@
 :root{
   --text:#6a9bcc; --title:#a78bfa; --formula:#2dd4bf; --visual:#f97316;
   --pass:#5fb87a; --code:#c9922e; --noise:#9c9b94; --bad:#ef4444; --warn:#f59e0b;
+  --unscorable:#64748b;
   --bg:#191A1B; --panel:#1F1F1E; --card:#262625; --ink:#F9F9F7; --sub:#9c9b94;
   --line:rgba(222,220,209,.18); --accent:#D97757; --shadow:rgba(0,0,0,.45);
 }
 [data-theme="light"]{
   --text:#3b82f6; --title:#8b5cf6; --formula:#0d9488; --visual:#ea580c;
   --pass:#10b981; --code:#b45309; --noise:#9ca3af; --bad:#ef4444; --warn:#d97706;
+  --unscorable:#64748b;
   --bg:#f5f5f7; --panel:#ffffff; --card:#ffffff; --ink:#1d1d1f; --sub:#86868b;
   --line:#e8e8ed; --accent:#D97757; --shadow:rgba(0,0,0,.10);
 }
@@ -141,6 +143,12 @@ main{flex:1;display:flex;min-height:0}
 .badge.ok{background:color-mix(in srgb,var(--pass) 14%,var(--card));color:var(--pass);border-color:color-mix(in srgb,var(--pass) 36%,transparent)}
 .badge.review{background:color-mix(in srgb,var(--accent) 15%,var(--card));color:var(--accent);border-color:color-mix(in srgb,var(--accent) 40%,transparent);font-weight:600}
 .badge.candidate{background:color-mix(in srgb,var(--accent) 13%,var(--card));color:var(--accent);border-color:color-mix(in srgb,var(--accent) 38%,transparent)}
+/* source audit(schema v2)页级状态徽标——UNSCORABLE 用独立的 --unscorable(灰蓝),
+   绝不复用 --bad(红色留给确凿的 KaTeX 渲染报错),避免"审计判不了"被误读成"确认出错"。 */
+.badge.audit-ok{background:color-mix(in srgb,var(--pass) 14%,var(--card));color:var(--pass);border-color:color-mix(in srgb,var(--pass) 36%,transparent)}
+.badge.audit-suspect{background:color-mix(in srgb,var(--warn) 14%,var(--card));color:var(--warn);border-color:color-mix(in srgb,var(--warn) 40%,transparent);font-weight:600}
+.badge.audit-unscorable{background:color-mix(in srgb,var(--unscorable) 16%,var(--card));color:var(--unscorable);border-color:color-mix(in srgb,var(--unscorable) 40%,transparent);font-weight:600}
+.badge.audit-none{background:var(--card);color:var(--sub);border-color:var(--line)}
 
 /* markdown 正文(右栏核心) */
 #mdOut{max-width:860px;font-size:14px;line-height:1.65}
@@ -174,6 +182,26 @@ main{flex:1;display:flex;min-height:0}
 .candcheck input{accent-color:var(--accent)}
 .candreasons{display:flex;flex-wrap:wrap;gap:5px;margin-top:7px}
 .candre{font-size:10.5px;color:var(--sub);border:1px solid var(--line);border-radius:999px;padding:1px 6px;background:var(--bg)}
+/* provenance 徽标(块级采信来源):source_text=采信(绿,信得过) / ocr=回退(中性灰,
+   不是"错",只是"没能采信")——回退块原因码(adoption_disagreement 等)只读展示,
+   不提供任何一键改写入口(debug view 只展示,不自动接受或改写内容)。 */
+.prov-badge{display:inline-flex;align-items:center;gap:6px;font-size:10.5px;margin:4px 0 0;
+            padding:2px 8px;border-radius:999px;border:1px solid var(--line);width:fit-content}
+.prov-badge.prov-source{color:var(--pass);border-color:color-mix(in srgb,var(--pass) 45%,var(--line));
+                         background:color-mix(in srgb,var(--pass) 8%,transparent)}
+.prov-badge.prov-ocr{color:var(--sub);border-color:var(--line);background:color-mix(in srgb,var(--sub) 8%,transparent)}
+.prov-diff{margin-top:4px;font-size:11.5px;color:var(--sub)}
+.prov-diff summary{cursor:pointer;color:var(--sub)}
+.prov-diff summary:hover{color:var(--ink)}
+.prov-diff-text{margin-top:4px;padding:6px 8px;background:var(--bg);border:1px solid var(--line);
+                 border-radius:6px;white-space:pre-wrap;color:var(--ink)}
+/* source audit 有限样例(missing/added/numeric)——折叠展示,默认收起,避免铺满页面 */
+.audit-samples{margin:0 0 14px;font-size:12px;color:var(--sub);border:1px solid var(--line);
+               border-radius:8px;padding:8px 10px;background:var(--card)}
+.audit-samples summary{cursor:pointer;color:var(--ink);font-weight:600}
+.audit-samples ul{margin:8px 0 0;padding-left:18px}
+.audit-samples li{margin:3px 0;word-break:break-word}
+.audit-samples-trunc{margin-top:6px;color:var(--warn);font-size:11px}
 /* 待审修正卡片(人工确认门 UI):片段内嵌,原文/AI 修正 双栏对照 + 采纳/驳回 */
 .corrcard{margin:8px 0 4px;border:1px solid color-mix(in srgb,var(--accent) 45%,var(--line));
           border-radius:8px;background:color-mix(in srgb,var(--accent) 6%,var(--card));padding:10px 12px;font-size:12.5px}

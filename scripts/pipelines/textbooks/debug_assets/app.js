@@ -247,6 +247,17 @@
 
   // ---------- 问题页(离屏渲染判红,与 headless 扫描器同源;叠加 payload 里的疑似/待审) ----------
   const nPendingReview = (p) => (p.blocks || []).filter((b) => b.correction && b.correction.status === "pending").length;
+  // source audit(schema v2)疑点页判定:页级 status=SUSPECT(source/table audit 任一
+  // 有 issue 都会体现在这里),或者哪怕页面整体 status 没到 SUSPECT,只要有块的
+  // provenance.reasons 命中 adoption_disagreement(NED 临界、采信门与审计门阈值不同
+  // 导致的边界情形)也纳入——两条件独立判定,任一为真即算疑点页。纯函数,不摸 DOM,
+  // 便于离线单测(见 test_debug_view.py)。
+  function pageAuditSuspect(p) {
+    const a = p.audit;
+    if (!a) return false;
+    if (a.status === "SUSPECT") return true;
+    return (a.blocks || []).some((b) => (b.reasons || []).includes("adoption_disagreement"));
+  }
   function computeProblems() {
     const scratch = document.createElement("div");
     scratch.style.cssText = "position:absolute;left:-9999px;top:0;visibility:hidden;width:820px";
@@ -258,14 +269,16 @@
       const nSusp = (p.suspicions || []).length;
       const nCand = (p.candidates || []).length;
       const nReview = nPendingReview(p);
-      if (nErr > 0 || nSusp > 0 || nCand > 0) rows.push({ i, page: p.page, nErr, nSusp, nCand, nReview });
+      const nAudit = pageAuditSuspect(p) ? 1 : 0;
+      if (nErr > 0 || nSusp > 0 || nCand > 0 || nAudit > 0) rows.push({ i, page: p.page, nErr, nSusp, nCand, nReview, nAudit });
     });
     document.body.removeChild(scratch);
     return rows;
   }
   const probLabel = (r) => [r.nErr ? `${r.nErr} 红` : "", r.nSusp ? `疑似${r.nSusp}` : "",
     r.nCand ? `候选${r.nCand}` : "",
-    r.nReview ? `★待审${r.nReview}` : ""].filter(Boolean).join("·");
+    r.nReview ? `★待审${r.nReview}` : "",
+    r.nAudit ? "⚑审计疑点" : ""].filter(Boolean).join("·");
 
   // ---------- 缩略图条 ----------
   const film = $("film"), track = $("filmtrack");
@@ -614,12 +627,26 @@
     if (s.column_suspected) badges.push(`<span class="badge col">双栏嫌疑</span>`);
     (s.unhandled_labels || []).forEach((l) => badges.push(`<span class="badge warn">未知 label: ${esc(l)}</span>`));
     (s.visual_warnings || []).forEach((w) => badges.push(`<span class="badge warn">${esc(w.kind)}</span>`));
+    // source audit(schema v2):页级 status + 逐条 issue code(可定位 block_id)。
+    // UNSCORABLE 用独立 audit-unscorable 样式(灰蓝),不与 KaTeX 硬报错共用"错误红"——
+    // "审计判不了"跟"确认识别错误"是两回事,不能用同一种红色暗示同等严重性。
+    const audit = d.audit;
+    if (audit) {
+      const stCls = audit.status === "OK" ? "audit-ok" : audit.status === "UNSCORABLE" ? "audit-unscorable" : "audit-suspect";
+      badges.push(`<span class="badge ${stCls}">审计: ${esc(audit.status || "?")}</span>`);
+      (audit.issues || []).forEach((iss) => {
+        const loc = iss.block_id != null ? ` #${esc(String(iss.block_id))}` : "";
+        badges.push(`<span class="badge ${stCls}" title="${esc(iss.detail || "")}">${esc(iss.code || "")}${loc}</span>`);
+      });
+    } else {
+      badges.push(`<span class="badge audit-none">无审计数据</span>`);
+    }
     if (!badges.length) badges.push(`<span class="badge ok">无信号</span>`);
     $("signals").innerHTML = badges.join("");
 
     const out = $("mdOut");
     const frags = d.frags && d.frags.length ? d.frags : [{ bids: [], md: d.md || "" }];
-    out.innerHTML = frags.map((f, fi) => {
+    out.innerHTML = renderAuditSamples(d.audit) + frags.map((f, fi) => {
       const bids = (f.bids || []).filter((x) => x != null).join(" ");
       const sus = f.suspicions && f.suspicions.length;
       const cand = f.candidate;
@@ -630,13 +657,46 @@
       const ttl = titles.length ? ` title="${esc(titles.join("\n"))}"` : "";
       const card = f.correction ? renderCorrCard(f.correction, d.page, fi) : "";
       const candCard = cand ? renderCandidateCard(cand) : "";
-      return `<div class="${cls}" data-bids="${bids}"${ttl}>${renderMarkdownFragment(f.md || "")}${card}${candCard}</div>`;
+      const provBadge = f.provenance ? renderProvBadge(f.provenance) : "";
+      return `<div class="${cls}" data-bids="${bids}"${ttl}>${renderMarkdownFragment(f.md || "")}${provBadge}${card}${candCard}</div>`;
     }).join("");
     out.querySelectorAll(".katex-error").forEach((e) => { (e.closest(".katex-display") || e.closest(".katex") || e).classList.add("err-formula"); });
     wireLink();
     wireCorrCards(frags);
     wireCandidateCards(frags);
     if (!d.image_b64) { renderAnnList(); }
+  }
+
+  // ---------- provenance 徽标(块级采信来源,只读展示,不提供任何改写入口) ----------
+  // source_text=已采信(绿,信得过);ocr=回退(中性灰,不代表"错",只代表"没能采信")。
+  // 回退块若报告带 adopted_text(Task 9 记录的采信文本,而非现场推演),给一个可展开
+  // 的 <details> 展示"若采信会是什么文本"——报告不含该字段时只显示原因码,不现场重算。
+  function renderProvBadge(p) {
+    const isSource = p.content_source === "source_text";
+    const cls = isSource ? "prov-source" : "prov-ocr";
+    const reasons = (p.reasons || []).join(", ");
+    const nedTxt = (p.block_ned === null || p.block_ned === undefined) ? "" :
+      ` · NED=${esc(typeof p.block_ned === "number" ? p.block_ned.toFixed(3) : String(p.block_ned))}`;
+    const label = isSource ? "采信: source_text" : "回退: OCR";
+    const badge = `<div class="prov-badge ${cls}">${esc(label)}${reasons ? " · " + esc(reasons) : ""}${nedTxt}</div>`;
+    const diff = (!isSource && p.adopted_text) ? renderAdoptedDiff(p.adopted_text) : "";
+    return badge + diff;
+  }
+  function renderAdoptedDiff(adoptedText) {
+    return `<details class="prov-diff"><summary>若采信会是什么文本(不代替人工判定)</summary>` +
+      `<div class="prov-diff-text">${esc(adoptedText)}</div></details>`;
+  }
+
+  // ---------- prose audit 有限样例(missing/added/numeric,来自报告 prose_audit.samples,
+  // 已在 payload 侧截断到上限)——只展示有限条目,绝不嵌整页源文本;每条经 esc()。 ----------
+  function renderAuditSamples(audit) {
+    if (!audit || !(audit.samples || []).length) return "";
+    const rows = audit.samples.map((s) =>
+      `<li>${esc(typeof s === "string" ? s : JSON.stringify(s))}</li>`).join("");
+    const trunc = audit.samples_truncated
+      ? `<div class="audit-samples-trunc">已截断,仅展示前 ${audit.samples.length} 条(报告体量更大)</div>` : "";
+    return `<details class="audit-samples"><summary>source audit 样例(missing/added/numeric,` +
+      `共 ${audit.samples.length} 条)</summary><ul>${rows}</ul>${trunc}</details>`;
   }
 
   // ---------- 候选公式审核卡片:默认 needs_repair,只勾 OCR 正确 ----------
@@ -765,7 +825,10 @@
       el.style.left = pct(b.bbox[0], d.width); el.style.top = pct(b.bbox[1], d.height);
       el.style.width = pct(b.bbox[2] - b.bbox[0], d.width); el.style.height = pct(b.bbox[3] - b.bbox[1], d.height);
       el.dataset.bid = b.block_id; el.dataset.lab = b.label; el.dataset.ord = b.order; el.dataset.b = b.bbox.join(",");
-      el.title = `#${b.block_id} ${b.label}` + (b.order === null ? " (order=None)" : ` (order=${b.order})`) + (b.content_head ? "\n" + b.content_head : "");
+      const provTitle = b.provenance
+        ? `\n采信: ${b.provenance.content_source}` + ((b.provenance.reasons || []).length ? " · " + b.provenance.reasons.join(",") : "")
+        : "";
+      el.title = `#${b.block_id} ${b.label}` + (b.order === null ? " (order=None)" : ` (order=${b.order})`) + (b.content_head ? "\n" + b.content_head : "") + provTitle;
       el.addEventListener("mouseenter", () => linkBlk(b.block_id, true));   // 左框 hover → 高亮右栏对应片段
       el.addEventListener("mouseleave", () => linkBlk(b.block_id, false));
       ov.appendChild(el);

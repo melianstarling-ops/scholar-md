@@ -34,9 +34,63 @@ LABEL_COLORS: dict[str, str] = {
 _UNKNOWN_COLOR = "#ec4899"          # 品红:没见过的 label,醒目提示
 _NOISE_LABELS = {"header", "number", "header_image"}
 
+# source audit(schema v2)prose_audit.samples 展示上限——只给"有限样例"参考,
+# 绝不把整页源文本嵌进 debug 视图(计划 Task 12 checklist)。上限可注入(测试/
+# 调用方均可覆盖),不写死在渲染路径里。
+DEFAULT_AUDIT_SAMPLES_LIMIT = 20
+
 
 def label_color(label: str) -> str:
     return LABEL_COLORS.get(label, _UNKNOWN_COLOR)
+
+
+def build_audit_payload(audit_page: dict | None,
+                        samples_limit: int = DEFAULT_AUDIT_SAMPLES_LIMIT) -> dict | None:
+    """把一页 source_audit 报告(schema v2 page_report)加工成 debug 视图只读展示
+    所需字段:页级 status/issues、块级 provenance 列表、有限截断的 prose_audit
+    samples、table_audit(其 structure/content issue 已随 page-level issues 一起
+    带 block_id,足以定位)。
+
+    只展示,不重算:块的 "adopted_text"(若采信会是什么文本)只在报告本身携带
+    该字段时透传,报告没有就是 None——不现场跑 AdoptionDecision 推演。
+
+    报告缺失(None)/结构不是 dict → 返回 None,调用方/前端据此显式渲染"无审计
+    数据",不猜测、不抛异常。报告是 dict 但字段残缺(损坏/旧版)时,残缺字段
+    各自降级为 None/空列表,同样不抛。
+    """
+    if not isinstance(audit_page, dict):
+        return None
+
+    blocks_out: list[dict] = []
+    raw_blocks = audit_page.get("blocks")
+    if isinstance(raw_blocks, list):
+        for b in raw_blocks:
+            if not isinstance(b, dict):
+                continue
+            blocks_out.append({
+                "block_id": b.get("block_id"),
+                "label": b.get("label"),
+                "content_source": b.get("content_source"),
+                "reasons": b.get("reasons") or [],
+                "block_ned": b.get("block_ned"),
+                "adopted_text": b.get("adopted_text"),
+            })
+
+    prose_audit = audit_page.get("prose_audit")
+    raw_samples = prose_audit.get("samples") if isinstance(prose_audit, dict) else None
+    samples = raw_samples if isinstance(raw_samples, list) else []
+
+    raw_issues = audit_page.get("issues")
+    raw_table_audit = audit_page.get("table_audit")
+
+    return {
+        "status": audit_page.get("status"),
+        "issues": raw_issues if isinstance(raw_issues, list) else [],
+        "blocks": blocks_out,
+        "samples": samples[:samples_limit],
+        "samples_truncated": len(samples) > samples_limit,
+        "table_audit": raw_table_audit if isinstance(raw_table_audit, list) else [],
+    }
 
 
 def _valid_bbox(b: dict):
@@ -85,7 +139,7 @@ def _candidate_preview(b: dict, candidates_by_id: dict) -> dict | None:
     }
 
 
-def _overlay(b: dict, corrections_by_id: dict) -> dict | None:
+def _overlay(b: dict, corrections_by_id: dict, provenance_by_id: dict) -> dict | None:
     bbox = _valid_bbox(b)
     if bbox is None:
         return None
@@ -100,6 +154,7 @@ def _overlay(b: dict, corrections_by_id: dict) -> dict | None:
         "color": label_color(label),
         "content_head": (b.get("block_content") or "")[:120],
         "correction": _correction_preview(b, corrections_by_id),
+        "provenance": provenance_by_id.get(b.get("block_id")),
     }
 
 
@@ -118,20 +173,28 @@ def build_page_payload(res: dict, page: int, stem: str,
                        image_b64: str | None = None,
                        page_errors: list[dict] | None = None,
                        corrections: list[dict] | None = None,
-                       candidates: list[dict] | None = None) -> dict:
+                       candidates: list[dict] | None = None,
+                       audit: dict | None = None,
+                       samples_limit: int = DEFAULT_AUDIT_SAMPLES_LIMIT) -> dict:
     """把一页 res.json 加工成 HTML 模板所需的 payload dict。frags 是带块归属的
     md 片段列表(供左右双向联动);md 是其 join(供报错索引/整页渲染)。corrections
     是该文档全部修正记录(任意 status),按 (page, block_id) 匹配后挂到对应块/片段的
     "correction" 字段,供 debug 视图渲染待审卡片/一键采纳驳回——不在这里过滤 status
-    (那是 apply_corrections 的应用侧红线),这里只负责"展示有什么提案"。"""
+    (那是 apply_corrections 的应用侧红线),这里只负责"展示有什么提案"。
+
+    audit 是该页的 source_audit 报告 page_report(schema v2,可选;None=该文档
+    未跑 source audit 或独立重跑无报告可读)——只展示,不据此改写 blocks/md 任何
+    一个字符,也不现场重新推演采信判定。"""
     blocks = res.get("parsing_res_list", [])
     corrections_by_id = {c["block_id"]: c for c in (corrections or []) if c.get("page") == page}
     candidates_by_id = {c["block_id"]: c for c in (candidates or []) if c.get("page") == page}
+    audit_payload = build_audit_payload(audit, samples_limit=samples_limit)
+    provenance_by_id = {b["block_id"]: b for b in (audit_payload["blocks"] if audit_payload else [])}
     frags, warnings = reconstruct_fragments(blocks, stem=stem, page=page)
     md = "\n\n".join(f["md"] for f in frags) + "\n"
     overlays = []
     for b in blocks:
-        o = _overlay(b, corrections_by_id)
+        o = _overlay(b, corrections_by_id, provenance_by_id)
         if o is None:
             continue
         o["candidate"] = _candidate_preview(b, candidates_by_id)
@@ -152,6 +215,13 @@ def build_page_payload(res: dict, page: int, stem: str,
                 break
         else:
             f["candidate"] = None
+        for bid in f["bids"]:
+            prov = provenance_by_id.get(bid)
+            if prov:
+                f["provenance"] = prov
+                break
+        else:
+            f["provenance"] = None
     # 疑似识别错误(裸大算符 / \frac 围道当分母):逐片段标注,供 debug 视图橙色标出并聚合到页级
     suspicions: list[dict] = []
     for f in frags:
@@ -172,4 +242,5 @@ def build_page_payload(res: dict, page: int, stem: str,
         "render_errors": page_errors or [],
         "suspicions": suspicions,
         "candidates": [c for c in (candidates or []) if c.get("page") == page],
+        "audit": audit_payload,
     }

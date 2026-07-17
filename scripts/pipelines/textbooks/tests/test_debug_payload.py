@@ -145,6 +145,63 @@ def test_payload_correction_none_when_not_provided():
     assert p["blocks"][0]["correction"] is None
 
 
+def test_payload_carries_audit_status_and_block_provenance():
+    # Task 12:source_audit 报告(schema v2,synthetic 注入)接进 payload——页级
+    # status/issues + 块级 provenance(content_source/reasons/block_ned)。
+    res = {"width": 100, "height": 100, "parsing_res_list": [
+        {"block_label": "text", "block_content": "hello", "block_order": 1,
+         "block_bbox": [0, 0, 10, 10], "block_id": 1},
+    ]}
+    audit_page = {
+        "page": 1, "status": "SUSPECT",
+        "issues": [{"code": "missing_prose", "block_id": 1, "detail": "字符召回=0.50"}],
+        "blocks": [{"block_id": 1, "label": "text", "content_source": "ocr",
+                    "reasons": ["adoption_disagreement"], "block_ned": 0.25}],
+        "prose_audit": {"status": "SUSPECT", "issues": [], "metrics": {}, "block_metrics": {}},
+        "table_audit": [],
+    }
+    p = build_page_payload(res, page=1, stem="s", audit=audit_page)
+    assert p["audit"]["status"] == "SUSPECT"
+    assert p["audit"]["issues"][0]["code"] == "missing_prose"
+    b = p["blocks"][0]
+    assert b["provenance"]["content_source"] == "ocr"
+    assert b["provenance"]["reasons"] == ["adoption_disagreement"]
+    assert b["provenance"]["block_ned"] == 0.25
+
+
+def test_payload_audit_absent_when_report_missing_or_malformed():
+    # 报告缺失(未传 audit)/损坏(结构不含 status/blocks)都不得抛异常——字段
+    # 显式为 None/空,前端据此渲染"无审计数据",不猜测。
+    res = {"width": 100, "height": 100, "parsing_res_list": [
+        {"block_label": "text", "block_content": "hello", "block_order": 1,
+         "block_bbox": [0, 0, 10, 10], "block_id": 1},
+    ]}
+    p = build_page_payload(res, page=1, stem="s")
+    assert p["audit"] is None
+    assert p["blocks"][0]["provenance"] is None
+
+    p2 = build_page_payload(res, page=1, stem="s", audit={"not": "a valid page report"})
+    assert p2["audit"]["status"] is None
+    assert p2["audit"]["issues"] == []
+    assert p2["blocks"][0]["provenance"] is None
+
+
+def test_payload_prose_audit_samples_truncated_to_limit():
+    # prose_audit.samples 有限展示,不嵌整页源文本——上限可注入,超限即截断并标记。
+    res = {"width": 100, "height": 100, "parsing_res_list": []}
+    samples = [{"kind": "missing", "text": f"s{i}"} for i in range(50)]
+    audit_page = {"page": 1, "status": "SUSPECT", "issues": [], "blocks": [],
+                  "prose_audit": {"status": "SUSPECT", "samples": samples}}
+
+    p = build_page_payload(res, page=1, stem="s", audit=audit_page, samples_limit=5)
+    assert p["audit"]["samples"] == samples[:5]
+    assert p["audit"]["samples_truncated"] is True
+
+    p2 = build_page_payload(res, page=1, stem="s", audit=audit_page, samples_limit=100)
+    assert len(p2["audit"]["samples"]) == 50
+    assert p2["audit"]["samples_truncated"] is False
+
+
 def test_payload_attaches_formula_candidate_to_block_and_frag():
     res = {"width": 100, "height": 100, "parsing_res_list": [
         {"block_label": "display_formula", "block_content": "$$ a $$",

@@ -414,3 +414,159 @@ def test_app_js_renders_agent_provenance():
         src = f.read()
     for token in ("provider", "cross_checked_by", "模型来源"):
         assert token in src, token
+
+
+def test_build_payloads_audit_missing_file_is_none(tmp_path):
+    # 报告文件不存在(未跑 source_audit / 独立重跑前)→ 页级 audit 明确为 None,不崩。
+    layout = _layout(tmp_path)
+    work = layout.work_dir
+    os.makedirs(work, exist_ok=True)
+    with open(cp.page_res_path(work, 1), "w", encoding="utf-8") as f:
+        json.dump({"width": 100, "height": 100, "parsing_res_list": []}, f)
+    cp.save_manifest(work, cp.new_manifest("x.pdf", {"page_count": 1, "size_bytes": 0},
+                                           150, "A"))
+
+    stem, pages = dv.build_payloads(layout, pdf_path=None, dpi=150, img_dpi=150,
+                                    embed_images=False, img_cache={})
+
+    assert pages[0]["audit"] is None
+
+
+def test_build_payloads_audit_corrupted_json_is_none_not_raise(tmp_path):
+    # 报告文件存在但损坏(非法 JSON)→ 优雅缺席,不抛异常。
+    layout = _layout(tmp_path)
+    work = layout.work_dir
+    os.makedirs(work, exist_ok=True)
+    with open(cp.page_res_path(work, 1), "w", encoding="utf-8") as f:
+        json.dump({"width": 100, "height": 100, "parsing_res_list": []}, f)
+    cp.save_manifest(work, cp.new_manifest("x.pdf", {"page_count": 1, "size_bytes": 0},
+                                           150, "A"))
+    os.makedirs(layout.doc_work_dir, exist_ok=True)
+    with open(layout.source_audit_path, "w", encoding="utf-8") as f:
+        f.write("{not valid json")
+
+    stem, pages = dv.build_payloads(layout, pdf_path=None, dpi=150, img_dpi=150,
+                                    embed_images=False, img_cache={})
+
+    assert pages[0]["audit"] is None
+
+
+def test_build_payloads_attaches_page_audit_from_report(tmp_path):
+    # 报告齐全时,build_payloads 按页号把 source_audit 报告接进对应 payload。
+    layout = _layout(tmp_path)
+    work = layout.work_dir
+    os.makedirs(work, exist_ok=True)
+    with open(cp.page_res_path(work, 1), "w", encoding="utf-8") as f:
+        json.dump({"width": 100, "height": 100, "parsing_res_list": [
+            {"block_label": "text", "block_id": 5, "block_order": 0,
+             "block_bbox": [0, 0, 10, 10], "block_content": "hi"}]}, f)
+    cp.save_manifest(work, cp.new_manifest("x.pdf", {"page_count": 1, "size_bytes": 0},
+                                           150, "A"))
+    os.makedirs(layout.doc_work_dir, exist_ok=True)
+    report = {"schema_version": 2, "pages": [
+        {"page": 1, "status": "OK", "issues": [],
+         "blocks": [{"block_id": 5, "label": "text", "content_source": "source_text",
+                     "reasons": [], "block_ned": 0.01}],
+         "prose_audit": {"status": "OK", "samples": []}, "table_audit": []},
+    ]}
+    with open(layout.source_audit_path, "w", encoding="utf-8") as f:
+        json.dump(report, f)
+
+    stem, pages = dv.build_payloads(layout, pdf_path=None, dpi=150, img_dpi=150,
+                                    embed_images=False, img_cache={})
+
+    assert pages[0]["audit"]["status"] == "OK"
+    b = next(b for b in pages[0]["blocks"] if b["block_id"] == 5)
+    assert b["provenance"]["content_source"] == "source_text"
+
+
+def test_app_js_problem_pages_filter_includes_audit_suspect_and_adoption_disagreement(tmp_path):
+    # problem-pages 过滤器必须纳入 source/table audit suspect 页与含
+    # adoption_disagreement 原因码的块(即便页级 status 未必是 SUSPECT)。
+    app_js = open(APP_JS, encoding="utf-8").read()
+    match = re.search(r"function pageAuditSuspect\(p\) \{\n(?P<body>.*?)\n  \}", app_js, re.S)
+    assert match, "pageAuditSuspect() 未在 app.js 中找到"
+    assert "pageAuditSuspect(p)" in app_js  # 定义了必须真的接进 computeProblems
+
+    node = shutil.which("node")
+    if not node:
+        import pytest
+        pytest.skip("node not available")
+    probe = tmp_path / "probe_audit_suspect.mjs"
+    probe.write_text(
+        "function pageAuditSuspect(p) {\n"
+        f"{match.group('body')}\n"
+        "}\n"
+        "const cases = [\n"
+        "  { audit: { status: 'SUSPECT', blocks: [] } },\n"
+        "  { audit: { status: 'OK', blocks: [] } },\n"
+        "  { audit: { status: 'OK', blocks: [{ block_id: 1, reasons: ['adoption_disagreement'] }] } },\n"
+        "  {},\n"
+        "];\n"
+        "console.log(JSON.stringify(cases.map(pageAuditSuspect)));\n",
+        encoding="utf-8",
+    )
+    proc = subprocess.run([node, str(probe)], capture_output=True, text=True,
+                          encoding="utf-8", errors="replace", timeout=10)
+    assert proc.returncode == 0, proc.stderr
+    assert json.loads(proc.stdout.strip()) == [True, False, True, False]
+
+
+def test_app_js_escapes_audit_issue_detail_via_esc(tmp_path):
+    # audit issue 的 detail(可能含用户/OCR 产出的任意文本)必须经既有 esc() 转义
+    # 才能拼进 innerHTML——不得开新的未转义拼接路径。
+    app_js = open(APP_JS, encoding="utf-8").read()
+    assert re.search(r"esc\(\s*iss\.detail", app_js), \
+        "audit issue.detail 必须经 esc() 转义后才能拼进 innerHTML"
+
+    node = shutil.which("node")
+    if not node:
+        import pytest
+        pytest.skip("node not available")
+    esc_line = next((l for l in app_js.splitlines() if l.strip().startswith("const esc =")), None)
+    assert esc_line, "esc() 转义函数未找到"
+    probe = tmp_path / "probe_esc.mjs"
+    probe.write_text(
+        esc_line.strip() + "\n"
+        "const detail = '<script>alert(1)</script>';\n"
+        "console.log(esc(detail));\n",
+        encoding="utf-8",
+    )
+    proc = subprocess.run([node, str(probe)], capture_output=True, text=True,
+                          encoding="utf-8", errors="replace", timeout=10)
+    assert proc.returncode == 0, proc.stderr
+    out = proc.stdout.strip()
+    assert "<script>" not in out
+    assert "&lt;script&gt;" in out
+
+
+def test_render_html_defines_provenance_badges_and_distinct_unscorable_style():
+    # HTML 输出(app.css/app.js 内嵌)须含 provenance 徽标 class,且 UNSCORABLE
+    # 独立样式类不得复用 KaTeX 硬报错的"错误红"(var(--bad))。
+    pages = [{
+        "page": 1, "width": 100, "height": 100, "image_b64": None,
+        "blocks": [], "md": "", "frags": [],
+        "signals": {"column_suspected": False, "unhandled_labels": [], "visual_warnings": []},
+        "render_errors": [], "suspicions": [], "candidates": [],
+        "audit": None,
+    }]
+    html = dv.render_html("stem", pages, serve=False)
+
+    assert "prov-badge" in html
+    assert "prov-source" in html
+    assert "prov-ocr" in html
+    assert ".katex-error" in html  # 既有渲染报错类仍在,基线不受影响
+
+    m = re.search(r"\.badge\.audit-unscorable\{([^}]*)\}", html)
+    assert m, "app.css 缺 .badge.audit-unscorable 独立样式类"
+    assert "var(--bad)" not in m.group(1)
+
+
+def test_app_js_renders_limited_prose_audit_samples():
+    # prose_audit.samples(missing/added/numeric,payload 侧已截断)必须真的渲染出来,
+    # 不能只在 payload 里携带却在 UI 上哑掉。
+    app_js = open(APP_JS, encoding="utf-8").read()
+    assert "function renderAuditSamples" in app_js
+    assert "audit.samples" in app_js
+    assert "renderAuditSamples(d.audit)" in app_js
+    assert "samples_truncated" in app_js

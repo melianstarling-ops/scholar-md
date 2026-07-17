@@ -52,6 +52,32 @@ def _load_render_errors(layout: DocLayout) -> dict[int, list]:
     return by_page
 
 
+def _load_source_audit(layout: DocLayout) -> dict | None:
+    """读取 <stem>_source_audit.json(schema v2)。缺失/损坏(非法 JSON、顶层
+    不是 dict)一律返回 None——debug view 据此显式渲染"无审计数据",绝不崩、
+    也不现场重算审计(那是 source_audit.py 独立 CLI 的职责,本函数只读产物)。"""
+    path = layout.source_audit_path
+    if not os.path.exists(path):
+        return None
+    try:
+        with open(path, encoding="utf-8") as f:
+            data = json.load(f)
+    except (json.JSONDecodeError, OSError, UnicodeDecodeError):
+        return None
+    return data if isinstance(data, dict) else None
+
+
+def _audit_pages_by_number(report: dict | None) -> dict[int, dict]:
+    """report["pages"] → {page_no: page_report} 便于按页取用;report 缺失/
+    结构不含合法 pages 列表时返回空字典(该文档所有页 audit 都是 None)。"""
+    if not report:
+        return {}
+    pages = report.get("pages")
+    if not isinstance(pages, list):
+        return {}
+    return {p["page"]: p for p in pages if isinstance(p, dict) and p.get("page") is not None}
+
+
 def _load_formula_candidates(layout: DocLayout) -> dict[int, list[dict]]:
     by_page: dict[int, list[dict]] = {}
     if not os.path.exists(layout.formula_candidates_path):
@@ -119,6 +145,7 @@ def build_payloads(layout: DocLayout, pdf_path: str | None, dpi: int, img_dpi: i
     render_errors = _load_render_errors(layout)
     candidates = _load_formula_candidates(layout)
     corrections = _attach_crop_images(load_corrections(layout.doc_work_dir), layout)
+    audit_by_page = _audit_pages_by_number(_load_source_audit(layout))
     doc = None
     if embed_images and pdf_path and os.path.exists(pdf_path):
         try:
@@ -140,7 +167,8 @@ def build_payloads(layout: DocLayout, pdf_path: str | None, dpi: int, img_dpi: i
             pages.append(dp.build_page_payload(res, page=i, stem=stem, image_b64=img,
                                                page_errors=render_errors.get(i, []),
                                                corrections=corrections,
-                                               candidates=candidates.get(i, [])))
+                                               candidates=candidates.get(i, []),
+                                               audit=audit_by_page.get(i)))
         return stem, pages
     finally:
         if doc is not None:
@@ -309,8 +337,10 @@ def main() -> None:
         f.write(html)
     n_img = sum(1 for p in pages if p["image_b64"])
     n_err = sum(len(p["render_errors"]) for p in pages)
+    n_audit = sum(1 for p in pages if p.get("audit"))
     print(f"[debug_view] {out}")
-    print(f"  页 {len(pages)} | 内嵌页图 {n_img} | 标记 KaTeX 报错 {n_err} | 大小 {os.path.getsize(out)/1024/1024:.1f} MB")
+    print(f"  页 {len(pages)} | 内嵌页图 {n_img} | 标记 KaTeX 报错 {n_err} | "
+          f"source audit {n_audit}/{len(pages)} 页 | 大小 {os.path.getsize(out)/1024/1024:.1f} MB")
     if not pdf_path or not os.path.exists(pdf_path or ""):
         print(f"  ⚠ 源 PDF 不可用({pdf_path});左栏页图缺省,右栏渲染不受影响")
 
