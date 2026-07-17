@@ -477,15 +477,66 @@ _TEXTISH = (
     "■-◿"
 )
 _TEXTISH_RUN_RE = re.compile(f"[{_TEXTISH}]+")
-_TEXTISH_WRAP_SAFE_PREFIXES = ("\\text{", "\\mathrm{", "\\mathbf{")
+_TEXTISH_WRAP_SAFE_PREFIXES = ("\\text{",)
+
+
+_KATEX_UNICODE_REPLACEMENTS = {
+    "⓪": r"\textcircled{0}",
+    **{chr(0x2460 + i): rf"\textcircled{{{i + 1}}}" for i in range(20)},
+    "®": r"\text{\textregistered}",
+    "™": r"\text{TM}",
+    "–": r"\text{--}",
+    "†": r"\dagger{}",
+    "Ω": r"\Omega{}",
+    "○": r"\textcircled{ }",
+    "⊖": r"\text{\textcircled{-}}",
+}
+
+
+def _replace_katex_unicode(latex: str) -> str:
+    r"""把 KaTeX 无字形但有确定语义等价物的 Unicode 改成受支持命令。"""
+    for char, replacement in _KATEX_UNICODE_REPLACEMENTS.items():
+        latex = latex.replace(char, replacement)
+    return latex
+
+
+def _wrap_text_mode_commands(latex: str) -> str:
+    r"""把只能在文本模式使用的命令包进 \text{}；已有 \text{} 保持幂等。"""
+    out: list[str] = []
+    i, n = 0, len(latex)
+    while i < n:
+        if latex.startswith(r"\text{", i):
+            brace = i + len(r"\text")
+            end = _match_braced(latex, brace)
+            if end != -1:
+                out.append(latex[i:end])
+                i = end
+                continue
+        command = r"\textregistered"
+        if (latex.startswith(command, i)
+                and (i + len(command) == n or not latex[i + len(command)].isalpha())):
+            out.append(r"\text{\textregistered}")
+            i += len(command)
+            continue
+        command = r"\textcircled"
+        if latex.startswith(command + "{", i):
+            brace = i + len(command)
+            end = _match_braced(latex, brace)
+            if end != -1:
+                out.append(r"\text{" + latex[i:end] + "}")
+                i = end
+                continue
+        out.append(latex[i])
+        i += 1
+    return "".join(out)
 
 
 def wrap_cjk_in_text(latex: str) -> str:
     r"""把数学模式里连续的"文字类" Unicode 字符段包进 \text{...}。
 
-    只在这些字符已经身处 \text{}/\mathrm{}/\mathbf{} 内时跳过(幂等,不双包);
-    其余情况一律原地包裹,不改变字符本身、不改变周围的数学结构。纯 ASCII/希腊
-    字母/数学算符不落在 _TEXTISH 区段内,逐字节不变地穿过本函数。"""
+    只在这些字符已经直接身处 \text{} 内时跳过；\mathrm{}/\mathbf{} 仍是数学
+    字体模式，CJK 留在其中会触发 unicodeTextInMathMode，故在其内部补 \text{}。
+    其余情况原地包裹，不改变周围数学结构。"""
     out: list[str] = []
     i, n = 0, len(latex)
     while i < n:
@@ -631,9 +682,18 @@ def sanitize_latex(s: str) -> str:
     s = _downgrade_split_invisible_delimiters(s)
     s = _close_known_moment_row(s)
     s = _drop_unmatched_closing_braces(s)
+    s = _replace_katex_unicode(s)
+    s = _wrap_text_mode_commands(s)
     s = _repair_math_in_text(s)
     s = wrap_cjk_in_text(s)
     return s
+
+
+def sanitize_formula_number(content: str) -> str:
+    """按公式绑定时的同一路径清洗编号，供重建与 Tier0 共用。"""
+    raw = (content or "").strip()
+    m = _NUM_RE.match(raw)
+    return sanitize_latex(m.group(1) if m else raw)
 
 
 def restore_emphasis_dots(text: str) -> str:
@@ -687,7 +747,7 @@ def _render_ordered(ordered: list[dict]) -> list[dict]:
             i += 1
             continue
         if label == "paragraph_title":
-            emit(y0, [bid], f"## {content}")
+            emit(y0, [bid], f"## {_sanitize_markdown_math_spans(content)}")
         elif label in ("text", "abstract", "reference_content"):
             emit(y0, [bid], _sanitize_markdown_math_spans(restore_emphasis_dots(content)))
         elif label == "content":
@@ -706,8 +766,7 @@ def _render_ordered(ordered: list[dict]) -> list[dict]:
             body = sanitize_latex(_formula_body(content))
             nxt = ordered[i + 1] if i + 1 < len(ordered) else None
             if nxt and nxt.get("block_label") == "formula_number":
-                m = _NUM_RE.match((nxt.get("block_content") or "").strip())
-                tag = m.group(1) if m else (nxt.get("block_content") or "").strip()
+                tag = sanitize_formula_number(nxt.get("block_content") or "")
                 body = _strip_latex_tags(body)
                 emit(y0, [bid, nxt.get("block_id")], f"$$ {body} \\tag{{{tag}}} $$")
                 i += 1                      # 吸收编号块

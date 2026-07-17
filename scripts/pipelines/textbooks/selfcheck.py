@@ -3,7 +3,15 @@ from __future__ import annotations
 
 import re
 
-from scripts.pipelines.textbooks.reconstruct import KATEX_INCOMPAT_COMMANDS, _match_braced
+from scripts.pipelines.textbooks.reconstruct import (
+    KATEX_INCOMPAT_COMMANDS,
+    _formula_body,
+    _match_braced,
+    _sanitize_markdown_math_spans,
+    restore_emphasis_dots,
+    sanitize_formula_number,
+    sanitize_latex,
+)
 
 
 def katex_incompat_scan(md: str) -> list[str]:
@@ -105,6 +113,23 @@ def _probe(content: str) -> str:
     return s[:12]
 
 
+def _normalized_block_content(block: dict) -> str:
+    """按 reconstruct 的同一路径规范化探针，避免清洗前后等价文本被误报 missing。"""
+    content = block.get("block_content", "") or ""
+    label = block.get("block_label")
+    if label == "display_formula":
+        return sanitize_latex(_formula_body(content))
+    if label in ("text", "abstract", "reference_content", "paragraph_title"):
+        return _sanitize_markdown_math_spans(restore_emphasis_dots(content))
+    if label == "inline_formula":
+        return _sanitize_markdown_math_spans(content)
+    if label == "formula_number":
+        # reconstruct 把编号吸收成 \tag{...}；须复用同一清洗路径，尤其是全角括号
+        # 与单位/脚注符号，否则会把已存在的编号误报为 missing。
+        return sanitize_formula_number(content)
+    return content
+
+
 def block_coverage(blocks: list[dict], md: str) -> dict:
     ordered = [b for b in blocks if b.get("block_order") is not None]
     md_flat = re.sub(r"[\s$]", "", md)
@@ -112,18 +137,20 @@ def block_coverage(blocks: list[dict], md: str) -> dict:
     in_md = 0
     skipped_empty = 0
     for b in ordered:
-        content = b.get("block_content", "")
-        # 对 formula_number 块去括号再探(reconstruct 把编号吸收成 \tag{5.31},无括号)
+        content = _normalized_block_content(b)
+        probes = [_probe(content)]
         if b.get("block_label") == "formula_number":
-            content = content.strip().strip("()")
-        probe = _probe(content)
-        if not probe:
+            # 邻接显示公式时编号会被清洗后吸收到 \tag；落单编号则由 reconstruct
+            # 原样输出。Tier0 同时接受两种真实渲染路径，避免全角括号假缺失。
+            probes.append(_probe(b.get("block_content", "") or ""))
+        probes = [probe for probe in dict.fromkeys(probes) if probe]
+        if not probes:
             # block_content 本身为空(OCR 未识别出文字,常见于 text/seal 等 label):
             # 探针恒空,不能算"丢失"(没内容可核对),但也不能悄悄不计数——单独归入
             # skipped_empty,使 total 恒等于 in_md+missing+skipped_empty,不留隐藏数字。
             skipped_empty += 1
             continue
-        if probe in md_flat:
+        if any(probe in md_flat for probe in probes):
             in_md += 1
         else:
             missing.append((b.get("block_content") or "")[:40])

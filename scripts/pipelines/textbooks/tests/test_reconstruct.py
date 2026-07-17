@@ -40,6 +40,16 @@ def test_paragraph_title_becomes_heading():
     assert md.strip().startswith("## 第五章 静磁学")
 
 
+def test_paragraph_title_sanitizes_inline_math_symbols():
+    blocks = [{
+        "block_label": "paragraph_title",
+        "block_content": "12.4 CE Analyst $ ^{™} $",
+        "block_order": 1,
+    }]
+    md, _ = reconstruct_markdown(blocks)
+    assert r"## 12.4 CE Analyst $ ^{\text{TM}} $" in md
+
+
 def test_display_formula_binds_adjacent_number():
     blocks = [
         {"block_label": "display_formula",
@@ -50,6 +60,15 @@ def test_display_formula_binds_adjacent_number():
     assert r"\tag{5.1}" in md          # 编号并入公式
     assert md.count("$$") == 2         # 只一个公式块
     assert "\n(5.1)" not in md         # 编号不再单独成行
+
+
+def test_display_formula_sanitizes_non_ascii_formula_number_symbols():
+    blocks = [
+        {"block_label": "display_formula", "block_content": r"$$ x=1 $$", "block_order": 1},
+        {"block_label": "formula_number", "block_content": "(6-31)⊖", "block_order": 2},
+    ]
+    md, _ = reconstruct_markdown(blocks)
+    assert r"\tag{(6-31)\text{\textcircled{-}}}" in md
 
 
 def test_formula_number_without_formula_kept_inline():
@@ -841,11 +860,38 @@ def test_wrap_cjk_in_text_does_not_double_wrap_existing_text_command():
 
 
 def test_wrap_cjk_in_text_does_not_double_wrap_existing_mathrm_command():
-    assert wrap_cjk_in_text(r"\mathrm{已包}") == r"\mathrm{已包}"
+    assert wrap_cjk_in_text(r"\mathrm{已包}") == r"\mathrm{\text{已包}}"
 
 
 def test_wrap_cjk_in_text_does_not_double_wrap_existing_mathbf_command():
-    assert wrap_cjk_in_text(r"\mathbf{已包}") == r"\mathbf{已包}"
+    assert wrap_cjk_in_text(r"\mathbf{已包}") == r"\mathbf{\text{已包}}"
+
+
+def test_sanitize_latex_moves_cjk_out_of_math_font_mode():
+    assert sanitize_latex(r"\mathrm{ 波 }") == r"\mathrm{ \text{波} }"
+    assert sanitize_latex(r"\mathbf{ 甲 }") == r"\mathbf{ \text{甲} }"
+
+
+def test_sanitize_latex_normalizes_circled_digits_for_katex_text_mode():
+    assert sanitize_latex("x^{①}") == r"x^{\text{\textcircled{1}}}"
+    assert sanitize_latex(r"x^{\text{①}}") == r"x^{\text{\textcircled{1}}}"
+    assert sanitize_latex("x^{⓪}") == r"x^{\text{\textcircled{0}}}"
+
+
+def test_sanitize_latex_normalizes_text_only_symbols_and_commands():
+    assert sanitize_latex("x^{®}") == r"x^{\text{\textregistered}}"
+    assert sanitize_latex(r"x^{\textregistered}") == r"x^{\text{\textregistered}}"
+    assert sanitize_latex(r"x^{\text{®}a}") == r"x^{\text{\text{\textregistered}}a}"
+    assert sanitize_latex("x^{™}") == r"x^{\text{TM}}"
+    assert sanitize_latex("1–100") == r"1\text{--}100"
+    assert sanitize_latex("x^{†}+R_{Ω}") == r"x^{\dagger{}}+R_{\Omega{}}"
+    assert sanitize_latex("○+⊖") == r"\text{\textcircled{ }}+\text{\textcircled{-}}"
+
+
+def test_sanitize_latex_unicode_warning_cleanup_is_idempotent():
+    src = r"\mathrm{方向性}+x^{\text{①}}+y^{®}+z^{™}+†+Ω+○+⊖"
+    once = sanitize_latex(src)
+    assert sanitize_latex(once) == once
 
 
 def test_wrap_cjk_in_text_wraps_circled_digit_and_geometric_shape():

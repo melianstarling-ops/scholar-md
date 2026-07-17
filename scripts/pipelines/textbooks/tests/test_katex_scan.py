@@ -102,6 +102,65 @@ def test_scan_katex_work_pages_emits_page_and_block_markers(monkeypatch, tmp_pat
     assert result["errors"][0]["block_ids"] == [7, 8]
 
 
+def test_work_pages_scan_applies_accepted_corrections(tmp_path):
+    from scripts.pipelines.textbooks.vision_repair import content_fingerprint
+
+    layout = resolve_layout("book", str(tmp_path / "out"))
+    cp.save_manifest(layout.work_dir, cp.new_manifest(
+        "book.pdf", {"page_count": 1, "size_bytes": 123}, 150, "A"))
+    original = r"$$ \begin{array}{r}{bad_original $$"
+    corrected = r"$$ x+y $$"
+    with open(cp.page_res_path(layout.work_dir, 1), "w", encoding="utf-8") as f:
+        json.dump({"parsing_res_list": [
+            {"block_label": "display_formula", "block_id": 7, "block_order": 1,
+             "block_bbox": [0, 0, 10, 10], "block_content": original},
+        ]}, f)
+    Path(layout.corrections_path).write_text(json.dumps({
+        "stem": "book",
+        "corrections": [{
+            "page": 1,
+            "block_id": 7,
+            "corrected_latex": corrected,
+            "content_fingerprint": content_fingerprint(original),
+            "status": "accepted",
+        }],
+    }), encoding="utf-8")
+
+    scan_md = ks._work_pages_scan_md(layout)
+
+    assert "x+y" in scan_md
+    assert "bad_original" not in scan_md
+    assert "<!-- page: 1 block_ids: 7 -->" in scan_md
+
+
+def test_work_pages_scan_accepts_external_corrections_dir(tmp_path):
+    from scripts.pipelines.textbooks.vision_repair import content_fingerprint
+
+    layout = resolve_layout("book", str(tmp_path / "out"), str(tmp_path / "legacy-work"))
+    cp.save_manifest(layout.work_dir, cp.new_manifest(
+        "book.pdf", {"page_count": 1, "size_bytes": 123}, 150, "A"))
+    original = r"$$ bad $$"
+    with open(cp.page_res_path(layout.work_dir, 1), "w", encoding="utf-8") as f:
+        json.dump({"parsing_res_list": [{
+            "block_label": "display_formula", "block_id": 1, "block_order": 1,
+            "block_bbox": [0, 0, 10, 10], "block_content": original,
+        }]}, f)
+    corrections_dir = tmp_path / "current" / "book"
+    corrections_dir.mkdir(parents=True)
+    (corrections_dir / "book_corrections.json").write_text(json.dumps({
+        "stem": "book",
+        "corrections": [{
+            "page": 1, "block_id": 1, "corrected_latex": r"$$ good $$",
+            "content_fingerprint": content_fingerprint(original), "status": "accepted",
+        }],
+    }), encoding="utf-8")
+
+    scan_md = ks._work_pages_scan_md(layout, corrections_dir=str(corrections_dir))
+
+    assert "good" in scan_md
+    assert "bad" not in scan_md
+
+
 def test_js_scanner_keeps_tagged_display_math_out_of_inline_scan(tmp_path):
     node = shutil.which("node")
     if not node:

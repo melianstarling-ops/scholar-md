@@ -93,6 +93,57 @@ def test_formula_number_absorbed_into_tag_not_missing():
     assert rep["in_md"] == rep["total"] == 2
 
 
+def test_sanitized_fullwidth_formula_number_not_missing():
+    blocks = [
+        {"block_label": "display_formula", "block_content": "$$ x=1 $$", "block_order": 1},
+        {"block_label": "formula_number", "block_content": "（1.20）", "block_order": 2},
+    ]
+    md = r"$$ x=1 \tag{\text{（}1.20\text{）}} $$"
+    rep = block_coverage(blocks, md)
+    assert rep["missing"] == []
+
+
+def test_detached_fullwidth_formula_number_kept_raw_not_missing():
+    blocks = [{"block_label": "formula_number", "block_content": "（6-1）", "block_order": 1}]
+    rep = block_coverage(blocks, "（6-1）")
+    assert rep["missing"] == []
+
+
+def test_block_coverage_compares_sanitized_display_formula_probe():
+    blocks = [{
+        "block_label": "display_formula",
+        "block_content": r"$$ \mathrm{\boldmath~r~}>\sqrt{\mathrm{A}1} $$",
+        "block_order": 1,
+    }]
+    md = r"$$ \mathrm{~r~}>\sqrt{\mathrm{A}1} $$"
+    rep = block_coverage(blocks, md)
+    assert rep["missing"] == []
+    assert rep["in_md"] == 1
+
+
+def test_block_coverage_compares_sanitized_inline_math_probe():
+    blocks = [{
+        "block_label": "text",
+        "block_content": "Alodine $ ^{®} $ and Iridite $ ^{™} $ are trade names",
+        "block_order": 1,
+    }]
+    md = r"Alodine $ ^{\text{\textregistered}} $ and Iridite $ ^{\text{TM}} $ are trade names"
+    rep = block_coverage(blocks, md)
+    assert rep["missing"] == []
+    assert rep["in_md"] == 1
+
+
+def test_block_coverage_compares_sanitized_title_inline_math_probe():
+    blocks = [{
+        "block_label": "paragraph_title",
+        "block_content": "12.4 CE Analyst $ ^{™} $",
+        "block_order": 1,
+    }]
+    md = r"## 12.4 CE Analyst $ ^{\text{TM}} $"
+    rep = block_coverage(blocks, md)
+    assert rep["missing"] == []
+
+
 def test_empty_block_content_not_counted_as_missing():
     # block_content 为空(如 seal/装饰性 text 块)时探针恒为空字符串,不应误判为 missing(假阳性)
     blocks = [
