@@ -14,6 +14,7 @@ from __future__ import annotations
 import math
 import re
 import unicodedata
+from collections import Counter
 from dataclasses import dataclass
 
 import fitz
@@ -567,3 +568,378 @@ def assign_source_words(
             result["assignments"].setdefault(index_map[local], []).append(w)
 
     return result
+
+
+# ===========================================================================
+# 正文双向对账审计(计划 §6.4,Task 6):页级 audit_prose
+# ---------------------------------------------------------------------------
+# 输入契约(纯页级函数,不接触 fitz.Page,不做任何 bbox 几何运算——那是 Task 4
+# assign_source_words 的职责):
+#   - source_page['words'] 中每个 SourceWord.block_no,在本函数的语境下被
+#     约定为"该 word 已归属的 OCR 块下标"(与 blocks 列表下标、decisions 的
+#     block_id 同一编号体系)。这是编排层(Task 9,尚未实现)在调用 audit_prose
+#     之前,依据 assign_source_words 的 assignments 结果重新赋值该字段的产物
+#     (例如用 dataclasses.replace 重建 SourceWord),不是 fitz 原生的段落分组
+#     编号——两者数值空间不同,调用方必须完成这一步重映射。不落在
+#     [0, len(blocks)) 范围内的 block_no 视为该 word 未被任何块归属
+#     (unassigned),用于页级 possible_missing_block 聚簇检测。
+#   - blocks:apply_adoption 之后的最终内容块(block_label/block_content/...)。
+#   - decisions:Task 5 的 list[AdoptionDecision],按 block_id 与 blocks 下标
+#     一一对应。
+# 本函数只读:绝不修改 blocks / decisions / source_page,只产生 issues/metrics。
+# ===========================================================================
+
+
+@dataclass(frozen=True)
+class AuditThresholds:
+    """页级正文审计阈值(计划 §6.4)。生产 profile 待 Task 13 标定,测试注入显式值。"""
+
+    minimum_reliable_chars: int
+    maximum_bad_char_ratio: float
+    maximum_block_ned: float
+    minimum_char_recall: float
+    minimum_token_recall: float
+    minimum_numeric_token_recall: float
+    maximum_addition_ratio: float
+    maximum_repetition_score: float
+    minimum_single_column_sequence_ratio: float
+
+
+def _audit_join_words(words) -> str:
+    """按 (line_no, word_no) 排序拼接,词间单空格——与 build_adopted_text 的排序惯例一致。"""
+    ordered = sorted(words, key=lambda w: (w.line_no, w.word_no))
+    return " ".join(w.text for w in ordered)
+
+
+def _audit_source_reliability(words) -> tuple[int, float]:
+    """归属 words 的非空白字符总数、坏字符(U+FFFD/PUA/非空白控制符)占比。"""
+    total = 0
+    bad = 0
+    for w in words:
+        for ch in w.text:
+            if ch.isspace():
+                continue
+            total += 1
+            if ch == "�" or _is_pua(ch) or _is_bad_control(ch):
+                bad += 1
+    ratio = (bad / total) if total else 0.0
+    return total, ratio
+
+
+def _multiset_overlap(a_items, b_items) -> int:
+    """两个多重集的交集大小(逐元素取最小计数之和)——对乱序/换位不敏感的廉价初筛。"""
+    return sum((Counter(a_items) & Counter(b_items)).values())
+
+
+def _recall(overlap: int, total: int) -> float:
+    return (overlap / total) if total else 1.0
+
+
+def _weighted_ratio(pairs) -> float | None:
+    """pairs: [(overlap, total), ...] → micro-average(Σoverlap/Σtotal)。
+
+    这就是"按字符量加权"的直接实现:分母越大的块,天然占更大权重,不会被
+    "每块平均"掩盖长块丢失。无贡献块时返回 None(不得除零)。
+    """
+    total_sum = sum(total for _, total in pairs)
+    if total_sum <= 0:
+        return None
+    overlap_sum = sum(overlap for overlap, _ in pairs)
+    return overlap_sum / total_sum
+
+
+def _single_column_sequence_ratio(words, num_blocks: int) -> float | None:
+    """多栏代理(计划 §6.4):源 words 的 block_no 序列(限已归属者)单调不减才
+    可信,否则(多栏/交错)返回 None——调用方据此跳过 sequence_ratio,绝不作硬门。
+
+    代理条件本身即要求全序,故一旦确认单栏,ratio 恒为 1.0;该指标只做记录用,
+    不参与 status 判定,后续任务如需更细粒度的排序偏差量化可在此扩展。
+    """
+    seq = [w.block_no for w in words if 0 <= w.block_no < num_blocks]
+    if len(seq) < 2:
+        return None
+    for a, b in zip(seq, seq[1:]):
+        if a > b:
+            return None
+    return 1.0
+
+
+def audit_prose(
+    source_page: dict, blocks: list[dict], decisions, thresholds: AuditThresholds
+) -> dict:
+    """页级正文双向对账审计(计划 §6.4)。只读:不改 blocks/decisions/source_page。
+
+    按块 provenance 分派:
+      - 采信块(content_source=source_text):只记录 decisions 里已有的
+        block_ned,不重复告警(采信门规则 6 已兜底)。
+      - 回退块(content_source=ocr)且 label 属正文白名单
+        (reasons != ["label_not_adoptable"]):
+          * 页面 geometry 不可标定(reasons==["geometry_unscorable"])或本块
+            归属源字符太少/坏码占比过高 → source_unreliable,不参与对账,
+            不得把 OCR 判错。
+          * 否则做完整对账:missing_prose / prose_mismatch(NED 主指标)/
+            ocr_addition / numeric_mismatch。
+      - 非正文 label 块(reasons==["label_not_adoptable"]):完全不参与 prose
+        对账,不进 block_metrics,不污染页级聚合。
+
+    返回 dict:status("OK"|"SUSPECT"|"UNSCORABLE") / issues(list[dict],每条
+    含 code/block_id(可 None)/detail) / metrics(页级聚合) / block_metrics
+    (按 block_id)。
+    """
+    from scripts.pipelines.textbooks.prose_adoption import block_ned as _reverse_ned
+
+    words = list(source_page.get("words") or [])
+    n = len(blocks)
+    decisions_by_id = {d.block_id: d for d in decisions}
+
+    assigned_words: dict[int, list] = {}
+    unassigned_groups: dict[int, list] = {}
+    for w in words:
+        bn = w.block_no
+        if 0 <= bn < n:
+            assigned_words.setdefault(bn, []).append(w)
+        else:
+            unassigned_groups.setdefault(bn, []).append(w)
+
+    issues: list[dict] = []
+    block_metrics: dict[int, dict] = {}
+
+    char_pairs: list[tuple[int, int]] = []
+    token_pairs: list[tuple[int, int]] = []
+    numeric_pairs: list[tuple[int, int]] = []
+    addition_pairs: list[tuple[int, int]] = []  # (char_overlap, ocr_char_total)
+    ned_pairs: list[tuple[float, int]] = []  # (ned, char_weight)
+
+    prose_content_texts: list[str] = []
+    adopted_count = 0
+    fallback_prose_count = 0
+    source_unreliable_count = 0
+
+    for i, block in enumerate(blocks):
+        decision = decisions_by_id.get(i)
+        if decision is None:
+            continue
+        ocr_content = block.get("block_content", "") if isinstance(block, dict) else ""
+
+        if decision.reasons == ["label_not_adoptable"]:
+            # 非正文 label(公式/table/image/header/...)——不参与 prose 对账。
+            continue
+
+        prose_content_texts.append(ocr_content or "")
+
+        if decision.content_source == "source_text":
+            adopted_count += 1
+            block_metrics[i] = {
+                "content_source": "source_text",
+                "block_ned": decision.block_ned,
+            }
+            if decision.block_ned is not None:
+                adopted_chars = sum(
+                    1 for ch in (decision.adopted_text or "") if not ch.isspace()
+                )
+                if adopted_chars > 0:
+                    ned_pairs.append((decision.block_ned, adopted_chars))
+            continue
+
+        # ---- 回退块(content_source == "ocr")且 label 属正文白名单 ----
+        fallback_prose_count += 1
+        src_words = assigned_words.get(i, [])
+
+        if decision.reasons == ["geometry_unscorable"]:
+            # 全页几何不可标定:归属本就不可信,不猜测,直接判 source_unreliable。
+            source_unreliable_count += 1
+            block_metrics[i] = {"content_source": "ocr", "source_unreliable": True}
+            issues.append(
+                {
+                    "code": "source_unreliable",
+                    "block_id": i,
+                    "detail": "页面几何不可标定,该块源归属不可信,不参与对账",
+                }
+            )
+            continue
+
+        raw_source_text = _audit_join_words(src_words)
+        src_total, bad_ratio = _audit_source_reliability(src_words)
+        if (
+            src_total < thresholds.minimum_reliable_chars
+            or bad_ratio > thresholds.maximum_bad_char_ratio
+        ):
+            source_unreliable_count += 1
+            block_metrics[i] = {
+                "content_source": "ocr",
+                "source_unreliable": True,
+                "src_char_count": src_total,
+                "bad_char_ratio": bad_ratio,
+            }
+            issues.append(
+                {
+                    "code": "source_unreliable",
+                    "block_id": i,
+                    "detail": (
+                        f"源字符量={src_total},坏码占比={bad_ratio:.2f},"
+                        "该块源不可信,不参与对账"
+                    ),
+                }
+            )
+            continue
+
+        source_compare = normalize_prose_for_compare(raw_source_text)
+        ocr_compare = normalize_prose_for_compare(ocr_content or "")
+
+        source_chars = [ch for ch in source_compare if not ch.isspace()]
+        ocr_chars = [ch for ch in ocr_compare if not ch.isspace()]
+        char_overlap = _multiset_overlap(source_chars, ocr_chars)
+        char_recall = _recall(char_overlap, len(source_chars))
+
+        source_tokens = source_compare.split()
+        ocr_tokens = ocr_compare.split()
+        token_overlap = _multiset_overlap(source_tokens, ocr_tokens)
+        token_recall = _recall(token_overlap, len(source_tokens))
+
+        ned = _reverse_ned(source_compare, ocr_compare)
+
+        source_numeric = extract_numeric_tokens(raw_source_text)
+        ocr_numeric = extract_numeric_tokens(ocr_content or "")
+        numeric_recall = None
+        if source_numeric:
+            numeric_overlap = _multiset_overlap(source_numeric, ocr_numeric)
+            numeric_recall = _recall(numeric_overlap, len(source_numeric))
+            numeric_pairs.append((numeric_overlap, len(source_numeric)))
+
+        addition_ratio = (
+            1.0 - _recall(char_overlap, len(ocr_chars)) if ocr_chars else 0.0
+        )
+
+        char_pairs.append((char_overlap, len(source_chars)))
+        token_pairs.append((token_overlap, len(source_tokens)))
+        addition_pairs.append((char_overlap, len(ocr_chars)))
+        if len(source_chars) > 0:
+            ned_pairs.append((ned, len(source_chars)))
+
+        block_metrics[i] = {
+            "content_source": "ocr",
+            "source_unreliable": False,
+            "block_ned": ned,
+            "char_recall": char_recall,
+            "token_recall": token_recall,
+            "numeric_token_recall": numeric_recall,
+            "addition_ratio": addition_ratio,
+            "src_char_count": len(source_chars),
+            "ocr_char_count": len(ocr_chars),
+        }
+
+        # 多重集召回只是廉价初筛;主指标是逐块 NED——两者各自独立判定,互不
+        # 遮蔽(乱序场景下多重集可能满分而 NED 报警,反之亦然)。
+        if (
+            char_recall < thresholds.minimum_char_recall
+            or token_recall < thresholds.minimum_token_recall
+        ):
+            issues.append(
+                {
+                    "code": "missing_prose",
+                    "block_id": i,
+                    "detail": (
+                        f"字符召回={char_recall:.2f},token 召回={token_recall:.2f},"
+                        "疑似 OCR 漏段"
+                    ),
+                }
+            )
+        if ned > thresholds.maximum_block_ned:
+            issues.append(
+                {
+                    "code": "prose_mismatch",
+                    "block_id": i,
+                    "detail": f"块级 NED={ned:.3f} 超过上限 {thresholds.maximum_block_ned}",
+                }
+            )
+        if addition_ratio > thresholds.maximum_addition_ratio:
+            issues.append(
+                {
+                    "code": "ocr_addition",
+                    "block_id": i,
+                    "detail": f"OCR 新增比例={addition_ratio:.2f},疑似幻觉/多出内容",
+                }
+            )
+        if (
+            numeric_recall is not None
+            and numeric_recall < thresholds.minimum_numeric_token_recall
+        ):
+            issues.append(
+                {
+                    "code": "numeric_mismatch",
+                    "block_id": i,
+                    "detail": f"数字 token 召回={numeric_recall:.2f},疑似数字/单位识别错误",
+                }
+            )
+
+    # ---- 页级:unassigned 源 words 聚簇 → 疑似 OCR 漏切块 ----
+    for bn in sorted(unassigned_groups):
+        group = unassigned_groups[bn]
+        if len(group) >= 2:
+            issues.append(
+                {
+                    "code": "possible_missing_block",
+                    "block_id": None,
+                    "detail": (
+                        f"未归属源 words 聚簇(标记={bn},{len(group)} 个 words),"
+                        "疑似 OCR 漏切块"
+                    ),
+                }
+            )
+
+    # ---- 页级:VLM 重复环退化(纯 OCR 输出自检,不需要源文本) ----
+    page_prose_text = " ".join(t for t in prose_content_texts if t)
+    repetition_score = ngram_repetition_score(page_prose_text)
+    if repetition_score > thresholds.maximum_repetition_score:
+        issues.append(
+            {
+                "code": "ocr_degeneration",
+                "block_id": None,
+                "detail": f"全页正文 n-gram 重复度={repetition_score:.2f},疑似 VLM 重复环退化",
+            }
+        )
+
+    weighted_addition_precision = _weighted_ratio(addition_pairs)
+    metrics = {
+        "block_count": n,
+        "prose_block_count": adopted_count + fallback_prose_count,
+        "adopted_block_count": adopted_count,
+        "fallback_block_count": fallback_prose_count,
+        "source_unreliable_block_count": source_unreliable_count,
+        "weighted_char_recall": _weighted_ratio(char_pairs),
+        "weighted_token_recall": _weighted_ratio(token_pairs),
+        "weighted_numeric_token_recall": _weighted_ratio(numeric_pairs),
+        "weighted_addition_ratio": (
+            1.0 - weighted_addition_precision
+            if weighted_addition_precision is not None
+            else None
+        ),
+        "weighted_block_ned": (
+            sum(v * w for v, w in ned_pairs) / sum(w for _, w in ned_pairs)
+            if ned_pairs
+            else None
+        ),
+        "ngram_repetition_score": repetition_score,
+    }
+    seq_ratio = _single_column_sequence_ratio(words, n)
+    if seq_ratio is not None:
+        # 记录用,绝不据此产生 issue 或改变 status(计划 §6.4:多栏跳过/绝不作硬门)。
+        metrics["sequence_ratio"] = seq_ratio
+
+    if not issues:
+        status = "OK"
+    elif (
+        fallback_prose_count > 0
+        and source_unreliable_count == fallback_prose_count
+        and all(iss["code"] == "source_unreliable" for iss in issues)
+    ):
+        status = "UNSCORABLE"
+    else:
+        status = "SUSPECT"
+
+    return {
+        "status": status,
+        "issues": issues,
+        "metrics": metrics,
+        "block_metrics": block_metrics,
+    }

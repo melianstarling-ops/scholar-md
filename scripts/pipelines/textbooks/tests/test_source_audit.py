@@ -2,7 +2,9 @@ import json
 
 import fitz
 
+from scripts.pipelines.textbooks.prose_adoption import AdoptionDecision
 from scripts.pipelines.textbooks.source_audit import (
+    AuditThresholds,
     PageGeometry,
     SourceWord,
     _is_bad_control,
@@ -11,6 +13,7 @@ from scripts.pipelines.textbooks.source_audit import (
     _valid_bbox,
     assign_source_words,
     assign_word_to_block,
+    audit_prose,
     extract_numeric_tokens,
     extract_source_page,
     ngram_repetition_score,
@@ -649,3 +652,404 @@ def test_unscorable_geometry_propagates_adoption_forbidden():
     # 不猜:unscorable 页不产出任何归属,全部 words 明确落 unassigned
     assert res["assignments"] == {}
     assert set(res["unassigned"]) == set(words)
+
+
+# ===========================================================================
+# Task 6:正文双向对账审计 audit_prose(计划 §6.4)
+# ---------------------------------------------------------------------------
+# 约定(见 audit_prose 文档字符串):source_page['words'] 的 block_no 字段在此
+# 语境下代表"已归属的 OCR 块下标"(与 blocks 下标、decisions.block_id 同一
+# 编号体系),不是 fitz 原生段落分组——纯 synthetic 构造,不接触 fitz.Page。
+# ===========================================================================
+
+
+def _audit_page(words, text=""):
+    return {"page_number": 0, "words": words, "text": text, "fonts": []}
+
+
+def _decision(block_id, content_source, reasons=(), block_ned=None, adopted_text=None):
+    return AdoptionDecision(
+        block_id=block_id,
+        content_source=content_source,
+        reasons=list(reasons),
+        block_ned=block_ned,
+        adopted_text=adopted_text,
+    )
+
+
+def _audit_thresholds(**overrides):
+    base = dict(
+        minimum_reliable_chars=10,
+        maximum_bad_char_ratio=0.1,
+        maximum_block_ned=0.3,
+        minimum_char_recall=0.8,
+        minimum_token_recall=0.8,
+        minimum_numeric_token_recall=0.8,
+        maximum_addition_ratio=0.2,
+        maximum_repetition_score=0.3,
+        minimum_single_column_sequence_ratio=0.8,
+    )
+    base.update(overrides)
+    return AuditThresholds(**base)
+
+
+def _issue_codes(result):
+    return {iss["code"] for iss in result["issues"]}
+
+
+# ---- 1. 回退块:OCR 漏整句 → missing_prose ---------------------------------
+
+
+def test_audit_prose_missing_sentence_flags_missing_prose():
+    words = [
+        _sw("Sentence", (0, 0, 1, 1), block_no=0, line_no=0, word_no=0),
+        _sw("one", (0, 0, 1, 1), block_no=0, line_no=0, word_no=1),
+        _sw("is", (0, 0, 1, 1), block_no=0, line_no=0, word_no=2),
+        _sw("here", (0, 0, 1, 1), block_no=0, line_no=0, word_no=3),
+        _sw("today", (0, 0, 1, 1), block_no=0, line_no=0, word_no=4),
+        _sw("Sentence", (0, 0, 1, 1), block_no=0, line_no=1, word_no=0),
+        _sw("two", (0, 0, 1, 1), block_no=0, line_no=1, word_no=1),
+        _sw("follows", (0, 0, 1, 1), block_no=0, line_no=1, word_no=2),
+        _sw("right", (0, 0, 1, 1), block_no=0, line_no=1, word_no=3),
+        _sw("after", (0, 0, 1, 1), block_no=0, line_no=1, word_no=4),
+    ]
+    blocks = [_block("text", [0, 0, 100, 100], content="Sentence one is here today")]
+    decisions = [_decision(0, "ocr", reasons=["adoption_disagreement"])]
+    thresholds = _audit_thresholds(
+        minimum_reliable_chars=5,
+        maximum_block_ned=0.9,
+        minimum_char_recall=0.7,
+        minimum_token_recall=0.7,
+        maximum_addition_ratio=0.9,
+    )
+    result = audit_prose(_audit_page(words), blocks, decisions, thresholds)
+    assert _issue_codes(result) == {"missing_prose"}
+    issue = next(iss for iss in result["issues"] if iss["code"] == "missing_prose")
+    assert issue["block_id"] == 0
+    assert result["status"] == "SUSPECT"
+
+
+# ---- 2. 回退块:OCR 多出整句 → ocr_addition,审计不改内容 -------------------
+
+
+def test_audit_prose_extra_sentence_flags_ocr_addition_without_mutating_blocks():
+    words = [
+        _sw("Alpha", (0, 0, 1, 1), block_no=0, line_no=0, word_no=0),
+        _sw("beta", (0, 0, 1, 1), block_no=0, line_no=0, word_no=1),
+        _sw("gamma", (0, 0, 1, 1), block_no=0, line_no=0, word_no=2),
+        _sw("delta", (0, 0, 1, 1), block_no=0, line_no=0, word_no=3),
+        _sw("epsilon", (0, 0, 1, 1), block_no=0, line_no=0, word_no=4),
+    ]
+    ocr_text = (
+        "Alpha beta gamma delta epsilon zeta eta theta iota kappa "
+        "lambda mu nu xi omicron pi"
+    )
+    blocks = [_block("text", [0, 0, 100, 100], content=ocr_text)]
+    decisions = [_decision(0, "ocr", reasons=["adoption_disagreement"])]
+    thresholds = _audit_thresholds(
+        minimum_reliable_chars=5,
+        maximum_block_ned=0.9,
+        minimum_char_recall=0.5,
+        minimum_token_recall=0.5,
+        maximum_addition_ratio=0.2,
+    )
+    blocks_before = [dict(b) for b in blocks]
+    result = audit_prose(_audit_page(words), blocks, decisions, thresholds)
+    assert _issue_codes(result) == {"ocr_addition"}
+    issue = next(iss for iss in result["issues"] if iss["code"] == "ocr_addition")
+    assert issue["block_id"] == 0
+    # 只读:审计绝不改内容,blocks 原样
+    assert blocks == blocks_before
+
+
+# ---- 3. 回退块:OCR 只改变空格/断行/普通连字 → 无 issue --------------------
+
+
+def test_audit_prose_whitespace_hyphen_only_diff_no_issue():
+    words = [
+        _sw("Researchers", (0, 0, 1, 1), block_no=0, line_no=0, word_no=0),
+        _sw("co‐operate", (0, 0, 1, 1), block_no=0, line_no=1, word_no=0),
+        _sw("across", (0, 0, 1, 1), block_no=0, line_no=2, word_no=0),
+        _sw("many", (0, 0, 1, 1), block_no=0, line_no=2, word_no=1),
+        _sw("countries", (0, 0, 1, 1), block_no=0, line_no=3, word_no=0),
+    ]
+    ocr_text = "Researchers\nco-operate across\nmany  countries"
+    blocks = [_block("text", [0, 0, 100, 100], content=ocr_text)]
+    decisions = [_decision(0, "ocr", reasons=["adoption_disagreement"])]
+    thresholds = _audit_thresholds(
+        minimum_reliable_chars=5,
+        maximum_block_ned=0.05,
+        minimum_char_recall=0.95,
+        minimum_token_recall=0.95,
+        maximum_addition_ratio=0.05,
+    )
+    result = audit_prose(_audit_page(words), blocks, decisions, thresholds)
+    assert result["issues"] == []
+    assert result["status"] == "OK"
+
+
+# ---- 4. 回退块:OCR 改数字(0.042→0.42)→ numeric_mismatch -------------------
+
+
+def test_audit_prose_numeric_change_flags_numeric_mismatch():
+    words = [
+        _sw("The", (0, 0, 1, 1), block_no=0, line_no=0, word_no=0),
+        _sw("measured", (0, 0, 1, 1), block_no=0, line_no=0, word_no=1),
+        _sw("value", (0, 0, 1, 1), block_no=0, line_no=0, word_no=2),
+        _sw("is", (0, 0, 1, 1), block_no=0, line_no=0, word_no=3),
+        _sw("0.042", (0, 0, 1, 1), block_no=0, line_no=0, word_no=4),
+        _sw("units", (0, 0, 1, 1), block_no=0, line_no=0, word_no=5),
+        _sw("exactly", (0, 0, 1, 1), block_no=0, line_no=0, word_no=6),
+    ]
+    ocr_text = "The measured value is 0.42 units exactly"
+    blocks = [_block("text", [0, 0, 100, 100], content=ocr_text)]
+    decisions = [_decision(0, "ocr", reasons=["adoption_disagreement"])]
+    thresholds = _audit_thresholds(
+        minimum_reliable_chars=5,
+        maximum_block_ned=0.9,
+        minimum_char_recall=0.5,
+        minimum_token_recall=0.5,
+        maximum_addition_ratio=0.9,
+        minimum_numeric_token_recall=0.9,
+    )
+    result = audit_prose(_audit_page(words), blocks, decisions, thresholds)
+    assert _issue_codes(result) == {"numeric_mismatch"}
+    issue = next(iss for iss in result["issues"] if iss["code"] == "numeric_mismatch")
+    assert issue["block_id"] == 0
+    assert result["block_metrics"][0]["numeric_token_recall"] == 0.0
+
+
+# ---- 5. 主指标为逐块 NED:多重集召回 100% 但语序打乱 → prose_mismatch ------
+
+
+def test_audit_prose_ned_catches_reordering_that_multiset_recall_misses():
+    tokens = [
+        "Zephyr", "quietly", "traversed", "distant", "valleys",
+        "beneath", "glowing", "amber", "skies", "today",
+    ]
+    words = [
+        _sw(t, (0, 0, 1, 1), block_no=0, line_no=0, word_no=i)
+        for i, t in enumerate(tokens)
+    ]
+    ocr_text = " ".join(reversed(tokens))
+    blocks = [_block("text", [0, 0, 100, 100], content=ocr_text)]
+    decisions = [_decision(0, "ocr", reasons=["adoption_disagreement"])]
+    thresholds = _audit_thresholds(
+        minimum_reliable_chars=5,
+        maximum_block_ned=0.3,
+        minimum_char_recall=0.99,
+        minimum_token_recall=0.99,
+        maximum_addition_ratio=0.5,
+    )
+    result = audit_prose(_audit_page(words), blocks, decisions, thresholds)
+    # 多重集召回满分(完全同一组词),不得触发 missing_prose
+    assert result["block_metrics"][0]["char_recall"] == 1.0
+    assert result["block_metrics"][0]["token_recall"] == 1.0
+    assert _issue_codes(result) == {"prose_mismatch"}
+
+
+# ---- 6. 采信块:只记录 NED 分布,不产生 missing/addition 告警 ---------------
+
+
+def test_audit_prose_adopted_block_only_records_ned_no_issue():
+    blocks = [_block("text", [0, 0, 100, 100], content="clean adopted prose here")]
+    decisions = [
+        _decision(
+            0, "source_text", reasons=[], block_ned=0.15,
+            adopted_text="clean adopted prose here",
+        )
+    ]
+    # 阈值刻意比记录的 NED(0.15)严得多——证明采信块真的不重复告警,
+    # 不是恰好阈值宽松才侥幸不报。
+    thresholds = _audit_thresholds(maximum_block_ned=0.01)
+    result = audit_prose(_audit_page([]), blocks, decisions, thresholds)
+    assert result["issues"] == []
+    assert result["status"] == "OK"
+    assert result["block_metrics"][0] == {
+        "content_source": "source_text",
+        "block_ned": 0.15,
+    }
+
+
+# ---- 7. unassigned 源 words 聚簇 → possible_missing_block -----------------
+
+
+def test_audit_prose_unassigned_cluster_flags_possible_missing_block():
+    clean_words = [
+        _sw("clean", (0, 0, 1, 1), block_no=0, line_no=0, word_no=0),
+        _sw("text", (0, 0, 1, 1), block_no=0, line_no=0, word_no=1),
+    ]
+    stray_words = [
+        _sw("orphan1", (0, 0, 1, 1), block_no=99, line_no=0, word_no=0),
+        _sw("orphan2", (0, 0, 1, 1), block_no=99, line_no=0, word_no=1),
+        _sw("orphan3", (0, 0, 1, 1), block_no=99, line_no=0, word_no=2),
+    ]
+    blocks = [_block("text", [0, 0, 100, 100], content="clean text")]
+    decisions = [
+        _decision(0, "source_text", reasons=[], block_ned=0.0, adopted_text="clean text")
+    ]
+    thresholds = _audit_thresholds()
+    result = audit_prose(_audit_page(clean_words + stray_words), blocks, decisions, thresholds)
+    assert "possible_missing_block" in _issue_codes(result)
+    issue = next(
+        iss for iss in result["issues"] if iss["code"] == "possible_missing_block"
+    )
+    assert issue["block_id"] is None
+
+    # 反证:孤立的单个 unassigned word(非聚簇)不得触发——避免降级成"任何漏
+    # 归属都报警"的粗暴规则。
+    lone_word = [_sw("lone", (0, 0, 1, 1), block_no=99, line_no=0, word_no=0)]
+    result_lone = audit_prose(
+        _audit_page(clean_words + lone_word), blocks, decisions, thresholds
+    )
+    assert "possible_missing_block" not in _issue_codes(result_lone)
+
+
+# ---- 8. 重复环 OCR 输出 → ocr_degeneration(无需源文本参与断言) -------------
+
+
+def test_audit_prose_repetition_loop_flags_ocr_degeneration_without_source():
+    looped = "the cat sat on the mat. " * 60
+    blocks = [_block("text", [0, 0, 100, 100], content=looped)]
+    decisions = [_decision(0, "ocr", reasons=["adoption_disagreement"])]
+    thresholds = _audit_thresholds(maximum_repetition_score=0.3)
+    result = audit_prose(_audit_page([]), blocks, decisions, thresholds)
+    assert "ocr_degeneration" in _issue_codes(result)
+    issue = next(iss for iss in result["issues"] if iss["code"] == "ocr_degeneration")
+    assert issue["block_id"] is None
+    # 空源 words → 该块字符量不足,独立判 source_unreliable;两个 issue 并存
+    # 时页面仍是 SUSPECT(而非被 source_unreliable 特例掩盖成 UNSCORABLE)。
+    assert result["status"] == "SUSPECT"
+
+
+# ---- 9. 公式/table 块内容不污染 prose 指标 ---------------------------------
+
+
+def test_audit_prose_formula_block_does_not_pollute_prose_metrics():
+    words = [
+        _sw("clean", (0, 0, 1, 1), block_no=0, line_no=0, word_no=0),
+        _sw("prose", (0, 0, 1, 1), block_no=0, line_no=0, word_no=1),
+        _sw("here", (0, 0, 1, 1), block_no=0, line_no=0, word_no=2),
+    ]
+    text_block = _block("text", [0, 0, 100, 100], content="clean prose here")
+    thresholds = _audit_thresholds()
+
+    blocks_without = [text_block]
+    decisions_without = [
+        _decision(0, "source_text", reasons=[], block_ned=0.0, adopted_text="clean prose here")
+    ]
+    result_without = audit_prose(_audit_page(words), blocks_without, decisions_without, thresholds)
+
+    formula_block = _block("display_formula", [0, 100, 100, 200], content=r"$E=mc^2$")
+    blocks_with = [text_block, formula_block]
+    decisions_with = [
+        _decision(0, "source_text", reasons=[], block_ned=0.0, adopted_text="clean prose here"),
+        _decision(1, "ocr", reasons=["label_not_adoptable"]),
+    ]
+    result_with = audit_prose(_audit_page(words), blocks_with, decisions_with, thresholds)
+
+    assert result_without["issues"] == result_with["issues"] == []
+    assert result_without["block_metrics"][0] == result_with["block_metrics"][0]
+    assert 1 not in result_with["block_metrics"]
+    assert result_without["metrics"]["prose_block_count"] == result_with["metrics"]["prose_block_count"]
+
+
+# ---- 10. 多栏代理条件不满足时 sequence_ratio 缺席且不产生 issue ------------
+
+
+def test_audit_prose_sequence_ratio_absent_when_multi_column_proxy_fails():
+    # 交错:block 1 的 word 先于 block 0 的 word 出现 → block_no 序列非单调
+    words = [
+        _sw("first", (0, 0, 1, 1), block_no=1, line_no=0, word_no=0),
+        _sw("second", (0, 0, 1, 1), block_no=0, line_no=0, word_no=0),
+        _sw("third", (0, 0, 1, 1), block_no=1, line_no=0, word_no=1),
+    ]
+    blocks = [
+        _block("text", [0, 0, 100, 100], content="second"),
+        _block("text", [0, 0, 100, 100], content="first third"),
+    ]
+    decisions = [
+        _decision(0, "source_text", reasons=[], block_ned=0.0, adopted_text="second"),
+        _decision(1, "source_text", reasons=[], block_ned=0.0, adopted_text="first third"),
+    ]
+    thresholds = _audit_thresholds()
+    result = audit_prose(_audit_page(words), blocks, decisions, thresholds)
+    assert "sequence_ratio" not in result["metrics"]
+    assert not any("sequence" in iss["code"] for iss in result["issues"])
+
+
+# ---- 11. 源坏码过多 → 块 source_unreliable;全页如此 → 页 UNSCORABLE -------
+
+
+def test_audit_prose_all_source_unreliable_page_is_unscorable_not_ocr_failed():
+    # 每块字符量(11 = 5 个 clean + 6 个坏码)已达 minimum_reliable_chars(5),
+    # 但坏码占比(6/11≈0.55)远超 maximum_bad_char_ratio——专测"坏码超阈值"
+    # 这条独立于字符量不足的分支。
+    bad_words_1 = [
+        _sw("clean", (0, 0, 1, 1), block_no=0, line_no=0, word_no=0),
+        _sw("", (0, 0, 1, 1), block_no=0, line_no=0, word_no=1),
+    ]
+    bad_words_2 = [
+        _sw("clean", (0, 0, 1, 1), block_no=1, line_no=0, word_no=0),
+        _sw("", (0, 0, 1, 1), block_no=1, line_no=0, word_no=1),
+    ]
+    blocks = [
+        _block("text", [0, 0, 100, 100], content="normal length prose content here"),
+        _block("text", [0, 100, 100, 200], content="another block of ordinary prose"),
+    ]
+    decisions = [
+        _decision(0, "ocr", reasons=["bad_source_chars"]),
+        _decision(1, "ocr", reasons=["bad_source_chars"]),
+    ]
+    thresholds = _audit_thresholds(minimum_reliable_chars=5, maximum_bad_char_ratio=0.1)
+    result = audit_prose(
+        _audit_page(bad_words_1 + bad_words_2), blocks, decisions, thresholds
+    )
+    assert result["status"] == "UNSCORABLE"
+    assert _issue_codes(result) == {"source_unreliable"}
+    assert len(result["issues"]) == 2
+    assert result["block_metrics"][0]["source_unreliable"] is True
+    assert result["block_metrics"][1]["source_unreliable"] is True
+
+
+# ---- 12. 字符量加权:长块丢失在页级指标可见 ---------------------------------
+
+
+def test_audit_prose_weighted_aggregate_reveals_long_block_char_loss():
+    short_words = [
+        _sw("Hi", (0, 0, 1, 1), block_no=0, line_no=0, word_no=0),
+        _sw("there", (0, 0, 1, 1), block_no=0, line_no=0, word_no=1),
+    ]
+    long_source_sentence = (
+        "This lengthy paragraph documents an extended discussion covering "
+        "numerous distinct topics across many carefully constructed sentences "
+        "that together form a substantial block of source text content"
+    )
+    long_words = [
+        _sw(t, (0, 0, 1, 1), block_no=1, line_no=0, word_no=i)
+        for i, t in enumerate(long_source_sentence.split())
+    ]
+    blocks = [
+        _block("text", [0, 0, 100, 100], content="Hi there"),
+        _block("text", [0, 100, 100, 200], content="Unrelated short OCR fragment"),
+    ]
+    decisions = [
+        _decision(0, "ocr", reasons=["adoption_disagreement"]),
+        _decision(1, "ocr", reasons=["adoption_disagreement"]),
+    ]
+    thresholds = _audit_thresholds(
+        minimum_reliable_chars=5,
+        maximum_block_ned=0.99,
+        minimum_char_recall=0.01,  # 关掉逐块 issue,只看聚合数字本身
+        minimum_token_recall=0.01,
+        maximum_addition_ratio=0.99,
+    )
+    result = audit_prose(_audit_page(short_words + long_words), blocks, decisions, thresholds)
+    assert result["block_metrics"][0]["char_recall"] == 1.0
+    long_recall = result["block_metrics"][1]["char_recall"]
+    assert long_recall < 0.3
+    naive_average = (1.0 + long_recall) / 2
+    weighted = result["metrics"]["weighted_char_recall"]
+    # 加权聚合必须显著低于"每块平均"——不能被短块的满分掩盖长块的丢失
+    assert weighted < naive_average - 0.2
+    assert weighted < 0.3
