@@ -225,7 +225,7 @@ def test_convert_route_B_registers(tmp_path, monkeypatch):
         pg.insert_text((72, 72), "the quick brown fox jumps over the lazy dog " * 8)
     pdf = tmp_path / "born.pdf"
     doc.save(str(pdf))
-    res = cv.convert_pdf(str(pdf), str(tmp_path / "out"))
+    res = cv.convert_pdf(str(pdf), str(tmp_path / "out"), born_digital_mode="defer")
     assert res["route"] == "B"
     assert res["md_path"] is None
 
@@ -370,7 +370,7 @@ def test_convert_cli_forwards_born_digital_mode(monkeypatch):
     assert captured["born_digital_mode"] == "hybrid"
 
 
-def test_convert_cli_born_digital_mode_defaults_to_defer(monkeypatch):
+def test_convert_cli_born_digital_mode_defaults_to_hybrid(monkeypatch):
     captured = {}
 
     def fake_convert_pdf(*_args, **kwargs):
@@ -383,7 +383,7 @@ def test_convert_cli_born_digital_mode_defaults_to_defer(monkeypatch):
 
     cv.main()
 
-    assert captured["born_digital_mode"] == "defer"
+    assert captured["born_digital_mode"] == "hybrid"
 
 
 def test_convert_cli_rejects_invalid_born_digital_mode(monkeypatch, capsys):

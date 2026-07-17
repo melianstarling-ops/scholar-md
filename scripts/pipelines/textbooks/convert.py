@@ -300,7 +300,7 @@ def convert_pdf(pdf_path: str, deliverables_dir: str | None = None,
                 write_selfcheck: bool = True, force_ocr: bool = False,
                 work_seconds: float = DEFAULT_WORK_SECONDS,
                 rest_seconds: float = DEFAULT_REST_SECONDS,
-                born_digital_mode: str = "defer") -> dict:
+                born_digital_mode: str = "hybrid") -> dict:
     if born_digital_mode not in BORN_DIGITAL_MODES:
         raise ValueError(f"born_digital_mode 须为 {BORN_DIGITAL_MODES},收到 {born_digital_mode!r}")
     stem = os.path.splitext(os.path.basename(pdf_path))[0]
@@ -529,9 +529,9 @@ def main() -> None:
                     help="不写 <stem>_selfcheck.json(控制台摘要仍输出)")
     ap.add_argument("--allow-sleep", action="store_true",
                     help="允许系统按电源计划睡眠(默认转换期间阻止睡眠)")
-    ap.add_argument("--born-digital-mode", choices=list(BORN_DIGITAL_MODES), default="defer",
-                    help="路线 B(born-digital)采信模式:defer=登记不转(默认)/"
-                         "ocr=完全走 OCR 忽略文本层/hybrid=块级混合采信")
+    ap.add_argument("--born-digital-mode", choices=list(BORN_DIGITAL_MODES), default="hybrid",
+                    help="路线 B(born-digital)采信模式:hybrid=块级混合采信(默认)/"
+                         "defer=登记不转(回退开关)/ocr=完全走 OCR 忽略文本层(回退开关)")
     args = ap.parse_args()
     if args.work_hours <= 0 or args.rest_minutes <= 0:
         ap.error("--work-hours 与 --rest-minutes 必须大于 0")

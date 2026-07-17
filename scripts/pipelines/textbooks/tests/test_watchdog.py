@@ -139,7 +139,7 @@ def test_main_forwards_born_digital_mode_to_convert(monkeypatch):
     assert argv[argv.index("--born-digital-mode") + 1] == "hybrid"
 
 
-def test_main_born_digital_mode_defaults_to_defer(monkeypatch):
+def test_main_born_digital_mode_defaults_to_hybrid(monkeypatch):
     captured = {}
     def fake_run_until_done(argv, max_restarts):
         captured["argv"] = argv
@@ -149,7 +149,7 @@ def test_main_born_digital_mode_defaults_to_defer(monkeypatch):
     with pytest.raises(SystemExit):
         wd.main()
     argv = captured["argv"]
-    assert argv[argv.index("--born-digital-mode") + 1] == "defer"
+    assert argv[argv.index("--born-digital-mode") + 1] == "hybrid"
 
 
 def test_main_rejects_invalid_born_digital_mode(monkeypatch):

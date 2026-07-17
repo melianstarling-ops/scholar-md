@@ -114,7 +114,7 @@ def _already_done(out_root: Path, work_root: Path | None, pdf_path: Path, dpi: i
 def _job_argv(pdf: Path, out_root: Path, work_root: Path | None, dpi: int,
               no_selfcheck_json: bool, allow_sleep: bool = False,
               force_ocr: bool = False, work_hours: float = 6,
-              rest_minutes: float = 40, born_digital_mode: str = "defer") -> list[str]:
+              rest_minutes: float = 40, born_digital_mode: str = "hybrid") -> list[str]:
     argv = ["--src", str(pdf), "--out", str(out_root), "--dpi", str(dpi)]
     if work_root:
         argv.extend(["--work-dir", str(work_root)])
@@ -246,7 +246,7 @@ def run(src_paths: list[str], out: str | None = None, dpi: int = cp.DEFAULT_DPI,
         rest_minutes: float = 40, runner=None,
         severe_issue_codes: frozenset = DEFAULT_SEVERE_ISSUE_CODES,
         suspect_print_limit: int = DEFAULT_SUSPECT_PRINT_LIMIT,
-        born_digital_mode: str = "defer") -> tuple[int, list[dict]]:
+        born_digital_mode: str = "hybrid") -> tuple[int, list[dict]]:
     if work_hours <= 0 or rest_minutes <= 0:
         raise ValueError("work_hours 与 rest_minutes 必须大于 0")
     pdfs = discover(src_paths)
@@ -348,9 +348,9 @@ def main() -> int:
     ap.add_argument("--allow-sleep", action="store_true",
                     help="允许系统按电源计划睡眠(默认转换期间阻止睡眠)")
     ap.add_argument("--list", action="store_true", help="只列出待处理 PDF,不转换")
-    ap.add_argument("--born-digital-mode", choices=list(BORN_DIGITAL_MODES), default="defer",
-                    help="路线 B(born-digital)采信模式:defer=登记不转(默认)/"
-                         "ocr=完全走 OCR 忽略文本层/hybrid=块级混合采信(转发给每本书的 convert.py)")
+    ap.add_argument("--born-digital-mode", choices=list(BORN_DIGITAL_MODES), default="hybrid",
+                    help="路线 B(born-digital)采信模式:hybrid=块级混合采信(默认)/"
+                         "defer=登记不转(回退开关)/ocr=完全走 OCR 忽略文本层(回退开关,转发给每本书的 convert.py)")
     args = ap.parse_args()
     if args.work_hours <= 0 or args.rest_minutes <= 0:
         ap.error("--work-hours 与 --rest-minutes 必须大于 0")
