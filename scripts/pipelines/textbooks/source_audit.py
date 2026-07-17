@@ -474,6 +474,8 @@ def assign_word_to_block(
       3. 最高覆盖率 < overlap_threshold 的弱交叠不强行归属,返回 None。
     所有并列一律用 (面积, bbox 坐标) 做确定性 tie-break,不依赖 blocks 的顺序,
     因此对 blocks 洗牌结果不变(同一 word 不会因块序变化被归到不同块)。
+    边界:两块 bbox 逐坐标完全相同时,tie-break 元组相等、退回输入顺序——这是几何
+    上无法区分的病态 OCR 输出(重复框),两候选内容等价,洗牌不变性对该退化情形不保证。
     """
     cx = (word[0] + word[2]) / 2.0
     cy = (word[1] + word[3]) / 2.0

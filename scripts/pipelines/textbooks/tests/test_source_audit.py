@@ -470,12 +470,26 @@ def test_weak_overlap_stays_unassigned():
     assert res["unassigned"] == [word]
 
 
-def test_strong_overlap_above_threshold_assigns():
-    # 中心不落块内,但 60% 面积交叠 >= 阈值 0.5 → 归属
-    word = _sw("s", (100, 100, 200, 200))          # 分数 (.1,.1,.2,.2)
-    blocks = [_block("text", [140, 100, 400, 400])]  # 交叠 x .14..2 = .06 宽,占 word .6
+def test_overlap_fallback_branch_when_center_outside_all_blocks():
+    # 归一化空间:word 中心 (0.15,0.15) 落在块外(块 x0=0.16 > 0.15),
+    # 但 word 面积 40% 被覆盖——这是 assign_word_to_block 的"跨块归属"关键分支。
+    import pytest
+
+    word = (0.1, 0.1, 0.2, 0.2)                    # 中心 (0.15,0.15)
+    blocks = [(0.16, 0.1, 0.4, 0.4)]              # 中心在块外;overlap_ratio=0.4
+    assert overlap_ratio(word, blocks[0]) == pytest.approx(0.4)
+    # 阈值 0.3 ≤ 0.4 → 走 overlap fallback 归属;阈值 0.5 > 0.4 → 弱交叠不猜 → None。
+    # 后者返回 None 反证中心确实在块外(若中心命中则两阈值都会返回 0)。
+    assert assign_word_to_block(word, blocks, overlap_threshold=0.3) == 0
+    assert assign_word_to_block(word, blocks, overlap_threshold=0.5) is None
+
+
+def test_overlap_fallback_assigns_end_to_end():
+    # 端到端:word 中心 (0.15,0.15) 落在块外,40% 覆盖率 >= 注入阈值 0.3 → 归属。
+    word = _sw("s", (100, 100, 200, 200))          # 分数 (.1,.1,.2,.2) 中心 (.15,.15)
+    blocks = [_block("text", [160, 100, 400, 400])]  # 分数 (.16,.1,.4,.4),不含中心
     geom = _geom(1000, 1000, 1000, 1000)
-    res = assign_source_words([word], blocks, geom, overlap_threshold=0.5)
+    res = assign_source_words([word], blocks, geom, overlap_threshold=0.3)
     assert res["assignments"].get(0) == [word]
 
 
