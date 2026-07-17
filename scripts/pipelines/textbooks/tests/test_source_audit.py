@@ -3,15 +3,22 @@ import json
 import fitz
 
 from scripts.pipelines.textbooks.source_audit import (
+    PageGeometry,
     SourceWord,
     _is_bad_control,
     _is_pua,
     _is_unassigned,
+    _valid_bbox,
+    assign_source_words,
+    assign_word_to_block,
     extract_numeric_tokens,
     extract_source_page,
     ngram_repetition_score,
+    normalize_bbox,
     normalize_prose_for_compare,
     normalize_prose_for_content,
+    overlap_ratio,
+    page_geometry,
     source_health,
 )
 
@@ -337,3 +344,294 @@ def test_ngram_repetition_score_high_for_loops_low_for_normal_prose():
     assert loop_score > 0.6
     assert normal_score < 0.3
     assert loop_score > normal_score
+
+
+# ===========================================================================
+# Task 4:PDF/OCR bbox 对齐(几何归一化 + word→block 归属)
+# ---------------------------------------------------------------------------
+# 几何测试用手工构造 words/blocks dict + 显式 PageGeometry(确定性、可读);
+# page_geometry() 本身用 fitz 内存 PDF(不 mock fitz)。
+# ===========================================================================
+
+
+def _sw(text, bbox, block_no=0, line_no=0, word_no=0):
+    return SourceWord(
+        text=text, bbox=bbox, block_no=block_no, line_no=line_no, word_no=word_no
+    )
+
+
+def _block(label, bbox, content=""):
+    return {"block_label": label, "block_content": content, "block_bbox": bbox}
+
+
+def _geom(pdf_w, pdf_h, ocr_w, ocr_h, rotation=0, unscorable=False):
+    return PageGeometry(
+        pdf_width=pdf_w,
+        pdf_height=pdf_h,
+        ocr_width=ocr_w,
+        ocr_height=ocr_h,
+        rotation=rotation,
+        unscorable=unscorable,
+    )
+
+
+# ---- normalize_bbox:绝对坐标 → [0,1] 分数,尺寸无关 -----------------------
+
+
+def test_normalize_bbox_scales_to_unit_fractions():
+    assert normalize_bbox((300, 400, 600, 800), 600, 800) == (0.5, 0.5, 1.0, 1.0)
+
+
+def test_normalize_bbox_rejects_nonpositive_dims():
+    import pytest
+
+    with pytest.raises(ValueError):
+        normalize_bbox((0, 0, 1, 1), 0, 100)
+    with pytest.raises(ValueError):
+        normalize_bbox((0, 0, 1, 1), 100, 0)
+
+
+# ---- overlap_ratio:交叠占 word 面积的比例 ---------------------------------
+
+
+def test_overlap_ratio_is_fraction_of_word_area():
+    # word 面积 0.01,交叠一半 → 0.5
+    assert overlap_ratio((0.0, 0.0, 0.1, 0.1), (0.0, 0.0, 0.05, 0.1)) == 0.5
+
+
+def test_overlap_ratio_zero_when_disjoint():
+    assert overlap_ratio((0.0, 0.0, 0.1, 0.1), (0.5, 0.5, 0.6, 0.6)) == 0.0
+
+
+# ---- 失败测试清单 1:不同 PDF point / OCR pixel 尺寸的缩放 ------------------
+
+
+def test_assign_scales_pdf_points_to_ocr_pixels():
+    # PDF 600x800 pt,word 中心 (300,400) → 分数 (0.5,0.5)
+    # OCR 1200x1600 px(2x),block 覆盖页面中心区域
+    word = _sw("mid", (290, 390, 310, 410))
+    blocks = [
+        _block("text", [0, 0, 100, 100]),          # 左上角,不含中心
+        _block("text", [300, 400, 900, 1200]),     # 覆盖中心 (0.5,0.5)
+    ]
+    geom = _geom(600, 800, 1200, 1600)
+    res = assign_source_words([word], blocks, geom, overlap_threshold=0.5)
+    assert res["assignments"].get(1) == [word]
+    assert 0 not in res["assignments"]
+    assert res["unassigned"] == []
+
+
+# ---- 失败测试清单 2:中心点命中 -------------------------------------------
+
+
+def test_center_point_hit_assigns():
+    word = _sw("c", (450, 450, 550, 550))          # 中心 (0.5,0.5)
+    blocks = [_block("text", [400, 400, 600, 600])]
+    geom = _geom(1000, 1000, 1000, 1000)
+    res = assign_source_words([word], blocks, geom, overlap_threshold=0.5)
+    assert res["assignments"].get(0) == [word]
+
+
+def test_assign_word_to_block_center_hit_primitive():
+    # 纯几何原语:归一化空间内,中心命中优先于交叠
+    word = (0.45, 0.45, 0.55, 0.55)          # 中心 (0.5,0.5)
+    blocks = [
+        (0.0, 0.0, 0.3, 0.3),                # 无关
+        (0.4, 0.4, 0.6, 0.6),                # 含中心
+    ]
+    assert assign_word_to_block(word, blocks, overlap_threshold=0.5) == 1
+
+
+# ---- 失败测试清单 3:多 block 命中选择更具体的小块 ------------------------
+
+
+def test_nested_blocks_pick_smaller_more_specific():
+    word = _sw("x", (490, 490, 510, 510))          # 中心 (0.5,0.5)
+    blocks = [
+        _block("text", [0, 0, 1000, 1000]),        # 整页大块,含中心
+        _block("display_formula", [300, 300, 700, 700]),  # 小块,含中心
+    ]
+    geom = _geom(1000, 1000, 1000, 1000)
+    res = assign_source_words([word], blocks, geom, overlap_threshold=0.5)
+    assert res["assignments"].get(1) == [word]
+    assert 0 not in res["assignments"]
+
+
+# ---- 失败测试清单 4:弱交叠保持 unassigned --------------------------------
+
+
+def test_weak_overlap_stays_unassigned():
+    # 中心不落任何块,仅 20% 面积交叠 < 阈值 0.5 → unassigned
+    word = _sw("w", (100, 100, 200, 200))          # 分数 (.1,.1,.2,.2) 中心 (.15,.15)
+    blocks = [_block("text", [180, 100, 400, 400])]  # 分数 (.18,.1,.4,.4)
+    geom = _geom(1000, 1000, 1000, 1000)
+    res = assign_source_words([word], blocks, geom, overlap_threshold=0.5)
+    assert res["assignments"] == {}
+    assert res["unassigned"] == [word]
+
+
+def test_strong_overlap_above_threshold_assigns():
+    # 中心不落块内,但 60% 面积交叠 >= 阈值 0.5 → 归属
+    word = _sw("s", (100, 100, 200, 200))          # 分数 (.1,.1,.2,.2)
+    blocks = [_block("text", [140, 100, 400, 400])]  # 交叠 x .14..2 = .06 宽,占 word .6
+    geom = _geom(1000, 1000, 1000, 1000)
+    res = assign_source_words([word], blocks, geom, overlap_threshold=0.5)
+    assert res["assignments"].get(0) == [word]
+
+
+# ---- 失败测试清单 5:缺 bbox、畸形 bbox、缺 width/height -------------------
+
+
+def test_valid_bbox_rejects_malformed():
+    assert _valid_bbox((0, 0, 10, 10)) is True
+    assert _valid_bbox((10, 0, 5, 10)) is False       # x1 < x0
+    assert _valid_bbox((0, 10, 10, 5)) is False       # y1 < y0
+    assert _valid_bbox((-1, 0, 10, 10)) is False      # 负值
+    assert _valid_bbox(("a", 0, 10, 10)) is False     # 非数值
+    assert _valid_bbox(None) is False                 # 缺 bbox
+    assert _valid_bbox((0, 0, 10)) is False           # 元数不足
+    assert _valid_bbox((0, 0, 0, 10)) is False        # 零宽退化
+    assert _valid_bbox((True, 0, 10, 10)) is False    # bool 不算数值坐标
+
+
+def test_malformed_and_missing_word_bboxes_go_unassigned():
+    good = _sw("good", (490, 490, 510, 510))
+    inverted = _sw("inv", (510, 490, 490, 510))       # x1<x0
+    negative = _sw("neg", (-5, 490, 510, 510))
+    nonnumeric = _sw("nan", ("x", 490, 510, 510))
+    missing = _sw("none", None)
+    blocks = [_block("text", [400, 400, 600, 600])]
+    geom = _geom(1000, 1000, 1000, 1000)
+    res = assign_source_words(
+        [good, inverted, negative, nonnumeric, missing], blocks, geom,
+        overlap_threshold=0.5,
+    )
+    assert res["assignments"].get(0) == [good]
+    assert set(res["unassigned"]) == {inverted, negative, nonnumeric, missing}
+
+
+def test_missing_ocr_dims_make_geometry_unscorable():
+    doc = fitz.open()
+    page = doc.new_page(width=600, height=800)
+    # OCR JSON 顶层缺 width/height
+    geom = page_geometry(page, {"parsing_res_list": []})
+    assert geom.unscorable is True
+    doc.close()
+
+
+def test_malformed_block_bbox_is_skipped_not_crashed():
+    word = _sw("x", (490, 490, 510, 510))
+    blocks = [
+        _block("text", [510, 400, 400, 600]),      # 畸形 block(x1<x0),跳过
+        _block("text", [400, 400, 600, 600]),      # 正常块含中心
+    ]
+    geom = _geom(1000, 1000, 1000, 1000)
+    res = assign_source_words([word], blocks, geom, overlap_threshold=0.5)
+    assert res["assignments"].get(1) == [word]
+    assert 0 not in res["assignments"]
+
+
+# ---- 失败测试清单 6:90/180/270 度旋转页 → geometry_unscorable -------------
+
+
+def test_rotated_pages_are_unscorable():
+    for angle in (90, 180, 270):
+        doc = fitz.open()
+        page = doc.new_page(width=600, height=800)
+        page.set_rotation(angle)
+        geom = page_geometry(page, {"width": 1200, "height": 1600})
+        assert geom.rotation == angle
+        assert geom.unscorable is True, f"rotation {angle} 必须 unscorable"
+        doc.close()
+
+
+def test_unrotated_normal_page_is_scorable():
+    doc = fitz.open()
+    page = doc.new_page(width=600, height=800)
+    geom = page_geometry(page, {"width": 1200, "height": 1600})
+    assert geom.rotation == 0
+    assert geom.unscorable is False
+    assert geom.pdf_width == 600
+    assert geom.pdf_height == 800
+    assert geom.ocr_width == 1200
+    assert geom.ocr_height == 1600
+    doc.close()
+
+
+def test_cropbox_anomaly_is_unscorable():
+    doc = fitz.open()
+    page = doc.new_page(width=600, height=800)
+    page.set_cropbox(fitz.Rect(50, 50, 400, 600))   # cropbox != mediabox
+    geom = page_geometry(page, {"width": 1200, "height": 1600})
+    assert geom.unscorable is True
+    doc.close()
+
+
+# ---- 失败测试清单 7:table/formula bbox 中的 words 不进 prose bucket --------
+
+
+def test_formula_block_words_keep_label_not_prose():
+    word = _sw("E=mc^2", (490, 490, 510, 510))       # 中心落在公式块
+    blocks = [
+        _block("text", [0, 0, 400, 400]),            # 正文块(prose),不含中心
+        _block("display_formula", [400, 400, 600, 600]),  # 公式块,含中心
+    ]
+    geom = _geom(1000, 1000, 1000, 1000)
+    res = assign_source_words([word], blocks, geom, overlap_threshold=0.5)
+    # 归属到公式块(index 1),不进正文块(index 0)
+    assert res["assignments"].get(1) == [word]
+    assert 0 not in res["assignments"]
+    # label 信息保留:下游据此得知这是公式块而非 prose
+    assert res["block_labels"][1] == "display_formula"
+    assert res["block_labels"][0] == "text"
+
+
+# ---- 失败测试清单 8:洗牌不变性(blocks 顺序变化归属结果不变) --------------
+
+
+def test_block_shuffle_invariance():
+    words = [
+        _sw("top", (490, 90, 510, 110)),       # 中心 (.5,.1) → 上块
+        _sw("mid", (490, 490, 510, 510)),      # 中心 (.5,.5) → 中块
+        _sw("bot", (490, 890, 510, 910)),      # 中心 (.5,.9) → 下块
+    ]
+    top = _block("text", [0, 0, 1000, 300], content="TOP")
+    mid = _block("display_formula", [0, 300, 1000, 700], content="MID")
+    bot = _block("table", [0, 700, 1000, 1000], content="BOT")
+    geom = _geom(1000, 1000, 1000, 1000)
+
+    def by_content(res, blocks):
+        out = {}
+        for bi, ws in res["assignments"].items():
+            out[blocks[bi]["block_content"]] = sorted(w.text for w in ws)
+        return out
+
+    order_a = [top, mid, bot]
+    order_b = [bot, top, mid]
+    res_a = assign_source_words(words, order_a, geom, overlap_threshold=0.5)
+    res_b = assign_source_words(words, order_b, geom, overlap_threshold=0.5)
+    assert by_content(res_a, order_a) == by_content(res_b, order_b) == {
+        "TOP": ["top"],
+        "MID": ["mid"],
+        "BOT": ["bot"],
+    }
+    # 每个 word 恰好归属一次(无重复归属)
+    for res in (res_a, res_b):
+        assigned = [w for ws in res["assignments"].values() for w in ws]
+        assert len(assigned) == 3
+        assert len(assigned) + len(res["unassigned"]) == len(words)
+
+
+# ---- 失败测试清单 9:geometry_unscorable 页向下游传播"禁止采信"信号 --------
+
+
+def test_unscorable_geometry_propagates_adoption_forbidden():
+    words = [_sw("a", (490, 490, 510, 510)), _sw("b", (10, 10, 20, 20))]
+    blocks = [_block("text", [0, 0, 1000, 1000])]
+    geom = _geom(1000, 1000, 1000, 1000, rotation=90, unscorable=True)
+    res = assign_source_words(words, blocks, geom, overlap_threshold=0.5)
+    assert res["geometry_unscorable"] is True
+    assert res["adoption_forbidden"] is True
+    # 不猜:unscorable 页不产出任何归属,全部 words 明确落 unassigned
+    assert res["assignments"] == {}
+    assert set(res["unassigned"]) == set(words)
