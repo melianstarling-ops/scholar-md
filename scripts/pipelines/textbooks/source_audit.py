@@ -1292,20 +1292,23 @@ def audit_document(
     layout: DocLayout,
     thresholds: AuditThresholds,
     decisions_by_page: dict[int, list] | None,
+    born_digital_mode: str | None = None,
 ) -> dict:
     """文档级审计聚合(计划 §7.1,Task 8)。只读 PDF + 已落盘 OCR res JSON,
     绝不调用 OCR 引擎、绝不改写 Markdown/任何产物——独立重跑安全。
 
     decisions_by_page:
-      - None:无 Task 9 记录的采信决策(ocr 模式或本模块独立重跑)——逐页现场
-        跑 assign_source_words + adopt_prose_blocks 得 dry-run 决策,仅用于
-        审计分派;报告标 adoption_source="dry_run",born_digital_mode="ocr"。
-        绝不据此改写任何产物。
+      - None:无 Task 9 记录的采信决策(ocr 模式或独立重跑)——逐页现场跑
+        assign_source_words + adopt_prose_blocks 得 dry-run 决策,仅用于审计
+        分派;报告标 adoption_source="dry_run"。绝不据此改写任何产物。
       - dict:{page(1-based) -> list[AdoptionDecision]},Task 9 hybrid 主链
-        实际落地的决策;报告标 adoption_source="recorded",
-        born_digital_mode="hybrid"。audit_document 本身不知道 Task 9 的路由
-        状态机,这是由"是否提供了已记录决策"这一本函数唯一可观察的信号决定的
-        诚实推断,不是猜测 Task 9 内部状态。
+        实际落地的决策;报告标 adoption_source="recorded"。
+
+    born_digital_mode:调用方显式传入的路由状态(Task 9 编排知道自己跑的是
+    defer/ocr/hybrid 中的哪一种,由它传真实值)。本函数不从 decisions_by_page
+    是否为 None 反推——两者是独立维度(例如 ocr 模式下审计也会跑 dry-run 推演
+    用于报告,但路由确实是"ocr"不是猜出来的)。缺省 None 时报告写
+    `"unknown"`,不编造一个看似合理但可能错误的路由标签。
     """
     # prose_adoption/table_audit 在模块顶层 import 本模块(source_audit),
     # 这里若在模块顶层反向 import 会成环——沿用 audit_prose 已有的局部 import
@@ -1343,7 +1346,6 @@ def audit_document(
         pages_out: list[dict] = []
         prose_blocks_total = 0
         adopted_total = 0
-        fallback_total = 0
         fallback_reason_counter: Counter = Counter()
         issue_counter: Counter = Counter()
         suspect_pages: list[int] = []
@@ -1373,7 +1375,6 @@ def audit_document(
             prose_metrics = (page_report.get("prose_audit") or {}).get("metrics") or {}
             prose_blocks_total += prose_metrics.get("prose_block_count", 0) or 0
             adopted_total += prose_metrics.get("adopted_block_count", 0) or 0
-            fallback_total += prose_metrics.get("fallback_block_count", 0) or 0
 
             for block_report in page_report.get("blocks", []):
                 if block_report["content_source"] == "ocr" and block_report["reasons"] not in (
@@ -1385,6 +1386,12 @@ def audit_document(
                 issue_counter[issue["code"]] += 1
     finally:
         doc.close()
+
+    # Minor 4(review 裁定):fallback_ocr 与 fallback_reasons 曾是两套独立
+    # 累加机制(一个读 audit_prose 的 fallback_block_count,一个自己数
+    # reasons),存在未来改动使两者失同步的结构性风险。改为单一来源:
+    # fallback_ocr 直接从 fallback_reasons 求和,不再另外维护一份计数。
+    fallback_total = sum(fallback_reason_counter.values())
 
     if scorable_count == 0:
         doc_status = "UNSCORABLE"
@@ -1403,7 +1410,7 @@ def audit_document(
         "schema_version": 2,
         "stem": layout.stem,
         "route": "B",
-        "born_digital_mode": "ocr" if dry_run else "hybrid",
+        "born_digital_mode": born_digital_mode if born_digital_mode is not None else "unknown",
         "pdf_fingerprint": pdf_fingerprint,
         "ocr_fingerprint": {"dpi": dpi, "page_count": page_count},
         "threshold_profile": THRESHOLD_PROFILE_UNCALIBRATED,
@@ -1441,27 +1448,34 @@ def main(argv: list[str] | None = None) -> int:
     """独立 source audit CLI(计划 Task 8):只读 PDF + 已落盘 OCR res JSON,
     产出文档级审计报告——不调用 OCR 引擎、不改写 Markdown。
 
+    本 CLI 永远不落盘改写任何产物(Markdown/assets/checkpoint 一律不碰);它
+    唯一的语义就是"审计预览"——没有 Task 9 编排传入的已记录采信决策可消费,
+    因此逐页现场跑 assign_source_words + adopt_prose_blocks 只做 dry-run 推演
+    用于审计分派,报告里 `adoption_source` 恒为 `"dry_run"`。这不是一个可选
+    模式,所以不提供 --dry-run-adoption 这类开关——没有"另一种模式"可以切换。
+    born_digital_mode 本 CLI 不知道自己跑在哪种路由下(那是 Task 9 convert.py
+    编排的状态),报告里写 `"unknown"`,不猜测。
+
     用法:
       python -X utf8 -m scripts.pipelines.textbooks.source_audit \
           --src <PDF> --out <DELIVERABLES> --work-dir <WORK> --stem <STEM>
     """
     ap = argparse.ArgumentParser(
-        description="路线 B source audit 独立 CLI(只读已落盘 OCR 结果,产出文档级审计报告)"
+        description=(
+            "路线 B source audit 独立 CLI——只读已落盘 OCR 结果,产出文档级审计报告;"
+            "永远不落盘改写任何产物,采信始终是 dry-run 预览(adoption_source=dry_run)"
+        )
     )
     ap.add_argument("--src", required=True, help="PDF 文件路径")
     ap.add_argument("--out", required=True, help="交付根(DocLayout.deliverables_root)")
     ap.add_argument("--work-dir", required=True, help="过程根(含已落盘的 OCR res JSON)")
     ap.add_argument("--stem", required=True, help="文档 stem")
-    ap.add_argument(
-        "--dry-run-adoption",
-        action="store_true",
-        help="仅报告采信推演结果,不落盘改写任何产物(本 CLI 独立重跑恒为此语义)",
-    )
     args = ap.parse_args(argv)
 
     layout = resolve_layout(args.stem, args.out, args.work_dir)
     report = audit_document(
-        args.src, layout, ROUTE_B_V1_UNCALIBRATED_THRESHOLDS, decisions_by_page=None
+        args.src, layout, ROUTE_B_V1_UNCALIBRATED_THRESHOLDS,
+        decisions_by_page=None, born_digital_mode=None,
     )
     write_audit_report(report, layout.source_audit_path)
 

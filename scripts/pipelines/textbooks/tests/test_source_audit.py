@@ -1308,6 +1308,57 @@ def test_audit_document_aggregates_adoption_across_pages(tmp_path):
     assert summary["status"] == "SUSPECT"
 
 
+# ---- 1b. Minor 4(review 裁定):fallback_ocr 与 fallback_reasons 单一来源,
+# 不变量恒成立 --------------------------------------------------------------
+
+
+def test_adoption_fallback_ocr_equals_sum_of_fallback_reasons(tmp_path):
+    layout = _doc_layout(tmp_path)
+    pdf_path = str(tmp_path / "book.pdf")
+    _make_pdf(
+        pdf_path,
+        [
+            [("hello world", (72, 72))],              # page 1:采信
+            [("alpha beta", (72, 72))],                 # page 2:回退(字符比不符)
+            [("value here today", (72, 72))],           # page 3:回退(公式痕迹)
+        ],
+    )
+    _write_manifest(layout.work_dir, page_count=3)
+    _write_page_res(
+        layout.work_dir, 1,
+        [{"block_label": "text", "block_content": "hello world",
+          "block_bbox": [0, 0, 600, 800]}],
+    )
+    _write_page_res(
+        layout.work_dir, 2,
+        [{"block_label": "text", "block_content": "zzzzzzzzzzzzzzzzzzzz",
+          "block_bbox": [0, 0, 600, 800]}],
+    )
+    _write_page_res(
+        layout.work_dir, 3,
+        # OCR 内容带 $...$ 数学痕迹 → 门 4(_has_math)拒绝,回退原因
+        # math_in_prose_block,与 page 2 的 char_ratio_out_of_range 是不同 reason
+        # code,用来证明多种 fallback reason 分布下 fallback_ocr 仍等于总和。
+        [{"block_label": "text", "block_content": "$value here today$",
+          "block_bbox": [0, 0, 600, 800]}],
+    )
+
+    report = audit_document(
+        pdf_path, layout, ROUTE_B_V1_UNCALIBRATED_THRESHOLDS, decisions_by_page=None
+    )
+    adoption = report["summary"]["adoption"]
+    # 两种不同 fallback 原因真实分布(不是凑巧都是 0 或都是同一个 code)。
+    assert adoption["fallback_reasons"] == {
+        "char_ratio_out_of_range": 1,
+        "math_in_prose_block": 1,
+    }
+    # 不变量:fallback_ocr 与 fallback_reasons 求和恒一致(单一来源推导,不是
+    # 两套独立计数偶然对上)。
+    assert adoption["fallback_ocr"] == sum(adoption["fallback_reasons"].values())
+    assert adoption["fallback_ocr"] == 2
+    assert adoption["adopted"] == 1
+
+
 # ---- 2. 页缺 res JSON(非 manifest 失败页) → page_incomplete + UNSCORABLE ---
 
 
@@ -1367,6 +1418,36 @@ def test_audit_document_distinguishes_failed_page_from_incomplete_page(tmp_path)
     assert codes3 == ["page_incomplete"]
     assert codes2 != codes3
     assert "process-killed" in page2["issues"][0]["detail"]
+
+
+# ---- 3b. Minor 3(review 裁定):issue_counts 真正跨页分布聚合,断言手写期望
+# 值(不得从 report 自己的 pages 反算,消除循环断言) -------------------------
+
+
+def test_issue_counts_aggregates_same_code_across_multiple_pages(tmp_path):
+    layout = _doc_layout(tmp_path)
+    pdf_path = str(tmp_path / "book.pdf")
+    _make_pdf(pdf_path, [[], [], []])  # 3 页空白 PDF,内容不重要——3 页全部缺
+    _write_manifest(
+        layout.work_dir, page_count=3,
+        failed_pages=[{"page": 3, "error": "boom", "kind": "process-killed"}],
+    )
+    # page 1、page 2:均缺 res JSON 且都未被 manifest 记为失败 → 各产生恰好
+    # 一条 page_incomplete(同一 code 跨两页)。
+    # page 3:manifest 记为失败 → 恰好一条 page_failed(不同 code)。
+    # 不写任何 page res JSON。
+
+    report = audit_document(
+        pdf_path, layout, ROUTE_B_V1_UNCALIBRATED_THRESHOLDS, decisions_by_page=None
+    )
+
+    # 手写期望值——不是 `{code: sum(...) for page in report["pages"] ...}` 这种
+    # 从 report 自己反算的循环断言;这里的 2/1 是由上面的 fixture 构造直接决定
+    # 的独立事实。
+    assert report["summary"]["issue_counts"] == {
+        "page_incomplete": 2,
+        "page_failed": 1,
+    }
 
 
 # ---- 4. 合法空页(parsing_res_list=[])→ OK,不计入 suspect --------------------
@@ -1498,7 +1579,6 @@ def test_audit_document_decisions_by_page_none_is_dry_run(tmp_path):
         pdf_path, layout, ROUTE_B_V1_UNCALIBRATED_THRESHOLDS, decisions_by_page=None
     )
     assert report["adoption_source"] == "dry_run"
-    assert report["born_digital_mode"] == "ocr"
 
 
 def test_audit_document_decisions_by_page_provided_is_recorded(tmp_path):
@@ -1525,10 +1605,68 @@ def test_audit_document_decisions_by_page_provided_is_recorded(tmp_path):
         decisions_by_page={1: recorded},
     )
     assert report["adoption_source"] == "recorded"
-    assert report["born_digital_mode"] == "hybrid"
     block = report["pages"][0]["blocks"][0]
     assert block["content_source"] == "source_text"
     assert block["reasons"] == []
+
+
+# ---- 7b. born_digital_mode:显式参数透传,不从 decisions_by_page 反推 --------
+# (review 裁定 Important 1:决不允许从 decisions_by_page 是否为 None 推断路由
+# 模式——两者是独立维度。调用方(Task 9 编排/独立 CLI)必须显式传入。)
+
+
+def test_audit_document_born_digital_mode_defaults_to_unknown_when_not_given(tmp_path):
+    layout = _doc_layout(tmp_path)
+    pdf_path = str(tmp_path / "book.pdf")
+    _make_pdf(pdf_path, [[("hello world", (72, 72))]])
+    _write_manifest(layout.work_dir, page_count=1)
+    _write_page_res(
+        layout.work_dir, 1,
+        [{"block_label": "text", "block_content": "hello world",
+          "block_bbox": [0, 0, 600, 800]}],
+    )
+
+    report = audit_document(
+        pdf_path, layout, ROUTE_B_V1_UNCALIBRATED_THRESHOLDS, decisions_by_page=None
+    )
+    assert report["born_digital_mode"] == "unknown"
+
+
+def test_audit_document_born_digital_mode_is_explicit_passthrough_not_inferred(tmp_path):
+    layout = _doc_layout(tmp_path)
+    pdf_path = str(tmp_path / "book.pdf")
+    _make_pdf(pdf_path, [[("hello world", (72, 72))]])
+    _write_manifest(layout.work_dir, page_count=1)
+    _write_page_res(
+        layout.work_dir, 1,
+        [{"block_label": "text", "block_content": "hello world",
+          "block_bbox": [0, 0, 600, 800]}],
+    )
+
+    # 关键反例:decisions_by_page=None(通常对应 dry_run)却显式传
+    # born_digital_mode="hybrid"——如果实现还在偷偷从 decisions_by_page 反推,
+    # 这里就会被打脸成 "ocr" 而不是调用方给的 "hybrid"。
+    report = audit_document(
+        pdf_path, layout, ROUTE_B_V1_UNCALIBRATED_THRESHOLDS,
+        decisions_by_page=None, born_digital_mode="hybrid",
+    )
+    assert report["born_digital_mode"] == "hybrid"
+    assert report["adoption_source"] == "dry_run"  # 两个维度互不影响
+
+    # 反过来:decisions_by_page 提供了(通常对应 recorded)也不代表 born_digital_mode
+    # 会被覆盖成 "hybrid"——同样必须原样透传调用方给的值。
+    recorded = [
+        AdoptionDecision(
+            block_id=0, content_source="source_text", reasons=[],
+            block_ned=0.0, adopted_text="hello world",
+        )
+    ]
+    report2 = audit_document(
+        pdf_path, layout, ROUTE_B_V1_UNCALIBRATED_THRESHOLDS,
+        decisions_by_page={1: recorded}, born_digital_mode="ocr",
+    )
+    assert report2["born_digital_mode"] == "ocr"
+    assert report2["adoption_source"] == "recorded"
 
 
 def test_audit_document_recorded_missing_page_key_marks_no_decision(tmp_path):
@@ -1623,3 +1761,19 @@ def test_cli_full_args_produces_report_file(tmp_path):
     assert report["schema_version"] == 2
     assert report["stem"] == "Book"
     assert report["adoption_source"] == "dry_run"
+    # CLI 不知道自己跑在哪种路由下(那是 Task 9 编排的状态),born_digital_mode
+    # 必须诚实写 unknown,不得编造。
+    assert report["born_digital_mode"] == "unknown"
+
+
+def test_cli_rejects_dry_run_adoption_flag_it_no_longer_has(tmp_path):
+    # review 裁定 Important 2:--dry-run-adoption 是死 flag(本 CLI 唯一语义
+    # 就是 dry-run,没有另一种模式可切换)——已删除。argparse 对未知参数报
+    # SystemExit(2),证明这个开关真的不存在了,不是文档说了但代码没删。
+    import pytest
+    with pytest.raises(SystemExit):
+        source_audit_main([
+            "--src", "x.pdf", "--out", str(tmp_path / "out"),
+            "--work-dir", str(tmp_path / "work"), "--stem", "Book",
+            "--dry-run-adoption",
+        ])
