@@ -34,9 +34,10 @@ LABEL_COLORS: dict[str, str] = {
 _UNKNOWN_COLOR = "#ec4899"          # 品红:没见过的 label,醒目提示
 _NOISE_LABELS = {"header", "number", "header_image"}
 
-# source audit(schema v2)prose_audit.samples 展示上限——只给"有限样例"参考,
-# 绝不把整页源文本嵌进 debug 视图(计划 Task 12 checklist)。上限可注入(测试/
-# 调用方均可覆盖),不写死在渲染路径里。
+# missing_samples/added_samples(source_audit.audit_prose,commit 22d53eb)展示
+# 上限——上游 AuditThresholds.maximum_samples_per_block 已把生产报告本身截到
+# 少量(默认 3 条/≤80 字符),这里是 debug 视图侧再加一道防御性上限(报告若
+# 损坏/未来放宽上游上限,也不会把大段文本糊进页面)。上限可注入,不写死。
 DEFAULT_AUDIT_SAMPLES_LIMIT = 20
 
 
@@ -44,15 +45,41 @@ def label_color(label: str) -> str:
     return LABEL_COLORS.get(label, _UNKNOWN_COLOR)
 
 
+def _block_metrics_entry(block_metrics: dict, block_id) -> dict:
+    """按 block_id 查 prose_audit.block_metrics 一条记录。
+
+    block_metrics 在内存里(audit_prose 直接返回值)以 int 为键;但报告落盘
+    经 json.dump/json.load 一轮后,JSON object 键一律变字符串——两种来源都要
+    认得,查不到就是干净块(没有 missing/added 样本,不是异常)。
+    """
+    if not isinstance(block_metrics, dict):
+        return {}
+    entry = block_metrics.get(block_id)
+    if entry is None:
+        entry = block_metrics.get(str(block_id))
+    return entry if isinstance(entry, dict) else {}
+
+
+def _limited_samples(entry: dict, key: str, limit: int) -> tuple[list[str], bool]:
+    """entry[key](missing_samples/added_samples)截断到 limit 条,返回
+    (截断后列表, 是否被截断)。非 list/非字符串条目一律丢弃,不猜测。"""
+    raw = entry.get(key)
+    items = [s for s in raw if isinstance(s, str)] if isinstance(raw, list) else []
+    return items[:limit], len(items) > limit
+
+
 def build_audit_payload(audit_page: dict | None,
                         samples_limit: int = DEFAULT_AUDIT_SAMPLES_LIMIT) -> dict | None:
     """把一页 source_audit 报告(schema v2 page_report)加工成 debug 视图只读展示
-    所需字段:页级 status/issues、块级 provenance 列表、有限截断的 prose_audit
-    samples、table_audit(其 structure/content issue 已随 page-level issues 一起
-    带 block_id,足以定位)。
+    所需字段:页级 status/issues、块级 provenance(含 missing_samples/
+    added_samples——真实来自 prose_audit.block_metrics[block_id],commit
+    22d53eb 补齐;无对应 issue 的块该报告本就不产字段,payload 侧统一降级为
+    空列表,不是 None)、table_audit(其 structure/content issue 已随
+    page-level issues 一起带 block_id,足以定位)。
 
     只展示,不重算:块的 "adopted_text"(若采信会是什么文本)只在报告本身携带
-    该字段时透传,报告没有就是 None——不现场跑 AdoptionDecision 推演。
+    该字段时透传,报告没有就是 None——不现场跑 AdoptionDecision 推演(截至
+    本次实现,上游报告尚不产出该字段,回退块面板据此只显示原因码)。
 
     报告缺失(None)/结构不是 dict → 返回 None,调用方/前端据此显式渲染"无审计
     数据",不猜测、不抛异常。报告是 dict 但字段残缺(损坏/旧版)时,残缺字段
@@ -61,12 +88,19 @@ def build_audit_payload(audit_page: dict | None,
     if not isinstance(audit_page, dict):
         return None
 
+    prose_audit = audit_page.get("prose_audit")
+    block_metrics = prose_audit.get("block_metrics") if isinstance(prose_audit, dict) else None
+    block_metrics = block_metrics if isinstance(block_metrics, dict) else {}
+
     blocks_out: list[dict] = []
     raw_blocks = audit_page.get("blocks")
     if isinstance(raw_blocks, list):
         for b in raw_blocks:
             if not isinstance(b, dict):
                 continue
+            entry = _block_metrics_entry(block_metrics, b.get("block_id"))
+            missing_samples, missing_trunc = _limited_samples(entry, "missing_samples", samples_limit)
+            added_samples, added_trunc = _limited_samples(entry, "added_samples", samples_limit)
             blocks_out.append({
                 "block_id": b.get("block_id"),
                 "label": b.get("label"),
@@ -74,11 +108,11 @@ def build_audit_payload(audit_page: dict | None,
                 "reasons": b.get("reasons") or [],
                 "block_ned": b.get("block_ned"),
                 "adopted_text": b.get("adopted_text"),
+                "missing_samples": missing_samples,
+                "missing_samples_truncated": missing_trunc,
+                "added_samples": added_samples,
+                "added_samples_truncated": added_trunc,
             })
-
-    prose_audit = audit_page.get("prose_audit")
-    raw_samples = prose_audit.get("samples") if isinstance(prose_audit, dict) else None
-    samples = raw_samples if isinstance(raw_samples, list) else []
 
     raw_issues = audit_page.get("issues")
     raw_table_audit = audit_page.get("table_audit")
@@ -87,8 +121,6 @@ def build_audit_payload(audit_page: dict | None,
         "status": audit_page.get("status"),
         "issues": raw_issues if isinstance(raw_issues, list) else [],
         "blocks": blocks_out,
-        "samples": samples[:samples_limit],
-        "samples_truncated": len(samples) > samples_limit,
         "table_audit": raw_table_audit if isinstance(raw_table_audit, list) else [],
     }
 

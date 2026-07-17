@@ -167,6 +167,11 @@ def test_payload_carries_audit_status_and_block_provenance():
     assert b["provenance"]["content_source"] == "ocr"
     assert b["provenance"]["reasons"] == ["adoption_disagreement"]
     assert b["provenance"]["block_ned"] == 0.25
+    # 干净的 prose_audit.block_metrics(此例为空)→ missing/added_samples 降级为
+    # 空列表(不是 None、不抛异常),与 source_audit.py 的"无对应 issue 不产字段"
+    # 语义(payload 侧统一成空列表而非缺字段,便于前端无脑判空)对齐。
+    assert b["provenance"]["missing_samples"] == []
+    assert b["provenance"]["added_samples"] == []
 
 
 def test_payload_audit_absent_when_report_missing_or_malformed():
@@ -186,20 +191,73 @@ def test_payload_audit_absent_when_report_missing_or_malformed():
     assert p2["blocks"][0]["provenance"] is None
 
 
-def test_payload_prose_audit_samples_truncated_to_limit():
-    # prose_audit.samples 有限展示,不嵌整页源文本——上限可注入,超限即截断并标记。
+def test_payload_block_missing_and_added_samples_truncated_to_limit():
+    # 真实形状(source_audit.py commit 22d53eb):missing_samples/added_samples
+    # 挂在 prose_audit.block_metrics[block_id] 下(每条 <=80 字符的定位样本),
+    # 不是页级 "samples" 字段——payload 侧按块归属并可再加一道防御性截断上限。
     res = {"width": 100, "height": 100, "parsing_res_list": []}
-    samples = [{"kind": "missing", "text": f"s{i}"} for i in range(50)]
-    audit_page = {"page": 1, "status": "SUSPECT", "issues": [], "blocks": [],
-                  "prose_audit": {"status": "SUSPECT", "samples": samples}}
+    missing = [f"missing-{i}" for i in range(50)]
+    added = [f"added-{i}" for i in range(50)]
+    audit_page = {
+        "page": 1, "status": "SUSPECT", "issues": [],
+        "blocks": [{"block_id": 7, "label": "text", "content_source": "ocr",
+                    "reasons": ["adoption_disagreement"], "block_ned": 0.4}],
+        "prose_audit": {
+            "status": "SUSPECT",
+            "block_metrics": {7: {"content_source": "ocr", "block_ned": 0.4,
+                                   "missing_samples": missing, "added_samples": added}},
+        },
+    }
 
     p = build_page_payload(res, page=1, stem="s", audit=audit_page, samples_limit=5)
-    assert p["audit"]["samples"] == samples[:5]
-    assert p["audit"]["samples_truncated"] is True
+    prov = p["audit"]["blocks"][0]
+    assert prov["missing_samples"] == missing[:5]
+    assert prov["missing_samples_truncated"] is True
+    assert prov["added_samples"] == added[:5]
+    assert prov["added_samples_truncated"] is True
 
     p2 = build_page_payload(res, page=1, stem="s", audit=audit_page, samples_limit=100)
-    assert len(p2["audit"]["samples"]) == 50
-    assert p2["audit"]["samples_truncated"] is False
+    prov2 = p2["audit"]["blocks"][0]
+    assert len(prov2["missing_samples"]) == 50
+    assert prov2["missing_samples_truncated"] is False
+    assert len(prov2["added_samples"]) == 50
+    assert prov2["added_samples_truncated"] is False
+
+
+def test_payload_block_metrics_lookup_works_with_string_keys_after_json_roundtrip():
+    # 报告落盘经 json.dump/json.load 一轮后,block_metrics 的 int 键会变成
+    # 字符串键(JSON object 键只能是字符串)——payload 必须两种键都认得,不能
+    # 只在内存态(int 键)下工作。
+    res = {"width": 100, "height": 100, "parsing_res_list": []}
+    audit_page_in_memory = {
+        "page": 1, "status": "SUSPECT", "issues": [],
+        "blocks": [{"block_id": 3, "label": "text", "content_source": "ocr",
+                    "reasons": ["adoption_disagreement"], "block_ned": 0.4}],
+        "prose_audit": {"status": "SUSPECT",
+                         "block_metrics": {3: {"missing_samples": ["gap one"]}}},
+    }
+    audit_page_after_roundtrip = json.loads(json.dumps(audit_page_in_memory))
+
+    p = build_page_payload(res, page=1, stem="s", audit=audit_page_after_roundtrip)
+    assert p["audit"]["blocks"][0]["missing_samples"] == ["gap one"]
+
+
+def test_payload_only_fires_missing_or_added_samples_that_the_report_carries():
+    # 干净块(无 missing_prose/prose_mismatch/ocr_addition issue)本就不产
+    # missing_samples/added_samples 字段——payload 侧必须降级为空列表,不得
+    # 编造样本、也不能因为字段缺失而抛异常。
+    res = {"width": 100, "height": 100, "parsing_res_list": []}
+    audit_page = {
+        "page": 1, "status": "OK", "issues": [],
+        "blocks": [{"block_id": 1, "label": "text", "content_source": "source_text",
+                    "reasons": [], "block_ned": 0.01}],
+        "prose_audit": {"status": "OK",
+                         "block_metrics": {1: {"content_source": "source_text", "block_ned": 0.01}}},
+    }
+    p = build_page_payload(res, page=1, stem="s", audit=audit_page)
+    prov = p["audit"]["blocks"][0]
+    assert prov["missing_samples"] == []
+    assert prov["added_samples"] == []
 
 
 def test_payload_attaches_formula_candidate_to_block_and_frag():

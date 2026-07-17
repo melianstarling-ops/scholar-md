@@ -467,7 +467,10 @@ def test_build_payloads_attaches_page_audit_from_report(tmp_path):
         {"page": 1, "status": "OK", "issues": [],
          "blocks": [{"block_id": 5, "label": "text", "content_source": "source_text",
                      "reasons": [], "block_ned": 0.01}],
-         "prose_audit": {"status": "OK", "samples": []}, "table_audit": []},
+         "prose_audit": {"status": "OK",
+                         "block_metrics": {"5": {"content_source": "source_text",
+                                                  "block_ned": 0.01}}},
+         "table_audit": []},
     ]}
     with open(layout.source_audit_path, "w", encoding="utf-8") as f:
         json.dump(report, f)
@@ -481,8 +484,10 @@ def test_build_payloads_attaches_page_audit_from_report(tmp_path):
 
 
 def test_app_js_problem_pages_filter_includes_audit_suspect_and_adoption_disagreement(tmp_path):
-    # problem-pages 过滤器必须纳入 source/table audit suspect 页与含
-    # adoption_disagreement 原因码的块(即便页级 status 未必是 SUSPECT)。
+    # problem-pages 过滤器必须纳入:status SUSPECT、status UNSCORABLE(裁决:
+    # "审计判不了"的页恰恰是操作者必须人工看的页,排除在外会被静默跳过)、以及
+    # 含 adoption_disagreement 原因码的块(即便页级 status 是 OK)。纯 OK 页
+    # 且无 adoption_disagreement、以及无 audit 数据的页,都不应被纳入。
     app_js = open(APP_JS, encoding="utf-8").read()
     match = re.search(r"function pageAuditSuspect\(p\) \{\n(?P<body>.*?)\n  \}", app_js, re.S)
     assert match, "pageAuditSuspect() 未在 app.js 中找到"
@@ -499,6 +504,7 @@ def test_app_js_problem_pages_filter_includes_audit_suspect_and_adoption_disagre
         "}\n"
         "const cases = [\n"
         "  { audit: { status: 'SUSPECT', blocks: [] } },\n"
+        "  { audit: { status: 'UNSCORABLE', blocks: [] } },\n"
         "  { audit: { status: 'OK', blocks: [] } },\n"
         "  { audit: { status: 'OK', blocks: [{ block_id: 1, reasons: ['adoption_disagreement'] }] } },\n"
         "  {},\n"
@@ -509,7 +515,7 @@ def test_app_js_problem_pages_filter_includes_audit_suspect_and_adoption_disagre
     proc = subprocess.run([node, str(probe)], capture_output=True, text=True,
                           encoding="utf-8", errors="replace", timeout=10)
     assert proc.returncode == 0, proc.stderr
-    assert json.loads(proc.stdout.strip()) == [True, False, True, False]
+    assert json.loads(proc.stdout.strip()) == [True, True, False, True, False]
 
 
 def test_app_js_escapes_audit_issue_detail_via_esc(tmp_path):
@@ -562,11 +568,17 @@ def test_render_html_defines_provenance_badges_and_distinct_unscorable_style():
     assert "var(--bad)" not in m.group(1)
 
 
-def test_app_js_renders_limited_prose_audit_samples():
-    # prose_audit.samples(missing/added/numeric,payload 侧已截断)必须真的渲染出来,
-    # 不能只在 payload 里携带却在 UI 上哑掉。
+def test_app_js_renders_limited_missing_and_added_samples_per_block():
+    # missing_samples/added_samples(真实来自 prose_audit.block_metrics,commit
+    # 22d53eb,payload 侧已按块归属并截断)必须真的渲染出来,不能只在 payload
+    # 里携带却在 UI 上哑掉;渲染入口必须挂在块级 provenance 徽标(renderProvBadge)
+    # 上,而不是凭空发明的页级字段。
     app_js = open(APP_JS, encoding="utf-8").read()
-    assert "function renderAuditSamples" in app_js
-    assert "audit.samples" in app_js
-    assert "renderAuditSamples(d.audit)" in app_js
-    assert "samples_truncated" in app_js
+    assert "function renderSampleList" in app_js
+    assert "p.missing_samples" in app_js
+    assert "p.added_samples" in app_js
+    assert "missing_samples_truncated" in app_js
+    assert "added_samples_truncated" in app_js
+    # 必须真的从 renderProvBadge 调用,不能定义了却没接进渲染路径
+    assert re.search(r"renderSampleList\([^)]*missing_samples", app_js)
+    assert re.search(r"renderSampleList\([^)]*added_samples", app_js)

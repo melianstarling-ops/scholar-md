@@ -247,15 +247,18 @@
 
   // ---------- 问题页(离屏渲染判红,与 headless 扫描器同源;叠加 payload 里的疑似/待审) ----------
   const nPendingReview = (p) => (p.blocks || []).filter((b) => b.correction && b.correction.status === "pending").length;
-  // source audit(schema v2)疑点页判定:页级 status=SUSPECT(source/table audit 任一
-  // 有 issue 都会体现在这里),或者哪怕页面整体 status 没到 SUSPECT,只要有块的
-  // provenance.reasons 命中 adoption_disagreement(NED 临界、采信门与审计门阈值不同
-  // 导致的边界情形)也纳入——两条件独立判定,任一为真即算疑点页。纯函数,不摸 DOM,
-  // 便于离线单测(见 test_debug_view.py)。
+  // source audit(schema v2)疑点页判定:页级 status ∈ {SUSPECT, UNSCORABLE}——
+  // UNSCORABLE 是"审计判不了",不是"没问题",恰恰是操作者必须人工看一眼的页,
+  // 排除在外会让这些页被静默跳过(裁决见 Task 12 补修)。或者哪怕页面整体
+  // status 是 OK,只要有块的 provenance.reasons 命中 adoption_disagreement
+  // (NED 临界、采信门与审计门阈值不同导致的边界情形)也纳入——三条件独立判定,
+  // 任一为真即算疑点页。纯函数,不摸 DOM,便于离线单测(见 test_debug_view.py)。
+  // UNSCORABLE 页仍用独立的 audit-unscorable 徽标(见 render()),纳入过滤器
+  // 只影响"要不要优先看这一页",不改变其视觉区分。
   function pageAuditSuspect(p) {
     const a = p.audit;
     if (!a) return false;
-    if (a.status === "SUSPECT") return true;
+    if (a.status === "SUSPECT" || a.status === "UNSCORABLE") return true;
     return (a.blocks || []).some((b) => (b.reasons || []).includes("adoption_disagreement"));
   }
   function computeProblems() {
@@ -646,7 +649,7 @@
 
     const out = $("mdOut");
     const frags = d.frags && d.frags.length ? d.frags : [{ bids: [], md: d.md || "" }];
-    out.innerHTML = renderAuditSamples(d.audit) + frags.map((f, fi) => {
+    out.innerHTML = frags.map((f, fi) => {
       const bids = (f.bids || []).filter((x) => x != null).join(" ");
       const sus = f.suspicions && f.suspicions.length;
       const cand = f.candidate;
@@ -670,7 +673,10 @@
   // ---------- provenance 徽标(块级采信来源,只读展示,不提供任何改写入口) ----------
   // source_text=已采信(绿,信得过);ocr=回退(中性灰,不代表"错",只代表"没能采信")。
   // 回退块若报告带 adopted_text(Task 9 记录的采信文本,而非现场推演),给一个可展开
-  // 的 <details> 展示"若采信会是什么文本"——报告不含该字段时只显示原因码,不现场重算。
+  // 的 <details> 展示"若采信会是什么文本"——报告不含该字段时只显示原因码,不现场重算
+  // (截至本次实现,上游报告尚未产出 adopted_text,这条分支恒不触发,只是接口预留)。
+  // missing_samples/added_samples 真实来自 prose_audit.block_metrics(source_audit.py
+  // commit 22d53eb):payload 侧已按块归属并截断,这里只展示,不重新 diff。
   function renderProvBadge(p) {
     const isSource = p.content_source === "source_text";
     const cls = isSource ? "prov-source" : "prov-ocr";
@@ -680,23 +686,23 @@
     const label = isSource ? "采信: source_text" : "回退: OCR";
     const badge = `<div class="prov-badge ${cls}">${esc(label)}${reasons ? " · " + esc(reasons) : ""}${nedTxt}</div>`;
     const diff = (!isSource && p.adopted_text) ? renderAdoptedDiff(p.adopted_text) : "";
-    return badge + diff;
+    const samples = isSource ? "" :
+      renderSampleList("疑似漏识别 missing", p.missing_samples, p.missing_samples_truncated) +
+      renderSampleList("疑似多出 added", p.added_samples, p.added_samples_truncated);
+    return badge + diff + samples;
   }
   function renderAdoptedDiff(adoptedText) {
     return `<details class="prov-diff"><summary>若采信会是什么文本(不代替人工判定)</summary>` +
       `<div class="prov-diff-text">${esc(adoptedText)}</div></details>`;
   }
-
-  // ---------- prose audit 有限样例(missing/added/numeric,来自报告 prose_audit.samples,
-  // 已在 payload 侧截断到上限)——只展示有限条目,绝不嵌整页源文本;每条经 esc()。 ----------
-  function renderAuditSamples(audit) {
-    if (!audit || !(audit.samples || []).length) return "";
-    const rows = audit.samples.map((s) =>
-      `<li>${esc(typeof s === "string" ? s : JSON.stringify(s))}</li>`).join("");
-    const trunc = audit.samples_truncated
-      ? `<div class="audit-samples-trunc">已截断,仅展示前 ${audit.samples.length} 条(报告体量更大)</div>` : "";
-    return `<details class="audit-samples"><summary>source audit 样例(missing/added/numeric,` +
-      `共 ${audit.samples.length} 条)</summary><ul>${rows}</ul>${trunc}</details>`;
+  // 有限定位样例(missing/added,来自 prose_audit.block_metrics,payload 侧已截断)——
+  // 只展示有限条目,绝不嵌整页/整块源文本;每条经 esc()。
+  function renderSampleList(title, samples, truncated) {
+    if (!samples || !samples.length) return "";
+    const rows = samples.map((s) => `<li>${esc(s)}</li>`).join("");
+    const trunc = truncated ? `<div class="audit-samples-trunc">已截断,仅展示前 ${samples.length} 条</div>` : "";
+    return `<details class="audit-samples"><summary>${esc(title)}(${samples.length} 条)</summary>` +
+      `<ul>${rows}</ul>${trunc}</details>`;
   }
 
   // ---------- 候选公式审核卡片:默认 needs_repair,只勾 OCR 正确 ----------
