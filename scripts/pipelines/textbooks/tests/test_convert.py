@@ -590,3 +590,289 @@ def test_reassemble_md_returns_none_when_no_manifest(tmp_path):
     os.makedirs(layout.doc_deliverable_dir, exist_ok=True)   # 无 _work / 无 manifest
     assert cv.reassemble_md(layout, pdf_path=None, dpi=100) is None
     assert not os.path.exists(layout.md_path)
+
+
+# ===========================================================================
+# Task 9:路线 B 编排(defer/ocr/hybrid)、采信、审计落盘、断点恢复、marker 清理
+# ---------------------------------------------------------------------------
+# 引擎全部 stub,零 GPU。采信测试用"源正确/OCR 一字之差(brown vs browm)"的
+# 构造,采信生效时 md 含 brown、不含 browm;回退时反之——干净可判。
+# ===========================================================================
+
+_SRC_SENTENCE = "the quick brown fox jumps over the lazy dog"
+
+
+def _prose_text(n=4):
+    return "\n".join([_SRC_SENTENCE] * n) + "\n"
+
+
+def _ocr_prose_text(n=4):
+    return "\n".join([_SRC_SENTENCE.replace("brown", "browm")] * n) + "\n"
+
+
+def _make_prose_pdf(tmp_path, n_pages):
+    """干净文本层 PDF,词落在页内文本框(triage 判 B;采信几何可标定)。"""
+    doc = fitz.open()
+    for _ in range(n_pages):
+        page = doc.new_page()
+        page.insert_textbox(fitz.Rect(60, 60, 550, 750), _prose_text(), fontsize=11)
+    p = tmp_path / "born.pdf"
+    doc.save(str(p))
+    return str(p)
+
+
+def _adopt_ocr_block(page):
+    # 整页覆盖的正文块:width/height 与 block_bbox 同为 1000,归一化后覆盖全页,
+    # 全部源 words 归属本块;block_content 是 OCR 的"一字之差"文本。
+    return [{"block_order": 0, "block_label": "text", "block_id": 0,
+             "block_content": _ocr_prose_text(), "block_bbox": [0, 0, 1000, 1000]}]
+
+
+def _adopt_res_payload(page):
+    return {"parsing_res_list": _adopt_ocr_block(page), "width": 1000, "height": 1000}
+
+
+def _stub_engine_adopt(monkeypatch, calls=None):
+    def fake_predict(png_path, work_dir):
+        stem = os.path.splitext(os.path.basename(png_path))[0]
+        page = int(stem.split("_")[1])
+        if calls is not None:
+            calls.append(page)
+        blocks = _adopt_ocr_block(page)
+        os.makedirs(work_dir, exist_ok=True)
+        with open(os.path.join(work_dir, f"{stem}_res.json"), "w", encoding="utf-8") as f:
+            json.dump(_adopt_res_payload(page), f)
+        return blocks
+    monkeypatch.setattr(cv, "predict_page", fake_predict)
+
+
+def _write_adopt_checkpoint(work_dir, page):
+    os.makedirs(work_dir, exist_ok=True)
+    with open(cp.page_res_path(work_dir, page), "w", encoding="utf-8") as f:
+        json.dump(_adopt_res_payload(page), f)
+
+
+def _inject_thresholds(monkeypatch):
+    from scripts.pipelines.textbooks.prose_adoption import AdoptionThresholds
+    from scripts.pipelines.textbooks.source_audit import AuditThresholds
+    monkeypatch.setattr(cv, "ROUTE_B_ADOPTION_THRESHOLDS", AdoptionThresholds(
+        adoption_min_char_ratio=0.5, adoption_max_char_ratio=2.0, adoption_max_ned=0.3))
+    monkeypatch.setattr(cv, "ROUTE_B_AUDIT_THRESHOLDS", AuditThresholds(
+        minimum_reliable_chars=1, maximum_bad_char_ratio=0.5, maximum_block_ned=0.5,
+        minimum_char_recall=0.5, minimum_token_recall=0.5, minimum_numeric_token_recall=0.5,
+        maximum_addition_ratio=0.5, maximum_repetition_score=0.9,
+        minimum_single_column_sequence_ratio=0.3))
+
+
+def test_route_b_defer_keeps_legacy_behavior(tmp_path, monkeypatch):
+    pdf = _make_prose_pdf(tmp_path, 2)
+    calls = []
+    _stub_engine_adopt(monkeypatch, calls)
+    out = str(tmp_path / "out")
+    res = cv.convert_pdf(pdf, out, dpi=100, born_digital_mode="defer")
+    assert res["route"] == "B"
+    assert res["md_path"] is None                       # 登记不转(逐字不变)
+    assert calls == []                                  # 未跑 OCR
+    marker = os.path.join(out, "_deferred_born_digital", "born.txt")
+    assert os.path.exists(marker)                       # 登记标记已建
+    layout = resolve_layout("born", out)
+    assert not os.path.exists(layout.source_audit_path)  # defer 不产审计
+
+
+def test_route_b_ocr_mode_never_adopts(tmp_path, monkeypatch):
+    _inject_thresholds(monkeypatch)
+    pdf = _make_prose_pdf(tmp_path, 2)
+    _stub_engine_adopt(monkeypatch)
+    out = str(tmp_path / "out")
+    res = cv.convert_pdf(pdf, out, dpi=100, born_digital_mode="ocr")
+    assert res["route"] == "B"
+    assert res["born_digital_mode"] == "ocr"
+    md = open(res["md_path"], encoding="utf-8").read()
+    assert "browm" in md and "brown" not in md          # 从不把源文本写进 md
+    report = res["source_audit"]
+    assert report is not None
+    assert report["born_digital_mode"] == "ocr"
+    assert report["adoption_source"] == "dry_run"       # 只审计推演,绝不 apply
+
+
+def test_route_b_hybrid_adopts_healthy_prose_blocks(tmp_path, monkeypatch):
+    _inject_thresholds(monkeypatch)
+    pdf = _make_prose_pdf(tmp_path, 2)
+    _stub_engine_adopt(monkeypatch)
+    out = str(tmp_path / "out")
+    res = cv.convert_pdf(pdf, out, dpi=100, born_digital_mode="hybrid")
+    assert res["route"] == "B"
+    assert res["born_digital_mode"] == "hybrid"
+    assert res["adoption_error"] is False
+    md = open(res["md_path"], encoding="utf-8").read()
+    assert "brown" in md and "browm" not in md          # 采信了源文本层
+    report = res["source_audit"]
+    assert report["born_digital_mode"] == "hybrid"
+    assert report["adoption_source"] == "recorded"
+    assert report["summary"]["adoption"]["adopted"] >= 1
+
+
+def test_route_b_hybrid_falls_back_whole_book_on_adoption_error(tmp_path, monkeypatch):
+    _inject_thresholds(monkeypatch)
+    pdf = _make_prose_pdf(tmp_path, 2)
+    _stub_engine_adopt(monkeypatch)
+
+    def boom(*_a, **_k):
+        raise RuntimeError("adoption boom")
+    monkeypatch.setattr(cv, "adopt_prose_blocks", boom)
+
+    out = str(tmp_path / "out")
+    res = cv.convert_pdf(pdf, out, dpi=100, born_digital_mode="hybrid")  # 绝不抛出
+    md = open(res["md_path"], encoding="utf-8").read()
+    assert "browm" in md and "brown" not in md          # 整本回退等价 OCR 内容
+    assert res["adoption_error"] is True
+    report = res["source_audit"]
+    assert report["summary"]["status"] == "SUSPECT"
+    assert any(iss["code"] == "adoption_error" for iss in report.get("issues", []))
+    layout = resolve_layout("born", out)
+    assert cp.is_page_done(layout.work_dir, 1)          # 检查点未被删
+    assert cp.is_page_done(layout.work_dir, 2)
+
+
+def test_audit_failure_keeps_checkpoints_and_returns_suspect(tmp_path, monkeypatch):
+    _inject_thresholds(monkeypatch)
+    pdf = _make_prose_pdf(tmp_path, 2)
+    _stub_engine_adopt(monkeypatch)
+
+    def boom(*_a, **_k):
+        raise RuntimeError("audit boom")
+    monkeypatch.setattr(cv, "audit_document", boom)
+
+    out = str(tmp_path / "out")
+    res = cv.convert_pdf(pdf, out, dpi=100, born_digital_mode="hybrid")
+    assert res["adoption_error"] is True
+    assert res["source_audit"]["summary"]["status"] == "SUSPECT"
+    layout = resolve_layout("born", out)
+    assert cp.is_page_done(layout.work_dir, 1)          # 审计崩溃不删检查点
+    assert cp.is_page_done(layout.work_dir, 2)
+    md = open(res["md_path"], encoding="utf-8").read()
+    assert "browm" in md                                # 回退 OCR 内容
+
+
+def test_resume_rebuilds_missing_audit_without_reocr(tmp_path, monkeypatch):
+    _inject_thresholds(monkeypatch)
+    pdf = _make_prose_pdf(tmp_path, 2)
+    calls = []
+    _stub_engine_adopt(monkeypatch, calls)
+    out = str(tmp_path / "out")
+    layout = resolve_layout("born", out)
+    for pg in (1, 2):
+        _write_adopt_checkpoint(layout.work_dir, pg)
+    cp.save_manifest(layout.work_dir, cp.new_manifest(pdf, cp.pdf_fingerprint(pdf), 100, "B"))
+    assert not os.path.exists(layout.source_audit_path)
+
+    res = cv.convert_pdf(pdf, out, dpi=100, born_digital_mode="ocr")
+
+    assert calls == []                                  # 引擎 stub 未被调用
+    assert os.path.exists(layout.source_audit_path)     # 审计缺失 → 重建
+    assert res["source_audit"] is not None
+
+
+def test_resume_reruns_adoption_and_reconstruct_when_stale(tmp_path, monkeypatch):
+    _inject_thresholds(monkeypatch)
+    pdf = _make_prose_pdf(tmp_path, 2)
+    calls = []
+    _stub_engine_adopt(monkeypatch, calls)
+    out = str(tmp_path / "out")
+    layout = resolve_layout("born", out)
+    for pg in (1, 2):
+        _write_adopt_checkpoint(layout.work_dir, pg)
+    cp.save_manifest(layout.work_dir, cp.new_manifest(pdf, cp.pdf_fingerprint(pdf), 100, "B"))
+    os.makedirs(layout.doc_work_dir, exist_ok=True)
+    stale = {"schema_version": cv.AUDIT_SCHEMA_VERSION, "stem": "born",
+             "pdf_fingerprint": {"size_bytes": 1, "page_count": 99},
+             "ocr_fingerprint": {"dpi": 100, "page_count": 99},
+             "summary": {"status": "OK"}}
+    with open(layout.source_audit_path, "w", encoding="utf-8") as f:
+        json.dump(stale, f)
+
+    res = cv.convert_pdf(pdf, out, dpi=100, born_digital_mode="hybrid")
+
+    assert calls == []                                  # 不重跑 OCR、不加载引擎
+    md = open(res["md_path"], encoding="utf-8").read()
+    assert "brown" in md                                # 采信+重组照跑
+    report = res["source_audit"]
+    assert report["pdf_fingerprint"]["page_count"] == 2  # 审计按真实指纹重算
+    assert report["adoption_source"] == "recorded"
+
+
+def test_stale_audit_fingerprint_recomputed(tmp_path, monkeypatch):
+    _inject_thresholds(monkeypatch)
+    pdf = _make_prose_pdf(tmp_path, 2)
+    _stub_engine_adopt(monkeypatch)
+    out = str(tmp_path / "out")
+    res1 = cv.convert_pdf(pdf, out, dpi=100, born_digital_mode="ocr")
+    assert res1["source_audit"]["pdf_fingerprint"]["page_count"] == 2
+    layout = resolve_layout("born", out)
+    with open(layout.source_audit_path, encoding="utf-8") as f:
+        rep = json.load(f)
+    rep["pdf_fingerprint"]["page_count"] = 999          # 污染指纹 → 过期
+    with open(layout.source_audit_path, "w", encoding="utf-8") as f:
+        json.dump(rep, f)
+
+    res2 = cv.convert_pdf(pdf, out, dpi=100, born_digital_mode="ocr")
+
+    assert res2["source_audit"]["pdf_fingerprint"]["page_count"] == 2  # 已重算
+
+
+def test_deferred_marker_removed_only_after_success(tmp_path, monkeypatch):
+    _inject_thresholds(monkeypatch)
+    pdf = _make_prose_pdf(tmp_path, 2)
+    out = str(tmp_path / "out")
+    marker = os.path.join(out, "_deferred_born_digital", "born.txt")
+
+    cv.convert_pdf(pdf, out, dpi=100, born_digital_mode="defer")     # 1) 登记
+    assert os.path.exists(marker)
+
+    def all_fail(png_path, work_dir):                                # 2) 全页崩(giveup)
+        raise RuntimeError("engine down")
+    monkeypatch.setattr(cv, "predict_page", all_fail)
+    cv.convert_pdf(pdf, out, dpi=100, born_digital_mode="ocr")
+    assert os.path.exists(marker)                                    # giveup 不算成功
+
+    _stub_engine_adopt(monkeypatch)                                  # 3) 成功转换
+    cv.convert_pdf(pdf, out, dpi=100, born_digital_mode="ocr")
+    assert not os.path.exists(marker)                                # 成功后删除
+
+
+def test_route_c_does_not_treat_bad_source_as_ground_truth(tmp_path, monkeypatch):
+    # 真实 C 路(低质文本层)PDF 无法经 insert_text 构造——PyMuPDF 把插入的
+    # PUA/U+FFFD round-trip 回读成合法间隔号 ·(见 test_triage 的实验记录),故与
+    # triage 的 C 路单测一致,这里直接注入 triage→"C" 只验 convert 的 C 路行为。
+    pdf = _make_prose_pdf(tmp_path, 2)                   # 源层含 brown/quick 等正文
+    monkeypatch.setattr(cv, "triage", lambda _p: "C")
+    _stub_engine(monkeypatch, _one_text_block)          # OCR 出干净正文
+    out = str(tmp_path / "out")
+    res = cv.convert_pdf(pdf, out, dpi=100, born_digital_mode="hybrid")
+    assert res["route"] == "C"                          # C 路不受 hybrid 影响
+    md = open(res["md_path"], encoding="utf-8").read()
+    assert "page 1 content" in md                       # md 用 OCR
+    assert "brown" not in md and "quick" not in md      # 坏源层没被当真相写进 md
+    report = res["source_audit"]
+    assert report is not None
+    assert report["pages"][0].get("source_health")      # 保存了页级 source health
+    assert report["summary"]["adoption"]["adopted"] == 0  # 一块都没采信
+
+
+def test_route_b_hybrid_resume_byte_identical(tmp_path, monkeypatch):
+    _inject_thresholds(monkeypatch)
+    pdf = _make_prose_pdf(tmp_path, 3)
+    _stub_engine_adopt(monkeypatch)
+    out1 = str(tmp_path / "out1")                        # 一次跑完
+    r1 = cv.convert_pdf(pdf, out1, dpi=100, born_digital_mode="hybrid")
+    md1 = open(r1["md_path"], encoding="utf-8").read()
+
+    out2 = str(tmp_path / "out2")                        # 跑一半再 resume
+    layout2 = resolve_layout("born", out2)
+    _write_adopt_checkpoint(layout2.work_dir, 1)         # 仅第 1 页检查点
+    cp.save_manifest(layout2.work_dir, cp.new_manifest(pdf, cp.pdf_fingerprint(pdf), 100, "B"))
+    r2 = cv.convert_pdf(pdf, out2, dpi=100, born_digital_mode="hybrid")
+    md2 = open(r2["md_path"], encoding="utf-8").read()
+
+    assert md1 == md2                                    # 逐字节一致
+    assert "brown" in md2                                # 采信生效
