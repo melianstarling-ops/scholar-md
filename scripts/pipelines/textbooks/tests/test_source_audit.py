@@ -1924,3 +1924,27 @@ def test_cli_rejects_dry_run_adoption_flag_it_no_longer_has(tmp_path):
             "--work-dir", str(tmp_path / "work"), "--stem", "Book",
             "--dry-run-adoption",
         ])
+
+
+def test_route_b_v1_profile_frozen_by_owner_20260717():
+    """Task 13 标定冻结锁(所有者 2026-07-17 批准)——改动任一值必须重走标定评审。"""
+    from scripts.pipelines.textbooks.source_audit import (
+        ROUTE_B_V1_THRESHOLDS, THRESHOLD_PROFILE_V1)
+    t = ROUTE_B_V1_THRESHOLDS
+    assert THRESHOLD_PROFILE_V1 == "route_b_v1"
+    assert t.minimum_reliable_chars == 30
+    assert t.maximum_bad_char_ratio == 0.02
+    assert t.maximum_block_ned == 0.3
+    assert t.minimum_char_recall == 0.8
+    assert t.minimum_token_recall == 0.8
+    assert t.minimum_numeric_token_recall == 0.9
+    assert t.maximum_addition_ratio == 0.25
+    assert t.maximum_repetition_score == 0.5
+    assert t.minimum_single_column_sequence_ratio == 0.45
+    assert t.maximum_samples_per_block == 3
+
+
+def test_convert_production_profile_is_v1():
+    from scripts.pipelines.textbooks import convert
+    from scripts.pipelines.textbooks.source_audit import ROUTE_B_V1_THRESHOLDS
+    assert convert.ROUTE_B_AUDIT_THRESHOLDS is ROUTE_B_V1_THRESHOLDS

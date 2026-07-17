@@ -645,6 +645,31 @@ _DRY_RUN_ADOPTION_MIN_CHAR_RATIO = 0.5
 _DRY_RUN_ADOPTION_MAX_CHAR_RATIO = 2.0
 _DRY_RUN_ADOPTION_MAX_NED = 0.2
 
+# Task 13 标定冻结(所有者 2026-07-17 批准)。证据:13 个 golden fixtures 实测 +
+# 全 corpus 1,858 页 source_health 分布(sdd-archive/2026-07-16-textbooks-route-b/
+# corpus_source_health.json)。相对占位值的变更与依据:
+#   numeric_token_recall 0.8→0.9   干净页最差 0.97,数字保真是最高风险,留余量收紧
+#   addition_ratio       0.3→0.25  干净页最差 0.043,坏页(Eryaman)0.198 由他项抓
+#   bad_char_ratio       0.1→0.02  corpus 正文区 FFFD/控制字符全零、PUA≈0,任何坏码即不可对账
+#   reliable_chars       10→30     小图注块召回噪声大于信息
+#   sequence_ratio       0.7→0.45  公式页 0.667/表格页 0.5 属块序抖动误报;倒序 0.0 仍必抓
+#   其余保持:block_ned 0.3(干净 0.025 vs 坏 0.39-0.80,>10× 分离)、
+#   char/token_recall 0.8、repetition 0.5(重复环 0.98 vs 正常 <0.3)
+THRESHOLD_PROFILE_V1 = "route_b_v1"
+
+ROUTE_B_V1_THRESHOLDS = AuditThresholds(
+    minimum_reliable_chars=30,
+    maximum_bad_char_ratio=0.02,
+    maximum_block_ned=0.3,
+    minimum_char_recall=0.8,
+    minimum_token_recall=0.8,
+    minimum_numeric_token_recall=0.9,
+    maximum_addition_ratio=0.25,
+    maximum_repetition_score=0.5,
+    minimum_single_column_sequence_ratio=0.45,
+    maximum_samples_per_block=3,
+)
+
 # missing_samples/added_samples 单条样本的字符截断上限(计划 §6.4:定位样本
 # "不把全文重复写入 JSON")。不经 AuditThresholds 注入——这是"单条多长"的实现
 # 细节,"最多几条"才是需要按语料标定的产品阈值(maximum_samples_per_block)。
@@ -1341,6 +1366,7 @@ def audit_document(
     thresholds: AuditThresholds,
     decisions_by_page: dict[int, list] | None,
     born_digital_mode: str | None = None,
+    threshold_profile: str = THRESHOLD_PROFILE_UNCALIBRATED,
 ) -> dict:
     """文档级审计聚合(计划 §7.1,Task 8)。只读 PDF + 已落盘 OCR res JSON,
     绝不调用 OCR 引擎、绝不改写 Markdown/任何产物——独立重跑安全。
@@ -1461,7 +1487,7 @@ def audit_document(
         "born_digital_mode": born_digital_mode if born_digital_mode is not None else "unknown",
         "pdf_fingerprint": pdf_fingerprint,
         "ocr_fingerprint": {"dpi": dpi, "page_count": page_count},
-        "threshold_profile": THRESHOLD_PROFILE_UNCALIBRATED,
+        "threshold_profile": threshold_profile,
         "adoption_source": "dry_run" if dry_run else "recorded",
         "summary": {
             "status": doc_status,
@@ -1522,8 +1548,9 @@ def main(argv: list[str] | None = None) -> int:
 
     layout = resolve_layout(args.stem, args.out, args.work_dir)
     report = audit_document(
-        args.src, layout, ROUTE_B_V1_UNCALIBRATED_THRESHOLDS,
+        args.src, layout, ROUTE_B_V1_THRESHOLDS,
         decisions_by_page=None, born_digital_mode=None,
+        threshold_profile=THRESHOLD_PROFILE_V1,
     )
     write_audit_report(report, layout.source_audit_path)
 

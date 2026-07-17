@@ -25,7 +25,7 @@ from scripts.pipelines.textbooks.power import keep_system_awake
 from scripts.pipelines.textbooks.source_audit import (
     extract_source_page, page_geometry, assign_source_words,
     audit_document, write_audit_report,
-    ROUTE_B_V1_UNCALIBRATED_THRESHOLDS,
+    ROUTE_B_V1_THRESHOLDS, THRESHOLD_PROFILE_V1,
 )
 from scripts.pipelines.textbooks.prose_adoption import (
     AdoptionThresholds, adopt_prose_blocks, apply_adoption,
@@ -40,14 +40,15 @@ BORN_DIGITAL_MODES = ("defer", "ocr", "hybrid")
 # 独立维护,断点恢复的指纹过期判定据此比对)。
 AUDIT_SCHEMA_VERSION = 2
 
-# 路线 B 采信/审计生产 profile 占位——真实阈值待 Task 13 用样书语料离线标定后注入;
-# 测试注入显式值(约束 7)。这里给保守占位,绝不当已标定生产阈值使用。
+# 路线 B 采信/审计生产 profile——Task 13 标定冻结(所有者 2026-07-17 批准)。
+# 采信阈值维持标定前取值(fixture 证据:构造错误页采信 NED 0.0097,NED 0.2 是
+# 20× 余量的安全阀);审计阈值见 source_audit.ROUTE_B_V1_THRESHOLDS 的标定注释。
 ROUTE_B_ADOPTION_THRESHOLDS = AdoptionThresholds(
     adoption_min_char_ratio=0.5,
     adoption_max_char_ratio=2.0,
     adoption_max_ned=0.2,
 )
-ROUTE_B_AUDIT_THRESHOLDS = ROUTE_B_V1_UNCALIBRATED_THRESHOLDS
+ROUTE_B_AUDIT_THRESHOLDS = ROUTE_B_V1_THRESHOLDS
 
 
 class ScheduledRest:
@@ -467,7 +468,8 @@ def _finalize_hybrid(pdf_path: str, layout: DocLayout, work_dir: str, total: int
         if _audit_fresh(existing, pdf_path, dpi):
             return result, existing, False     # 断点恢复:指纹新鲜则复用(内容等价,确定性)
         report = audit_document(pdf_path, layout, ROUTE_B_AUDIT_THRESHOLDS,
-                                decisions_by_page, born_digital_mode="hybrid")
+                                decisions_by_page, born_digital_mode="hybrid",
+                                threshold_profile=THRESHOLD_PROFILE_V1)
         report["route"] = "B"
         return result, (report if _write_audit_safely(report, layout.source_audit_path)
                         else None), False
@@ -500,7 +502,8 @@ def _finalize_audit(route: str, born_digital_mode: str, pdf_path: str,
     mode_label = born_digital_mode if route == "B" else None
     try:
         report = audit_document(pdf_path, layout, ROUTE_B_AUDIT_THRESHOLDS,
-                                None, born_digital_mode=mode_label)
+                                None, born_digital_mode=mode_label,
+                                threshold_profile=THRESHOLD_PROFILE_V1)
         report["route"] = route                # Important 1:落盘报告 route 字段失实修正
         return report if _write_audit_safely(report, layout.source_audit_path) else None
     except Exception as e:                     # noqa: BLE001 审计异常写 SUSPECT、不逃逸
