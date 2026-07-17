@@ -95,15 +95,20 @@ def write_empty_page(work_dir: str, page: int) -> None:
         json.dump({"parsing_res_list": []}, f, ensure_ascii=False)
 
 
-def load_page_blocks(work_dir: str, page: int) -> list[dict]:
+def load_page_result(work_dir: str, page: int) -> dict:
     p = page_res_path(work_dir, page)
     if not os.path.exists(p):
-        return []
+        return {}
     try:
         with open(p, encoding="utf-8") as f:
-            return json.load(f).get("parsing_res_list", [])
-    except (ValueError, OSError, AttributeError):
-        return []
+            data = json.load(f)
+    except (ValueError, OSError):
+        return {}
+    return data if isinstance(data, dict) else {}
+
+
+def load_page_blocks(work_dir: str, page: int) -> list[dict]:
+    return load_page_result(work_dir, page).get("parsing_res_list", [])
 
 
 def pages_todo(work_dir: str, total: int) -> list[int]:

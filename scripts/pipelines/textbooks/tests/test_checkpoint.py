@@ -112,6 +112,43 @@ def test_load_page_blocks(tmp_path):
     assert cp.load_page_blocks(work, 2) == []          # 损坏
 
 
+def test_load_page_result_returns_metadata(tmp_path):
+    work = str(tmp_path / "_work")
+    os.makedirs(work)
+    with open(cp.page_res_path(work, 1), "w", encoding="utf-8") as f:
+        json.dump({"width": 100, "height": 200, "model_settings": {"a": 1},
+                   "parsing_res_list": [{"block_order": 0}]}, f)
+    res = cp.load_page_result(work, 1)
+    assert res["width"] == 100
+    assert res["height"] == 200
+    assert res["model_settings"] == {"a": 1}
+    assert res["parsing_res_list"] == [{"block_order": 0}]
+
+
+def test_load_page_result_missing(tmp_path):
+    assert cp.load_page_result(str(tmp_path / "_work"), 9) == {}
+
+
+def test_load_page_result_empty_page(tmp_path):
+    work = str(tmp_path / "_work")
+    cp.write_empty_page(work, 3)
+    assert cp.load_page_result(work, 3) == {"parsing_res_list": []}
+
+
+def test_load_page_result_corrupt_json(tmp_path):
+    work = str(tmp_path / "_work")
+    os.makedirs(work)
+    with open(cp.page_res_path(work, 1), "w", encoding="utf-8") as f:
+        f.write('{"parsing_res_list": [')   # 半截
+    assert cp.load_page_result(work, 1) == {}
+
+
+def test_load_page_blocks_delegates_to_load_page_result(tmp_path):
+    work = str(tmp_path / "_work")
+    _write_res(work, 1, [{"block_order": 0}])
+    assert cp.load_page_blocks(work, 1) == cp.load_page_result(work, 1)["parsing_res_list"]
+
+
 def test_pages_todo(tmp_path):
     work = str(tmp_path / "_work")
     _write_res(work, 1, [])
