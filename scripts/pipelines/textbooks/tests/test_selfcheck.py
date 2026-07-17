@@ -1,6 +1,10 @@
+import json
+import os
+
 from scripts.pipelines.textbooks.selfcheck import (
     block_coverage, katex_incompat_scan, detect_column_layout, aggregate_warnings,
     scan_formula_suspicions, summarize_suspicions,
+    build_source_audit_field, build_ocr_degeneration_field,
 )
 
 
@@ -247,3 +251,132 @@ def test_detect_column_layout_malformed_bbox_does_not_raise():
     ]
     result = detect_column_layout(blocks)
     assert isinstance(result, bool)
+
+
+# ---------------------------------------------------------------------------
+# Task 10:selfcheck 的 source_audit / ocr_degeneration 紧凑字段(计划 §7.2)。
+# 三个函数均独立读取落盘的 <stem>_source_audit.json(不复用 convert.py 的内部
+# freshness 判定——两者是独立关注点),入参为 (report_path, pdf_fingerprint,
+# dpi, schema_version)。
+# ---------------------------------------------------------------------------
+
+_SCHEMA_VERSION = 2
+_FP = {"size_bytes": 100, "page_count": 3}
+_DPI = 150
+
+
+def _write_report(path: str, report: dict) -> None:
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    with open(path, "w", encoding="utf-8") as f:
+        json.dump(report, f)
+
+
+def _fresh_report(**summary_overrides) -> dict:
+    summary = {
+        "status": "SUSPECT", "pages": 3, "scorable_pages": 3,
+        "suspect_pages": [2],
+        "adoption": {"prose_blocks": 10, "adopted": 8, "fallback_ocr": 2,
+                     "fallback_reasons": {}},
+        "issue_counts": {"numeric_mismatch": 1},
+    }
+    summary.update(summary_overrides)
+    return {
+        "schema_version": _SCHEMA_VERSION,
+        "stem": "book", "route": "B", "born_digital_mode": "hybrid",
+        "pdf_fingerprint": dict(_FP),
+        "ocr_fingerprint": {"dpi": _DPI, "page_count": 3},
+        "threshold_profile": "route_b_v1_uncalibrated",
+        "adoption_source": "recorded",
+        "summary": summary,
+        "pages": [
+            {"page": 1, "prose_audit": {"metrics": {"ngram_repetition_score": 0.01},
+                                        "issues": []}},
+            {"page": 2, "prose_audit": {"metrics": {"ngram_repetition_score": 0.6},
+                                        "issues": [{"code": "ocr_degeneration",
+                                                    "block_id": None, "detail": "x"}]}},
+            {"page": 3, "prose_audit": {"metrics": {"ngram_repetition_score": 0.03},
+                                        "issues": []}},
+        ],
+    }
+
+
+def test_build_source_audit_field_reads_compact_summary_from_real_report(tmp_path):
+    path = str(tmp_path / "book_source_audit.json")
+    _write_report(path, _fresh_report())
+    field = build_source_audit_field(path, _FP, _DPI, _SCHEMA_VERSION)
+    assert field == {
+        "status": "SUSPECT",
+        "suspect_pages": [2],
+        "adoption": {"adopted": 8, "fallback_ocr": 2},
+        "issue_counts": {"numeric_mismatch": 1},
+        "report": "book_source_audit.json",
+    }
+
+
+def test_build_source_audit_field_does_not_copy_page_level_detail(tmp_path):
+    # 结构断言:紧凑字段绝不把逐页 pages 数组复制进来。
+    path = str(tmp_path / "book_source_audit.json")
+    _write_report(path, _fresh_report())
+    field = build_source_audit_field(path, _FP, _DPI, _SCHEMA_VERSION)
+    assert "pages" not in field
+    assert "blocks" not in field
+
+
+def test_build_source_audit_field_missing_report_gets_distinct_issue_code(tmp_path):
+    path = str(tmp_path / "missing_source_audit.json")   # 从未写过
+    field = build_source_audit_field(path, _FP, _DPI, _SCHEMA_VERSION)
+    assert field["issue_counts"] == {"audit_report_missing": 1}
+    assert field["status"] == "UNSCORABLE"
+    assert field["report"] == "missing_source_audit.json"
+
+
+def test_build_source_audit_field_corrupt_report_gets_distinct_issue_code(tmp_path):
+    path = str(tmp_path / "book_source_audit.json")
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    with open(path, "w", encoding="utf-8") as f:
+        f.write('{"schema_version": 2, "summary": {')       # 半截 JSON,解析失败
+    field = build_source_audit_field(path, _FP, _DPI, _SCHEMA_VERSION)
+    assert field["issue_counts"] == {"audit_report_corrupt": 1}
+    assert field["status"] == "UNSCORABLE"
+
+
+def test_build_source_audit_field_stale_fingerprint_gets_distinct_issue_code(tmp_path):
+    path = str(tmp_path / "book_source_audit.json")
+    stale = _fresh_report()
+    stale["pdf_fingerprint"]["page_count"] = 999          # 与当前 _FP 不一致 → 过期
+    _write_report(path, stale)
+    field = build_source_audit_field(path, _FP, _DPI, _SCHEMA_VERSION)
+    assert field["issue_counts"] == {"audit_report_stale": 1}
+    assert field["status"] == "UNSCORABLE"
+
+
+def test_build_source_audit_field_stale_schema_version_gets_distinct_issue_code(tmp_path):
+    path = str(tmp_path / "book_source_audit.json")
+    stale = _fresh_report()
+    stale["schema_version"] = 1
+    _write_report(path, stale)
+    field = build_source_audit_field(path, _FP, _DPI, _SCHEMA_VERSION)
+    assert field["issue_counts"] == {"audit_report_stale": 1}
+
+
+def test_build_ocr_degeneration_field_extracts_peak_and_flagged_pages(tmp_path):
+    path = str(tmp_path / "book_source_audit.json")
+    _write_report(path, _fresh_report())
+    field = build_ocr_degeneration_field(path, _FP, _DPI, _SCHEMA_VERSION)
+    assert field == {"max_ngram_repetition": 0.6, "flagged_pages": [2]}
+
+
+def test_build_ocr_degeneration_field_none_when_report_missing(tmp_path):
+    # audit 缺失时的缺席语义:明确为 None,不编造/不置零蒙混。
+    path = str(tmp_path / "missing_source_audit.json")
+    field = build_ocr_degeneration_field(path, _FP, _DPI, _SCHEMA_VERSION)
+    assert field is None
+
+
+def test_build_ocr_degeneration_field_none_when_report_stale(tmp_path):
+    path = str(tmp_path / "book_source_audit.json")
+    stale = _fresh_report()
+    stale["ocr_fingerprint"]["dpi"] = 999
+    _write_report(path, stale)
+    field = build_ocr_degeneration_field(path, _FP, _DPI, _SCHEMA_VERSION)
+    assert field is None

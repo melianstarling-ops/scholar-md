@@ -431,6 +431,159 @@ def test_main_no_katex_scan_threads_disabled_to_run(monkeypatch):
     assert captured["kwargs"]["katex_scan_enabled"] is False
 
 
+# ---------------------------------------------------------------------------
+# Task 10:_read_summary 综合 source audit 状态(计划 §7.2/Task 10 checklist)。
+# selfcheck.json 的 "source_audit" 紧凑字段由 Task 10 的 convert.py/selfcheck.py
+# 写入;这里直接手写该字段模拟已落盘的 selfcheck.json,不依赖真跑一遍 convert_pdf。
+# ---------------------------------------------------------------------------
+
+def _write_selfcheck_with_audit(layout, source_audit: dict | None) -> None:
+    Path(layout.doc_work_dir).mkdir(parents=True, exist_ok=True)
+    payload = {"in_md": 1, "total": 1}
+    if source_audit is not None:
+        payload["source_audit"] = source_audit
+    with open(layout.selfcheck_path, "w", encoding="utf-8") as f:
+        json.dump(payload, f)
+
+
+def test_read_summary_audit_suspect_overrides_ok_status(tmp_path):
+    # 有产物(无 failed_pages)但 audit 判 SUSPECT → 文档状态仍须是 SUSPECT,不能计入 OK。
+    pdf = _make_pdf(tmp_path, 3, name="book")
+    out_root = tmp_path / "out"
+    layout = resolve_layout(pdf.stem, str(out_root))
+    work = Path(layout.work_dir)
+    for i in (1, 2, 3):
+        _mark_page_done(work, i)
+    cp.save_manifest(str(work),
+                     cp.new_manifest(str(pdf), cp.pdf_fingerprint(str(pdf)), 150, "B"))
+    _write_selfcheck_with_audit(layout, {
+        "status": "SUSPECT", "suspect_pages": [2],
+        "adoption": {"adopted": 1, "fallback_ocr": 1},
+        "issue_counts": {"prose_mismatch": 1},
+        "report": "book_source_audit.json",
+    })
+
+    summary = bp._read_summary(out_root, None, pdf)
+
+    assert summary["status"] == "SUSPECT"
+
+
+def test_read_summary_grades_severe_and_mild_issue_counts(tmp_path):
+    pdf = _make_pdf(tmp_path, 10, name="book")
+    out_root = tmp_path / "out"
+    layout = resolve_layout(pdf.stem, str(out_root))
+    work = Path(layout.work_dir)
+    for i in range(1, 11):
+        _mark_page_done(work, i)
+    cp.save_manifest(str(work),
+                     cp.new_manifest(str(pdf), cp.pdf_fingerprint(str(pdf)), 150, "B"))
+    _write_selfcheck_with_audit(layout, {
+        "status": "SUSPECT", "suspect_pages": [2, 5, 7],
+        "adoption": {"adopted": 5, "fallback_ocr": 5},
+        "issue_counts": {"sign_flip": 2, "adoption_error": 1,
+                         "prose_mismatch": 3, "missing_prose": 1},
+        "report": "book_source_audit.json",
+    })
+
+    grade = bp._read_summary(out_root, None, pdf)["source_audit_grade"]
+
+    assert grade["suspect_page_count"] == 3
+    assert grade["pages"] == 10
+    assert grade["suspect_page_rate"] == 0.3
+    assert grade["severe_issue_count"] == 3      # sign_flip(2) + adoption_error(1)
+    assert grade["mild_issue_count"] == 4        # prose_mismatch(3) + missing_prose(1)
+
+
+def test_read_summary_distinguishes_mild_only_from_severe_document(tmp_path):
+    # mild-only 文档 severe_issue_count==0,severe 文档 >0——batch 输出据此可区分,
+    # 单页 mild issue 不得与重度问题同级显示。
+    out_root = tmp_path / "out"
+
+    pdf_mild = _make_pdf(tmp_path, 5, name="mild")
+    layout_mild = resolve_layout(pdf_mild.stem, str(out_root))
+    work_mild = Path(layout_mild.work_dir)
+    for i in range(1, 6):
+        _mark_page_done(work_mild, i)
+    cp.save_manifest(str(work_mild), cp.new_manifest(
+        str(pdf_mild), cp.pdf_fingerprint(str(pdf_mild)), 150, "B"))
+    _write_selfcheck_with_audit(layout_mild, {
+        "status": "SUSPECT", "suspect_pages": [1],
+        "adoption": {"adopted": 3, "fallback_ocr": 2},
+        "issue_counts": {"missing_prose": 1},
+        "report": "mild_source_audit.json",
+    })
+
+    pdf_severe = _make_pdf(tmp_path, 5, name="severe")
+    layout_severe = resolve_layout(pdf_severe.stem, str(out_root))
+    work_severe = Path(layout_severe.work_dir)
+    for i in range(1, 6):
+        _mark_page_done(work_severe, i)
+    cp.save_manifest(str(work_severe), cp.new_manifest(
+        str(pdf_severe), cp.pdf_fingerprint(str(pdf_severe)), 150, "B"))
+    _write_selfcheck_with_audit(layout_severe, {
+        "status": "SUSPECT", "suspect_pages": [1],
+        "adoption": {"adopted": 3, "fallback_ocr": 2},
+        "issue_counts": {"decimal_shift": 1},
+        "report": "severe_source_audit.json",
+    })
+
+    grade_mild = bp._read_summary(out_root, None, pdf_mild)["source_audit_grade"]
+    grade_severe = bp._read_summary(out_root, None, pdf_severe)["source_audit_grade"]
+
+    assert grade_mild["severe_issue_count"] == 0 and grade_mild["mild_issue_count"] == 1
+    assert grade_severe["severe_issue_count"] == 1 and grade_severe["mild_issue_count"] == 0
+
+
+def test_read_summary_still_reports_deferred_b_after_grading_added(tmp_path):
+    # deferred B(defer 模式 marker)仍被 batch 正确报告(旧行为不受分级改动影响)。
+    pdf = _make_pdf(tmp_path, 2, name="born")
+    out_root = tmp_path / "out"
+    marker_dir = out_root / "_deferred_born_digital"
+    marker_dir.mkdir(parents=True)
+    (marker_dir / "born.txt").write_text(str(pdf) + "\n", encoding="utf-8")
+
+    summary = bp._read_summary(out_root, None, pdf)
+
+    assert summary["status"] == "B"
+    assert summary["route"] == "B"
+    assert summary["selfcheck"] is None
+    assert summary["source_audit_grade"] is None
+
+
+def test_run_not_applicable_audit_keeps_a_route_output_unchanged(tmp_path, monkeypatch, capsys):
+    # A 路(NOT_APPLICABLE)不影响 A 路既有 batch 行为(零回归):打印摘要行须与
+    # 改动前逐字节一致,不得因为 selfcheck 里多了个 source_audit 字段就多出后缀。
+    d = tmp_path / "src"
+    d.mkdir()
+    pdf = _make_pdf(d, 1, name="A")
+    out_root = tmp_path / "out"
+
+    def fake_runner(argv):
+        layout = resolve_layout("A", str(out_root))
+        work = Path(layout.work_dir)
+        Path(layout.doc_deliverable_dir).mkdir(parents=True, exist_ok=True)
+        Path(layout.md_path).write_text("# A\n", encoding="utf-8")
+        _mark_page_done(work, 1)
+        cp.save_manifest(str(work),
+                         cp.new_manifest(str(pdf), cp.pdf_fingerprint(str(pdf)), 150, "A"))
+        _write_selfcheck_with_audit(layout, {
+            "status": "NOT_APPLICABLE", "suspect_pages": [],
+            "adoption": {"adopted": 0, "fallback_ocr": 0},
+            "issue_counts": {}, "report": "A_source_audit.json",
+        })
+        return 0
+
+    monkeypatch.setattr(bp, "scan_katex_work_pages", lambda layout, out_path: {"errors": []})
+
+    rc, results = bp.run([str(d)], out=str(out_root), dpi=150, runner=fake_runner)
+
+    assert rc == 0
+    assert results[0]["status"] == "OK"
+    out = capsys.readouterr().out
+    assert "  [OK] A — route=A failed_pages=0 coverage=1/1\n" in out
+    assert "audit=" not in out
+
+
 def test_main_forwards_force_ocr_and_rest_schedule(monkeypatch):
     captured = {}
 

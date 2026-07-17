@@ -29,6 +29,21 @@ DEFAULT_SOURCE_ROOT = Path(
 )
 DEFAULT_OUTPUT_ROOT = PROJECT_ROOT / "03_Output" / "textbooks"
 
+# Task 10:batch 汇总的 source audit 分级(计划 §7.2/Task 10 checklist)。severe
+# 清单逐字取自计划:adoption_error/audit_error/numeric 类/sign_flip/decimal_shift/
+# exponent_change;其余 issue code 一律记为 mild。分级清单/打印页数上限均为注入
+# 参数——这里给出的是占位默认值,真实生产值待 Task 13 用样书语料标定后再调整,
+# 不当已标定生产阈值直接使用。
+DEFAULT_SEVERE_ISSUE_CODES = frozenset({
+    "adoption_error", "audit_error",
+    "numeric_mismatch", "numeric_missing",
+    "sign_flip", "decimal_shift", "exponent_change",
+})
+
+# 批处理摘要打印的 suspect 页码上限:只列页码 + issue 类别名,绝不打印审计报告
+# 原文/源文本本身,避免刷屏也避免间接泄露敏感源文本。
+DEFAULT_SUSPECT_PRINT_LIMIT = 5
+
 
 def discover(src_paths: list[str]) -> list[Path]:
     """把 --src(文件/目录/多个)展开成去重排序的 PDF 路径列表。
@@ -100,24 +115,79 @@ def _job_argv(pdf: Path, out_root: Path, work_root: Path | None, dpi: int,
     return argv
 
 
-def _read_summary(out_root: Path, work_root: Path | None, pdf: Path) -> dict:
-    """跑完一本书(rc==0)后从磁盘读回结构化结果,供汇总报告用(拿不到 Python 返回值)。"""
+def _grade_source_audit(source_audit: dict | None, total_pages: int, *,
+                        severe_issue_codes: frozenset = DEFAULT_SEVERE_ISSUE_CODES,
+                        ) -> dict | None:
+    """把 selfcheck.json 的紧凑 source_audit 字段(Task 10,计划 §7.2)转成 batch
+    汇总/分级所需信息:suspect 页率(suspect_pages/pages)+ severe/mild issue 计数。
+    source_audit 缺席(旧式 selfcheck.json,或 convert 从未跑过审计)→ None,
+    不伪造一份分级出来。"""
+    if not source_audit:
+        return None
+    suspect_pages = list(source_audit.get("suspect_pages") or [])
+    issue_counts = dict(source_audit.get("issue_counts") or {})
+    severe = sum(n for code, n in issue_counts.items() if code in severe_issue_codes)
+    mild = sum(n for code, n in issue_counts.items() if code not in severe_issue_codes)
+    return {
+        "status": source_audit.get("status"),
+        "suspect_pages": suspect_pages,
+        "suspect_page_count": len(suspect_pages),
+        "pages": total_pages,
+        "suspect_page_rate": (len(suspect_pages) / total_pages) if total_pages else 0.0,
+        "severe_issue_count": severe,
+        "mild_issue_count": mild,
+        "issue_counts": issue_counts,
+    }
+
+
+def _read_summary(out_root: Path, work_root: Path | None, pdf: Path, *,
+                  severe_issue_codes: frozenset = DEFAULT_SEVERE_ISSUE_CODES) -> dict:
+    """跑完一本书(rc==0)后从磁盘读回结构化结果,供汇总报告用(拿不到 Python 返回值)。
+
+    文档状态综合 failed_pages / selfcheck / source audit 三者:有产物但 audit
+    判 SUSPECT(即便 failed_pages 为空)也不能计入 OK(Task 10)。"""
     deferred_marker = out_root / "_deferred_born_digital" / f"{pdf.stem}.txt"
     if deferred_marker.exists():
         return {"stem": pdf.stem, "status": "B", "route": "B",
-                "failed_pages": 0, "selfcheck": None}
+                "failed_pages": 0, "selfcheck": None, "source_audit_grade": None}
     layout = resolve_layout(pdf.stem, str(out_root),
                             str(work_root) if work_root else None)
     manifest = cp.load_manifest(layout.work_dir)
     failed_pages = manifest["failed_pages"] if manifest else []
     route = manifest["route"] if manifest else "?"
+    total_pages = manifest["fingerprint"]["page_count"] if manifest else 0
     selfcheck = None
     if os.path.exists(layout.selfcheck_path):
         with open(layout.selfcheck_path, encoding="utf-8") as f:
             selfcheck = json.load(f)
+    grade = _grade_source_audit((selfcheck or {}).get("source_audit"), total_pages,
+                                severe_issue_codes=severe_issue_codes)
     status = "SUSPECT" if failed_pages else "OK"
+    if grade and grade["status"] == "SUSPECT":
+        status = "SUSPECT"
     return {"stem": pdf.stem, "status": status, "route": route,
-            "failed_pages": len(failed_pages), "selfcheck": selfcheck}
+            "failed_pages": len(failed_pages), "selfcheck": selfcheck,
+            "source_audit_grade": grade}
+
+
+def _format_audit_grade(grade: dict | None, *,
+                        limit: int = DEFAULT_SUSPECT_PRINT_LIMIT) -> str:
+    """batch 摘要行的 source audit 分级片段(Task 10):只列页码与 issue 类别名
+    (上限截断),绝不打印审计报告原文/源文本本身。分级/OK 且没有任何异常时返回
+    空串,保证 A 路(NOT_APPLICABLE,零计数)摘要行与改动前逐字节一致。"""
+    if not grade:
+        return ""
+    if not (grade["suspect_page_count"] or grade["severe_issue_count"] or grade["mild_issue_count"]):
+        return ""
+    shown = grade["suspect_pages"][:limit]
+    remaining = grade["suspect_page_count"] - len(shown)
+    pages_str = ",".join(str(p) for p in shown)
+    if remaining > 0:
+        pages_str += f",+{remaining}more"
+    categories = ",".join(sorted(grade["issue_counts"]))
+    return (f" audit={grade['status']} suspect={grade['suspect_page_count']}/{grade['pages']}"
+            f"({grade['suspect_page_rate']:.1%}) severe={grade['severe_issue_count']} "
+            f"mild={grade['mild_issue_count']} pages=[{pages_str}] issues=[{categories}]")
 
 
 def run(src_paths: list[str], out: str | None = None, dpi: int = cp.DEFAULT_DPI,
@@ -125,7 +195,9 @@ def run(src_paths: list[str], out: str | None = None, dpi: int = cp.DEFAULT_DPI,
         max_restarts: int = cp.MAX_RESTARTS, no_selfcheck_json: bool = False,
         katex_scan_enabled: bool = True, allow_sleep: bool = False,
         force_ocr: bool = False, work_hours: float = 6,
-        rest_minutes: float = 40, runner=None) -> tuple[int, list[dict]]:
+        rest_minutes: float = 40, runner=None,
+        severe_issue_codes: frozenset = DEFAULT_SEVERE_ISSUE_CODES,
+        suspect_print_limit: int = DEFAULT_SUSPECT_PRINT_LIMIT) -> tuple[int, list[dict]]:
     if work_hours <= 0 or rest_minutes <= 0:
         raise ValueError("work_hours 与 rest_minutes 必须大于 0")
     pdfs = discover(src_paths)
@@ -147,8 +219,8 @@ def run(src_paths: list[str], out: str | None = None, dpi: int = cp.DEFAULT_DPI,
                       f"({type(e).__name__}: {e}),按未完成处理")
         if skip:
             print(f"  [SKIP] {pdf.stem}")
-            results.append({"stem": pdf.stem, "status": "SKIP",
-                             "route": None, "failed_pages": 0, "selfcheck": None})
+            results.append({"stem": pdf.stem, "status": "SKIP", "route": None,
+                             "failed_pages": 0, "selfcheck": None, "source_audit_grade": None})
             continue
         argv = _job_argv(pdf, out_root, work_root, dpi, no_selfcheck_json, allow_sleep,
                          force_ocr, work_hours, rest_minutes)
@@ -156,10 +228,10 @@ def run(src_paths: list[str], out: str | None = None, dpi: int = cp.DEFAULT_DPI,
         if rc != 0:
             n_giveup += 1
             print(f"  [GIVEUP] {pdf.stem}")
-            results.append({"stem": pdf.stem, "status": "GIVEUP",
-                             "route": None, "failed_pages": 0, "selfcheck": None})
+            results.append({"stem": pdf.stem, "status": "GIVEUP", "route": None,
+                             "failed_pages": 0, "selfcheck": None, "source_audit_grade": None})
             continue
-        summary = _read_summary(out_root, work_root, pdf)
+        summary = _read_summary(out_root, work_root, pdf, severe_issue_codes=severe_issue_codes)
         if katex_scan_enabled and summary["status"] != "B":
             layout = resolve_layout(pdf.stem, str(out_root),
                                     str(work_root) if work_root else None)
@@ -184,8 +256,10 @@ def run(src_paths: list[str], out: str | None = None, dpi: int = cp.DEFAULT_DPI,
             if summary["selfcheck"]:
                 c = summary["selfcheck"]
                 cov = f" coverage={c['in_md']}/{c['total']}"
+            audit_line = _format_audit_grade(summary.get("source_audit_grade"),
+                                             limit=suspect_print_limit)
             print(f"  [{summary['status']}] {pdf.stem} — route={summary['route']} "
-                  f"failed_pages={summary['failed_pages']}{cov}")
+                  f"failed_pages={summary['failed_pages']}{cov}{audit_line}")
 
     n_ok = sum(1 for r in results if r["status"] in ("OK", "B"))
     n_suspect = sum(1 for r in results if r["status"] == "SUSPECT")

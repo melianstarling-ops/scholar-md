@@ -17,7 +17,7 @@ from scripts.pipelines.textbooks.corrections import load_corrections, apply_corr
 from scripts.pipelines.textbooks.paths import DocLayout, resolve_layout
 from scripts.pipelines.textbooks.selfcheck import (
     block_coverage, katex_incompat_scan, aggregate_warnings, detect_column_layout,
-    summarize_suspicions,
+    summarize_suspicions, build_source_audit_field, build_ocr_degeneration_field,
 )
 from scripts.pipelines.textbooks import checkpoint as cp
 from scripts.pipelines.textbooks import images
@@ -392,6 +392,11 @@ def convert_pdf(pdf_path: str, deliverables_dir: str | None = None,
     else:
         result = assemble(work_dir_, total, stem, assets_dir, pdf_path, dpi,
                           corrections_dir=layout.doc_work_dir)
+        # 审计落盘提前到这里(非 hybrid 路由):selfcheck 的 source_audit/
+        # ocr_degeneration 紧凑字段(计划 §7.2)要读到本轮刚落盘的审计报告,
+        # 顺序必须先于下面的 selfcheck 组装(hybrid 路由的审计已在
+        # _finalize_hybrid 内完成,顺序天然满足,不需要额外挪动)。
+        audit_report = _finalize_audit(route, born_digital_mode, pdf_path, layout, dpi)
 
     md, all_blocks = result["md"], result["blocks"]
     os.makedirs(layout.doc_deliverable_dir, exist_ok=True)
@@ -403,15 +408,16 @@ def convert_pdf(pdf_path: str, deliverables_dir: str | None = None,
     check.update(aggregate_warnings(result["warnings"]))
     check["missing_assets"] = result["missing_assets"]
     check["column_layout_suspected"] = result["column_layout_suspected"]
+    pdf_fp, _ocr_fp = _fingerprint_fields(pdf_path, dpi)
+    check["source_audit"] = build_source_audit_field(
+        layout.source_audit_path, pdf_fp, dpi, AUDIT_SCHEMA_VERSION)
+    check["ocr_degeneration"] = build_ocr_degeneration_field(
+        layout.source_audit_path, pdf_fp, dpi, AUDIT_SCHEMA_VERSION)
     if write_selfcheck:
         os.makedirs(layout.doc_work_dir, exist_ok=True)
         with open(layout.selfcheck_path, "w", encoding="utf-8") as f:
             json.dump(check, f, ensure_ascii=False, indent=2)
     cp.save_manifest(work_dir_, manifest)
-
-    # 审计落盘(hybrid 已在 _finalize_hybrid 内完成;其余路由在此按 route 分派)。
-    if not is_hybrid:
-        audit_report = _finalize_audit(route, born_digital_mode, pdf_path, layout, dpi)
 
     # 路线 B(ocr/hybrid)转换成功 → 清旧 deferred 登记标记(SUSPECT 算完成、giveup 不算)。
     if route == "B" and born_digital_mode in ("ocr", "hybrid"):

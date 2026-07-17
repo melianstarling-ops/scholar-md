@@ -1,6 +1,8 @@
 """Tier0 确定性自检:扫描件无源文本层,改用 block 覆盖率(每个有序块都进了 md)。"""
 from __future__ import annotations
 
+import json
+import os
 import re
 
 from scripts.pipelines.textbooks.reconstruct import (
@@ -193,3 +195,91 @@ def aggregate_warnings(warnings: list[dict]) -> dict:
         else:
             visual_warnings.append(w)
     return {"unhandled_labels": unhandled_labels, "visual_warnings": visual_warnings}
+
+
+# ===========================================================================
+# Task 10:selfcheck 汇总 source audit(计划 §7.2)。selfcheck.json 只存紧凑
+# 字段(status/suspect_pages/adoption/issue_counts/report),绝不把 audit 报告
+# 的逐页明细(pages 数组)复制进来。这里独立读取 + 校验落盘的
+# <stem>_source_audit.json——不导入/复用 convert.py 的 _audit_fresh(那是主链
+# 断点恢复的内部判定,职责不同,不应耦合),缺失/半截 JSON/指纹过期各自给
+# 明确的 issue code,供 batch 汇总消费。
+# ===========================================================================
+
+AUDIT_REPORT_MISSING = "audit_report_missing"
+AUDIT_REPORT_CORRUPT = "audit_report_corrupt"
+AUDIT_REPORT_STALE = "audit_report_stale"
+
+
+def _read_and_validate_audit_report(
+    report_path: str, pdf_fingerprint: dict, dpi: int, schema_version: int,
+) -> tuple[dict | None, str | None]:
+    """读取 + 校验落盘的 source audit 报告(selfcheck 展示专用,独立于 convert.py
+    主链的 resume/复用判定)。返回 (report, issue_code):report 为 None 时
+    issue_code 三选一(audit_report_missing/audit_report_corrupt/audit_report_stale);
+    报告可用时 issue_code 为 None。"""
+    if not os.path.exists(report_path):
+        return None, AUDIT_REPORT_MISSING
+    try:
+        with open(report_path, encoding="utf-8") as f:
+            report = json.load(f)
+    except (ValueError, OSError):
+        return None, AUDIT_REPORT_CORRUPT
+    if report.get("schema_version") != schema_version:
+        return None, AUDIT_REPORT_STALE
+    fp = report.get("pdf_fingerprint") or {}
+    if (fp.get("page_count") != pdf_fingerprint.get("page_count")
+            or fp.get("size_bytes") != pdf_fingerprint.get("size_bytes")):
+        return None, AUDIT_REPORT_STALE
+    if (report.get("ocr_fingerprint") or {}).get("dpi") != dpi:
+        return None, AUDIT_REPORT_STALE
+    return report, None
+
+
+def build_source_audit_field(
+    report_path: str, pdf_fingerprint: dict, dpi: int, schema_version: int,
+) -> dict:
+    """selfcheck.json 的紧凑 source_audit 字段(计划 §7.2,逐字段):
+    status/suspect_pages/adoption({adopted,fallback_ocr})/issue_counts/report
+    (仅文件名)。报告缺失/半截 JSON/指纹过期 → status=UNSCORABLE,issue_counts
+    带上对应的明确 issue code,不猜测、不假装读到了内容。"""
+    report_name = os.path.basename(report_path)
+    report, issue_code = _read_and_validate_audit_report(
+        report_path, pdf_fingerprint, dpi, schema_version)
+    if issue_code:
+        return {
+            "status": "UNSCORABLE", "suspect_pages": [], "adoption": {},
+            "issue_counts": {issue_code: 1}, "report": report_name,
+        }
+    summary = report.get("summary") or {}
+    adoption = summary.get("adoption") or {}
+    return {
+        "status": summary.get("status"),
+        "suspect_pages": list(summary.get("suspect_pages") or []),
+        "adoption": {"adopted": adoption.get("adopted", 0),
+                     "fallback_ocr": adoption.get("fallback_ocr", 0)},
+        "issue_counts": dict(summary.get("issue_counts") or {}),
+        "report": report_name,
+    }
+
+
+def build_ocr_degeneration_field(
+    report_path: str, pdf_fingerprint: dict, dpi: int, schema_version: int,
+) -> dict | None:
+    """selfcheck.json 的紧凑 ocr_degeneration 字段(计划 §7.2):从 audit 报告
+    页级 prose_audit 提取 n-gram 重复度峰值与命中 ocr_degeneration 的页列表。
+    报告缺失/半截 JSON/指纹过期 → None(缺席语义,不编造一个看似合理的零值)。"""
+    report, issue_code = _read_and_validate_audit_report(
+        report_path, pdf_fingerprint, dpi, schema_version)
+    if issue_code:
+        return None
+    max_repetition = 0.0
+    flagged_pages: list[int] = []
+    for page in report.get("pages") or []:
+        prose_audit = page.get("prose_audit") or {}
+        score = (prose_audit.get("metrics") or {}).get("ngram_repetition_score")
+        if score is not None and score > max_repetition:
+            max_repetition = score
+        if any(iss.get("code") == "ocr_degeneration" for iss in prose_audit.get("issues") or []):
+            flagged_pages.append(page.get("page"))
+    return {"max_ngram_repetition": max_repetition, "flagged_pages": flagged_pages}
