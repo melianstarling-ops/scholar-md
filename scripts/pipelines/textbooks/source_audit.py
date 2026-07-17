@@ -11,13 +11,20 @@ assign_source_words)与采信门(prose_adoption)是后续任务的职责,不在�
 """
 from __future__ import annotations
 
+import argparse
+import hashlib
+import json
 import math
+import os
 import re
 import unicodedata
 from collections import Counter
 from dataclasses import dataclass
 
 import fitz
+
+from scripts.pipelines.textbooks import checkpoint as _checkpoint
+from scripts.pipelines.textbooks.paths import DocLayout, resolve_layout
 
 # ---- PUA 判定:与 triage.py 的惯例一致,独立维护(只读参考,不导入其私有实现) ----
 _PUA_RANGES = ((0xE000, 0xF8FF), (0xF0000, 0xFFFFD), (0x100000, 0x10FFFD))
@@ -607,6 +614,32 @@ class AuditThresholds:
     minimum_single_column_sequence_ratio: float
 
 
+# 独立重跑/CLI 默认占位 profile——生产阈值待 Task 13 用真实语料标定(计划
+# §8.4)。名字显式含 uncalibrated,防止被误当生产阈值直接使用;Task 13 标定
+# 后如需切换 profile,应在调用方(CLI/Task 9)显式传入新 AuditThresholds,
+# 不在本模块内静默替换。
+THRESHOLD_PROFILE_UNCALIBRATED = "route_b_v1_uncalibrated"
+
+ROUTE_B_V1_UNCALIBRATED_THRESHOLDS = AuditThresholds(
+    minimum_reliable_chars=10,
+    maximum_bad_char_ratio=0.1,
+    maximum_block_ned=0.3,
+    minimum_char_recall=0.8,
+    minimum_token_recall=0.8,
+    minimum_numeric_token_recall=0.8,
+    maximum_addition_ratio=0.3,
+    maximum_repetition_score=0.5,
+    minimum_single_column_sequence_ratio=0.7,
+)
+
+# 独立重跑无 Task 9 记录决策时,audit_document 现场跑 adopt_prose_blocks 的
+# dry-run 采信推演阈值——同样是占位值(待 Task 13 标定),只用于审计分派,
+# 绝不是采信主链的判定依据(hybrid 主链的真实采信由 Task 9 传入 decisions_by_page)。
+_DRY_RUN_ADOPTION_MIN_CHAR_RATIO = 0.5
+_DRY_RUN_ADOPTION_MAX_CHAR_RATIO = 2.0
+_DRY_RUN_ADOPTION_MAX_NED = 0.2
+
+
 def _audit_join_words(words) -> str:
     """按 (line_no, word_no) 排序拼接,词间单空格——与 build_adopted_text 的排序惯例一致。"""
     ordered = sorted(words, key=lambda w: (w.line_no, w.word_no))
@@ -997,3 +1030,449 @@ def audit_prose(
         "metrics": metrics,
         "block_metrics": block_metrics,
     }
+
+
+# ===========================================================================
+# 文档级聚合(计划 §7.1,Task 8):把 Task 3-7 的页级能力(extract_source_page/
+# source_health/assign_source_words/adopt_prose_blocks/audit_prose/audit_table/
+# header_fingerprint)聚合成单文档审计报告 + 原子落盘 + 独立 CLI。
+# ---------------------------------------------------------------------------
+# 铁律:本节任何函数都不 import/调用 OCR 引擎(engine.py 等)——只读 PDF(fitz)
+# 与已落盘的 OCR res JSON(checkpoint.py 的公开接口),只产出/写审计报告 JSON,
+# 绝不改写 Markdown 或任何其它产物。采信落地(把 source_text 写回 Markdown)是
+# Task 9 convert.py 编排的职责;decisions_by_page=None 时本模块只是"现场推演"
+# 采信结果用于审计分派(dry-run),不据此改写任何东西。
+# ===========================================================================
+
+# 公式块 label(计划 §6.5,与 prose_adoption.NEVER_ADOPT_LABELS 中的公式子集
+# 一致;独立维护,不导入 prose_adoption 的私有/内部集合)。
+_FORMULA_LABELS = frozenset({"display_formula", "inline_formula", "formula_number"})
+
+# 公式/数学符号码点区:与 prose_adoption._MATH_RANGES 的惯例一致,独立维护
+# (只读参考,不导入其私有实现——本文件已有 _PUA_RANGES 同惯例先例)。
+_FORMULA_MATH_RANGES = (
+    (0x2190, 0x21FF),  # 箭头
+    (0x2200, 0x22FF),  # 数学运算符
+    (0x2A00, 0x2AFF),  # 补充数学运算符
+    (0x27C0, 0x27EF),  # 杂项数学符号 A
+    (0x2980, 0x29FF),  # 杂项数学符号 B
+    (0x1D400, 0x1D7FF),  # 数学字母数字符号
+)
+
+
+def _is_formula_math_char(ch: str) -> bool:
+    o = ord(ch)
+    return any(lo <= o <= hi for lo, hi in _FORMULA_MATH_RANGES)
+
+
+def _formula_block_audit(
+    block_id: int,
+    label: str | None,
+    words,
+    *,
+    geometry_unscorable: bool,
+    thresholds: AuditThresholds,
+    bad_font_count: int,
+) -> dict:
+    """公式 bbox 内源健康记录(计划 §6.5)。只记录 PUA/控制字符/坏字体计数、
+    文本层是否完全无公式字符、源是否不可靠——不做 LaTeX 对比,不给"一致/
+    不一致"结论。"""
+    total, bad_ratio = _audit_source_reliability(words)
+    pua = sum(1 for w in words for ch in w.text if _is_pua(ch))
+    control = sum(1 for w in words for ch in w.text if _is_bad_control(ch))
+    has_formula_chars = any(_is_formula_math_char(ch) for w in words for ch in w.text)
+    source_unreliable = (
+        geometry_unscorable
+        or total < thresholds.minimum_reliable_chars
+        or bad_ratio > thresholds.maximum_bad_char_ratio
+    )
+    return {
+        "block_id": block_id,
+        "label": label,
+        "source_char_count": total,
+        "pua_count": pua,
+        "control_char_count": control,
+        "bad_font_count": bad_font_count,
+        "bad_char_ratio": bad_ratio,
+        "text_layer_has_no_formula_chars": not has_formula_chars,
+        "source_unreliable_for_formula": source_unreliable,
+    }
+
+
+def _audit_one_page(
+    *,
+    doc: fitz.Document,
+    work_dir: str,
+    page_no: int,
+    failed_by_page: dict,
+    decisions_by_page: dict | None,
+    thresholds: AuditThresholds,
+    adoption_thresholds,
+    adopt_prose_blocks_fn,
+    audit_table_fn,
+    parse_table_html_fn,
+    header_fingerprint_fn,
+) -> tuple[dict, str]:
+    """单页审计聚合。返回 (页级报告 dict, 页面 status)。
+
+    页面语义三分(计划 Task 8 要求):
+      - 失败页(manifest.failed_pages 记录)→ page_failed,UNSCORABLE。
+      - 缺 res JSON 但未被记为失败(独立重跑发现的缺页)→ page_incomplete,
+        UNSCORABLE。
+      - 合法空页(res JSON 存在且 parsing_res_list==[],checkpoint.write_
+        empty_page 的哨兵)→ OK,不计入 suspect。
+    """
+    fitz_page = doc[page_no - 1]
+
+    if not _checkpoint.is_page_done(work_dir, page_no):
+        failure = failed_by_page.get(page_no)
+        if failure is not None:
+            issue = {
+                "code": "page_failed",
+                "block_id": None,
+                "detail": (
+                    f"引擎处理失败(kind={failure.get('kind')}):{failure.get('error')}"
+                ),
+            }
+        else:
+            issue = {
+                "code": "page_incomplete",
+                "block_id": None,
+                "detail": "过程根缺该页 res JSON,独立重跑无法审计该页",
+            }
+        page_report = {
+            "page": page_no,
+            "status": "UNSCORABLE",
+            "source_health": {},
+            "blocks": [],
+            "prose_audit": {},
+            "formula_audit": [],
+            "table_audit": [],
+            "issues": [issue],
+        }
+        return page_report, "UNSCORABLE"
+
+    ocr_result = _checkpoint.load_page_result(work_dir, page_no)
+    ocr_blocks = ocr_result.get("parsing_res_list") or []
+
+    source_page = extract_source_page(fitz_page)
+    health = source_health(source_page)
+
+    if not ocr_blocks:
+        # 合法空页:与失败/缺页语义不同,视为 OK,不产生 issue。
+        page_report = {
+            "page": page_no,
+            "status": "OK",
+            "source_health": health,
+            "blocks": [],
+            "prose_audit": {"status": "OK", "issues": [], "metrics": {}, "block_metrics": {}},
+            "formula_audit": [],
+            "table_audit": [],
+            "issues": [],
+        }
+        return page_report, "OK"
+
+    geometry = page_geometry(fitz_page, ocr_result)
+    assignment = assign_source_words(source_page["words"], ocr_blocks, geometry)
+    geometry_unscorable = bool(assignment.get("geometry_unscorable"))
+
+    if decisions_by_page is not None:
+        decisions = decisions_by_page.get(page_no, [])
+    else:
+        decisions = adopt_prose_blocks_fn(
+            ocr_blocks, assignment, source_page, not geometry.unscorable,
+            adoption_thresholds,
+        )
+
+    prose_result = audit_prose(source_page, ocr_blocks, decisions, assignment, thresholds)
+
+    decisions_by_id = {d.block_id: d for d in decisions}
+    assignments_by_block = assignment.get("assignments", {}) or {}
+    block_labels = assignment.get("block_labels", {}) or {}
+
+    # 页面字体信息只有页粒度(fitz 不按块暴露字体归属)——诚实复用页级信号,
+    # 不伪造块级精度(计划 §6.5"坏字体计数",详见 report 中的说明)。
+    bad_font_count = 1 if health.get("suspected_missing_tounicode_cid") else 0
+
+    blocks_out: list[dict] = []
+    formula_out: list[dict] = []
+    table_out: list[dict] = []
+    issues: list[dict] = list(prose_result["issues"])
+
+    for i, block in enumerate(ocr_blocks):
+        label = block.get("block_label") if isinstance(block, dict) else None
+        if label is None:
+            label = block_labels.get(i)
+
+        decision = decisions_by_id.get(i)
+        if decision is None:
+            # honest 兜底:调用方给了 decisions_by_page 但这一页/这一块没有对应
+            # 条目——不得编造 content_source,显式标 no_decision。
+            content_source, reasons, block_ned = "ocr", ["no_decision"], None
+        else:
+            content_source = decision.content_source
+            reasons = decision.reasons
+            block_ned = decision.block_ned
+        blocks_out.append(
+            {
+                "block_id": i,
+                "label": label,
+                "content_source": content_source,
+                "reasons": reasons,
+                "block_ned": block_ned,
+            }
+        )
+
+        words = assignments_by_block.get(i, [])
+        if label in _FORMULA_LABELS:
+            formula_entry = _formula_block_audit(
+                i, label, words,
+                geometry_unscorable=geometry_unscorable,
+                thresholds=thresholds,
+                bad_font_count=bad_font_count,
+            )
+            formula_out.append(formula_entry)
+            if formula_entry["source_unreliable_for_formula"]:
+                issues.append(
+                    {
+                        "code": "source_unreliable_for_formula",
+                        "block_id": i,
+                        "detail": "公式块源文本不可靠,仅记录,不作 LaTeX 对比结论",
+                    }
+                )
+        elif label == "table":
+            table_result = audit_table_fn(block, words)
+            content = block.get("block_content", "") if isinstance(block, dict) else ""
+            table = parse_table_html_fn(content)
+            table_out.append(
+                {
+                    "block_id": i,
+                    "status": table_result["status"],
+                    "structure_issues": table_result["structure_issues"],
+                    "content_issues": table_result["content_issues"],
+                    "metrics": table_result["metrics"],
+                    "header_fingerprint": header_fingerprint_fn(table),
+                }
+            )
+            for si in table_result["structure_issues"]:
+                issues.append({"code": si["code"], "block_id": i, "detail": si.get("detail", "")})
+            for ci in table_result["content_issues"]:
+                issues.append({"code": ci["code"], "block_id": i, "detail": ci.get("detail", "")})
+            if table_result["status"] == "table_unscorable":
+                issues.append(
+                    {
+                        "code": "table_unscorable",
+                        "block_id": i,
+                        "detail": "表格源不可信/为空,不参与数值对账",
+                    }
+                )
+
+    if prose_result["status"] == "UNSCORABLE":
+        status = "UNSCORABLE"
+    elif issues:
+        status = "SUSPECT"
+    else:
+        status = "OK"
+
+    page_report = {
+        "page": page_no,
+        "status": status,
+        "source_health": health,
+        "blocks": blocks_out,
+        "prose_audit": prose_result,
+        "formula_audit": formula_out,
+        "table_audit": table_out,
+        "issues": issues,
+    }
+    return page_report, status
+
+
+def audit_document(
+    pdf_path: str,
+    layout: DocLayout,
+    thresholds: AuditThresholds,
+    decisions_by_page: dict[int, list] | None,
+) -> dict:
+    """文档级审计聚合(计划 §7.1,Task 8)。只读 PDF + 已落盘 OCR res JSON,
+    绝不调用 OCR 引擎、绝不改写 Markdown/任何产物——独立重跑安全。
+
+    decisions_by_page:
+      - None:无 Task 9 记录的采信决策(ocr 模式或本模块独立重跑)——逐页现场
+        跑 assign_source_words + adopt_prose_blocks 得 dry-run 决策,仅用于
+        审计分派;报告标 adoption_source="dry_run",born_digital_mode="ocr"。
+        绝不据此改写任何产物。
+      - dict:{page(1-based) -> list[AdoptionDecision]},Task 9 hybrid 主链
+        实际落地的决策;报告标 adoption_source="recorded",
+        born_digital_mode="hybrid"。audit_document 本身不知道 Task 9 的路由
+        状态机,这是由"是否提供了已记录决策"这一本函数唯一可观察的信号决定的
+        诚实推断,不是猜测 Task 9 内部状态。
+    """
+    # prose_adoption/table_audit 在模块顶层 import 本模块(source_audit),
+    # 这里若在模块顶层反向 import 会成环——沿用 audit_prose 已有的局部 import
+    # 惯例。
+    from scripts.pipelines.textbooks.prose_adoption import (
+        AdoptionThresholds as _AdoptionThresholds,
+        adopt_prose_blocks as _adopt_prose_blocks,
+    )
+    from scripts.pipelines.textbooks.table_audit import (
+        audit_table as _audit_table,
+        header_fingerprint as _header_fingerprint,
+        parse_table_html as _parse_table_html,
+    )
+
+    with open(pdf_path, "rb") as f:
+        pdf_bytes = f.read()
+
+    dry_run = decisions_by_page is None
+    adoption_thresholds = _AdoptionThresholds(
+        adoption_min_char_ratio=_DRY_RUN_ADOPTION_MIN_CHAR_RATIO,
+        adoption_max_char_ratio=_DRY_RUN_ADOPTION_MAX_CHAR_RATIO,
+        adoption_max_ned=_DRY_RUN_ADOPTION_MAX_NED,
+    )
+
+    manifest = _checkpoint.load_manifest(layout.work_dir) or {}
+    dpi = manifest.get("dpi", _checkpoint.DEFAULT_DPI)
+    failed_by_page = {
+        f["page"]: f for f in (manifest.get("failed_pages") or [])
+    }
+
+    doc = fitz.open(pdf_path)
+    try:
+        page_count = doc.page_count
+
+        pages_out: list[dict] = []
+        prose_blocks_total = 0
+        adopted_total = 0
+        fallback_total = 0
+        fallback_reason_counter: Counter = Counter()
+        issue_counter: Counter = Counter()
+        suspect_pages: list[int] = []
+        scorable_count = 0
+
+        for page_no in range(1, page_count + 1):
+            page_report, status = _audit_one_page(
+                doc=doc,
+                work_dir=layout.work_dir,
+                page_no=page_no,
+                failed_by_page=failed_by_page,
+                decisions_by_page=decisions_by_page,
+                thresholds=thresholds,
+                adoption_thresholds=adoption_thresholds,
+                adopt_prose_blocks_fn=_adopt_prose_blocks,
+                audit_table_fn=_audit_table,
+                parse_table_html_fn=_parse_table_html,
+                header_fingerprint_fn=_header_fingerprint,
+            )
+            pages_out.append(page_report)
+
+            if status != "UNSCORABLE":
+                scorable_count += 1
+            if status == "SUSPECT":
+                suspect_pages.append(page_no)
+
+            prose_metrics = (page_report.get("prose_audit") or {}).get("metrics") or {}
+            prose_blocks_total += prose_metrics.get("prose_block_count", 0) or 0
+            adopted_total += prose_metrics.get("adopted_block_count", 0) or 0
+            fallback_total += prose_metrics.get("fallback_block_count", 0) or 0
+
+            for block_report in page_report.get("blocks", []):
+                if block_report["content_source"] == "ocr" and block_report["reasons"] not in (
+                    [], ["label_not_adoptable"], ["no_decision"],
+                ):
+                    fallback_reason_counter[block_report["reasons"][0]] += 1
+
+            for issue in page_report.get("issues", []):
+                issue_counter[issue["code"]] += 1
+    finally:
+        doc.close()
+
+    if scorable_count == 0:
+        doc_status = "UNSCORABLE"
+    elif suspect_pages or scorable_count < page_count:
+        doc_status = "SUSPECT"
+    else:
+        doc_status = "OK"
+
+    pdf_fingerprint = {
+        "size_bytes": len(pdf_bytes),
+        "sha256": hashlib.sha256(pdf_bytes).hexdigest(),
+        "page_count": page_count,
+    }
+
+    return {
+        "schema_version": 2,
+        "stem": layout.stem,
+        "route": "B",
+        "born_digital_mode": "ocr" if dry_run else "hybrid",
+        "pdf_fingerprint": pdf_fingerprint,
+        "ocr_fingerprint": {"dpi": dpi, "page_count": page_count},
+        "threshold_profile": THRESHOLD_PROFILE_UNCALIBRATED,
+        "adoption_source": "dry_run" if dry_run else "recorded",
+        "summary": {
+            "status": doc_status,
+            "pages": page_count,
+            "scorable_pages": scorable_count,
+            "suspect_pages": suspect_pages,
+            "adoption": {
+                "prose_blocks": prose_blocks_total,
+                "adopted": adopted_total,
+                "fallback_ocr": fallback_total,
+                "fallback_reasons": dict(fallback_reason_counter),
+            },
+            "issue_counts": dict(issue_counter),
+        },
+        "pages": pages_out,
+    }
+
+
+def write_audit_report(report: dict, path: str) -> None:
+    """原子写审计报告(计划 §7.1):先写 <path>.tmp 再 os.replace,进程崩溃/
+    断电场景下目标文件要么是旧内容要么是完整新内容,绝不留半截 JSON。"""
+    directory = os.path.dirname(path)
+    if directory:
+        os.makedirs(directory, exist_ok=True)
+    tmp_path = f"{path}.tmp"
+    with open(tmp_path, "w", encoding="utf-8") as f:
+        json.dump(report, f, ensure_ascii=False, indent=2)
+    os.replace(tmp_path, path)
+
+
+def main(argv: list[str] | None = None) -> int:
+    """独立 source audit CLI(计划 Task 8):只读 PDF + 已落盘 OCR res JSON,
+    产出文档级审计报告——不调用 OCR 引擎、不改写 Markdown。
+
+    用法:
+      python -X utf8 -m scripts.pipelines.textbooks.source_audit \
+          --src <PDF> --out <DELIVERABLES> --work-dir <WORK> --stem <STEM>
+    """
+    ap = argparse.ArgumentParser(
+        description="路线 B source audit 独立 CLI(只读已落盘 OCR 结果,产出文档级审计报告)"
+    )
+    ap.add_argument("--src", required=True, help="PDF 文件路径")
+    ap.add_argument("--out", required=True, help="交付根(DocLayout.deliverables_root)")
+    ap.add_argument("--work-dir", required=True, help="过程根(含已落盘的 OCR res JSON)")
+    ap.add_argument("--stem", required=True, help="文档 stem")
+    ap.add_argument(
+        "--dry-run-adoption",
+        action="store_true",
+        help="仅报告采信推演结果,不落盘改写任何产物(本 CLI 独立重跑恒为此语义)",
+    )
+    args = ap.parse_args(argv)
+
+    layout = resolve_layout(args.stem, args.out, args.work_dir)
+    report = audit_document(
+        args.src, layout, ROUTE_B_V1_UNCALIBRATED_THRESHOLDS, decisions_by_page=None
+    )
+    write_audit_report(report, layout.source_audit_path)
+
+    summary = report["summary"]
+    print(f"[textbooks] source audit 报告已写: {layout.source_audit_path}")
+    print(
+        f"  status={summary['status']} pages={summary['pages']} "
+        f"scorable={summary['scorable_pages']} suspect_pages={summary['suspect_pages']}"
+    )
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

@@ -1,9 +1,14 @@
 import json
+import os
 
 import fitz
 
+from scripts.pipelines.textbooks import checkpoint as cp
+from scripts.pipelines.textbooks.paths import resolve_layout
 from scripts.pipelines.textbooks.prose_adoption import AdoptionDecision
 from scripts.pipelines.textbooks.source_audit import (
+    ROUTE_B_V1_UNCALIBRATED_THRESHOLDS,
+    THRESHOLD_PROFILE_UNCALIBRATED,
     AuditThresholds,
     PageGeometry,
     SourceWord,
@@ -13,9 +18,11 @@ from scripts.pipelines.textbooks.source_audit import (
     _valid_bbox,
     assign_source_words,
     assign_word_to_block,
+    audit_document,
     audit_prose,
     extract_numeric_tokens,
     extract_source_page,
+    main as source_audit_main,
     ngram_repetition_score,
     normalize_bbox,
     normalize_prose_for_compare,
@@ -23,6 +30,7 @@ from scripts.pipelines.textbooks.source_audit import (
     overlap_ratio,
     page_geometry,
     source_health,
+    write_audit_report,
 )
 
 
@@ -1194,3 +1202,424 @@ def test_audit_prose_weighted_aggregate_reveals_long_block_char_loss():
     # 加权聚合必须显著低于"每块平均"——不能被短块的满分掩盖长块的丢失
     assert weighted < naive_average - 0.2
     assert weighted < 0.3
+
+
+# ===========================================================================
+# Task 8:文档级聚合 audit_document + 原子写 write_audit_report + 独立 CLI。
+# ---------------------------------------------------------------------------
+# 铁律:本节测试全部只构造 tmp 内的 PDF + 手写 OCR res JSON(不跑真实引擎、
+# 不 import engine.py);audit_document 独立重跑绝不改写 Markdown/任何产物。
+# ===========================================================================
+
+
+def _make_pdf(path, page_texts, width=600, height=800):
+    """构造一份 tmp PDF:每页可选插入一行纯 ASCII 文本(顶左原点,与既有
+    extract_source_page 测试的坐标惯例一致)。"""
+    doc = fitz.open()
+    for spec in page_texts:
+        page = doc.new_page(width=width, height=height)
+        for text, pos in spec:
+            page.insert_text(pos, text, fontname="helv", fontsize=12)
+    doc.save(path)
+    doc.close()
+
+
+def _write_manifest(work_dir, page_count, dpi=150, failed_pages=None):
+    os.makedirs(work_dir, exist_ok=True)
+    manifest = {
+        "pdf_path": "x",
+        "fingerprint": {"page_count": page_count},
+        "dpi": dpi,
+        "route": "B",
+        "failed_pages": failed_pages or [],
+        "in_progress": None,
+        "attempts_by_page": {},
+        "restarts": 0,
+    }
+    with open(os.path.join(work_dir, "manifest.json"), "w", encoding="utf-8") as f:
+        json.dump(manifest, f, ensure_ascii=False)
+
+
+def _write_page_res(work_dir, page, blocks, width=600, height=800):
+    os.makedirs(work_dir, exist_ok=True)
+    with open(cp.page_res_path(work_dir, page), "w", encoding="utf-8") as f:
+        json.dump(
+            {"width": width, "height": height, "parsing_res_list": blocks},
+            f,
+            ensure_ascii=False,
+        )
+
+
+def _doc_layout(tmp_path, stem="Book"):
+    return resolve_layout(stem, str(tmp_path / "out"), str(tmp_path / "work"))
+
+
+# ---- 1. 多页聚合:一页采信、一页回退 → summary 与页级结果一致 ----------------
+
+
+def test_audit_document_aggregates_adoption_across_pages(tmp_path):
+    layout = _doc_layout(tmp_path)
+    pdf_path = str(tmp_path / "book.pdf")
+    _make_pdf(
+        pdf_path,
+        [
+            [("hello world", (72, 72))],       # page 1:与 OCR 完全一致 → 采信
+            [("alpha beta", (72, 72))],         # page 2:与 OCR 严重不符 → 回退
+        ],
+    )
+    _write_manifest(layout.work_dir, page_count=2)
+    _write_page_res(
+        layout.work_dir, 1,
+        [{"block_label": "text", "block_content": "hello world",
+          "block_bbox": [0, 0, 600, 800]}],
+    )
+    _write_page_res(
+        layout.work_dir, 2,
+        [{"block_label": "text", "block_content": "zzzzzzzzzzzzzzzzzzzz",
+          "block_bbox": [0, 0, 600, 800]}],
+    )
+
+    report = audit_document(
+        pdf_path, layout, ROUTE_B_V1_UNCALIBRATED_THRESHOLDS, decisions_by_page=None
+    )
+
+    summary = report["summary"]
+    assert summary["pages"] == 2
+    assert summary["scorable_pages"] == 2
+    assert summary["adoption"]["prose_blocks"] == 2
+    assert summary["adoption"]["adopted"] == 1
+    assert summary["adoption"]["fallback_ocr"] == 1
+    assert summary["adoption"]["fallback_reasons"] == {"char_ratio_out_of_range": 1}
+
+    page1, page2 = report["pages"]
+    assert page1["status"] == "OK"
+    assert page1["blocks"][0]["content_source"] == "source_text"
+    assert page1["blocks"][0]["reasons"] == []
+    assert page2["blocks"][0]["content_source"] == "ocr"
+    assert page2["blocks"][0]["reasons"] == ["char_ratio_out_of_range"]
+    # page2 的回退块与 OCR 严重不符,audit_prose 必须真实报出对账问题(page 级
+    # SUSPECT 与 issue_counts 应与页级结果一致,而不是聚合层凭空编数字)。
+    assert page2["status"] == "SUSPECT"
+    assert summary["suspect_pages"] == [2]
+    assert summary["issue_counts"] == {
+        code: sum(1 for iss in page2["issues"] if iss["code"] == code)
+        for code in {iss["code"] for iss in page2["issues"]}
+    }
+    assert summary["status"] == "SUSPECT"
+
+
+# ---- 2. 页缺 res JSON(非 manifest 失败页) → page_incomplete + UNSCORABLE ---
+
+
+def test_audit_document_missing_res_json_reports_page_incomplete(tmp_path):
+    layout = _doc_layout(tmp_path)
+    pdf_path = str(tmp_path / "book.pdf")
+    _make_pdf(pdf_path, [[("hello world", (72, 72))], [("second page", (72, 72))]])
+    _write_manifest(layout.work_dir, page_count=2)
+    _write_page_res(
+        layout.work_dir, 1,
+        [{"block_label": "text", "block_content": "hello world",
+          "block_bbox": [0, 0, 600, 800]}],
+    )
+    # page 2 的 res JSON 故意不写(既非合法空页,也未被 manifest 记为失败页)。
+
+    report = audit_document(
+        pdf_path, layout, ROUTE_B_V1_UNCALIBRATED_THRESHOLDS, decisions_by_page=None
+    )
+
+    page1, page2 = report["pages"]
+    assert page1["status"] == "OK"
+    assert page2["status"] == "UNSCORABLE"
+    assert [iss["code"] for iss in page2["issues"]] == ["page_incomplete"]
+    assert report["summary"]["scorable_pages"] == 1
+    # 文档不崩:page1 仍完整聚合出 adoption 统计。
+    assert report["summary"]["adoption"]["adopted"] == 1
+
+
+# ---- 3. 失败页(manifest failed_pages)与"缺 res JSON 但未记失败"语义区分 ----
+
+
+def test_audit_document_distinguishes_failed_page_from_incomplete_page(tmp_path):
+    layout = _doc_layout(tmp_path)
+    pdf_path = str(tmp_path / "book.pdf")
+    _make_pdf(pdf_path, [[("a", (72, 72))], [("b", (72, 72))], [("c", (72, 72))]])
+    _write_manifest(
+        layout.work_dir, page_count=3,
+        failed_pages=[{"page": 2, "error": "boom", "kind": "process-killed"}],
+    )
+    _write_page_res(
+        layout.work_dir, 1,
+        [{"block_label": "text", "block_content": "a", "block_bbox": [0, 0, 600, 800]}],
+    )
+    # page 2:manifest 记为失败(毒页),无 res JSON。
+    # page 3:既无 res JSON,也未被 manifest 记为失败 → 视为独立重跑发现的缺页。
+
+    report = audit_document(
+        pdf_path, layout, ROUTE_B_V1_UNCALIBRATED_THRESHOLDS, decisions_by_page=None
+    )
+
+    _, page2, page3 = report["pages"]
+    assert page2["status"] == "UNSCORABLE"
+    assert page3["status"] == "UNSCORABLE"
+    codes2 = [iss["code"] for iss in page2["issues"]]
+    codes3 = [iss["code"] for iss in page3["issues"]]
+    assert codes2 == ["page_failed"]
+    assert codes3 == ["page_incomplete"]
+    assert codes2 != codes3
+    assert "process-killed" in page2["issues"][0]["detail"]
+
+
+# ---- 4. 合法空页(parsing_res_list=[])→ OK,不计入 suspect --------------------
+
+
+def test_audit_document_legit_empty_page_is_ok_not_suspect(tmp_path):
+    layout = _doc_layout(tmp_path)
+    pdf_path = str(tmp_path / "book.pdf")
+    _make_pdf(pdf_path, [[("hello world", (72, 72))], []])
+    _write_manifest(layout.work_dir, page_count=2)
+    _write_page_res(
+        layout.work_dir, 1,
+        [{"block_label": "text", "block_content": "hello world",
+          "block_bbox": [0, 0, 600, 800]}],
+    )
+    cp.write_empty_page(layout.work_dir, 2)  # 合法空白页哨兵(真实产线落盘方式)
+
+    report = audit_document(
+        pdf_path, layout, ROUTE_B_V1_UNCALIBRATED_THRESHOLDS, decisions_by_page=None
+    )
+
+    page2 = report["pages"][1]
+    assert page2["status"] == "OK"
+    assert page2["blocks"] == []
+    assert page2["issues"] == []
+    assert 2 not in report["summary"]["suspect_pages"]
+    assert report["summary"]["scorable_pages"] == 2
+    assert report["summary"]["status"] == "OK"
+
+
+# ---- 5. 一页内 prose + formula + table 三类块的块级 provenance/审计记录 -----
+
+
+def test_audit_document_records_formula_and_table_block_audits(tmp_path):
+    layout = _doc_layout(tmp_path)
+    pdf_path = str(tmp_path / "book.pdf")
+    _make_pdf(
+        pdf_path,
+        [[
+            ("hello world", (72, 72)),                  # prose 区域(y 0..200)
+            ("formula placeholder text", (72, 250)),    # formula 区域(y 200..400)
+            ("A 1", (72, 450)),                          # table 区域(y 400..600)
+        ]],
+    )
+    _write_manifest(layout.work_dir, page_count=1)
+    _write_page_res(
+        layout.work_dir, 1,
+        [
+            {"block_label": "text", "block_content": "hello world",
+             "block_bbox": [0, 0, 600, 200]},
+            {"block_label": "display_formula", "block_content": "$x^2$",
+             "block_bbox": [0, 200, 600, 400]},
+            {"block_label": "table",
+             "block_content": "<table><tr><th>A</th></tr><tr><td>1</td></tr></table>",
+             "block_bbox": [0, 400, 600, 600]},
+        ],
+    )
+
+    report = audit_document(
+        pdf_path, layout, ROUTE_B_V1_UNCALIBRATED_THRESHOLDS, decisions_by_page=None
+    )
+
+    page = report["pages"][0]
+    assert len(page["blocks"]) == 3
+    assert page["blocks"][0]["content_source"] == "source_text"  # prose 采信
+    assert page["blocks"][1]["reasons"] == ["label_not_adoptable"]  # 公式永不采信
+    assert page["blocks"][2]["reasons"] == ["label_not_adoptable"]  # 表格永不采信
+
+    assert len(page["formula_audit"]) == 1
+    formula = page["formula_audit"][0]
+    assert formula["block_id"] == 1
+    assert formula["pua_count"] == 0
+    assert formula["control_char_count"] == 0
+    assert formula["source_char_count"] > 0
+    assert formula["text_layer_has_no_formula_chars"] is True
+    assert formula["source_unreliable_for_formula"] is False
+
+    assert len(page["table_audit"]) == 1
+    table = page["table_audit"][0]
+    assert table["block_id"] == 2
+    assert isinstance(table["header_fingerprint"], str)
+    assert len(table["header_fingerprint"]) == 64  # sha256 hex
+    assert "n_rows" in table["metrics"]
+
+
+# ---- 6. write_audit_report 原子写:替换已存在文件、内容可 round-trip -------
+
+
+def test_write_audit_report_atomic_replace_and_roundtrip(tmp_path):
+    path = str(tmp_path / "nested" / "Book_source_audit.json")
+    os.makedirs(os.path.dirname(path))
+    with open(path, "w", encoding="utf-8") as f:
+        f.write("not even json")  # 预先存在的(半截/旧)内容
+
+    write_audit_report({"schema_version": 2, "n": 1}, path)
+    with open(path, encoding="utf-8") as f:
+        assert json.load(f) == {"schema_version": 2, "n": 1}
+    assert not os.path.exists(path + ".tmp")
+
+    # 再写一次,证明可重复替换(不是只在目标不存在时才成功)。
+    write_audit_report({"schema_version": 2, "n": 2}, path)
+    with open(path, encoding="utf-8") as f:
+        assert json.load(f) == {"schema_version": 2, "n": 2}
+    assert not os.path.exists(path + ".tmp")
+
+
+def test_write_audit_report_creates_parent_dir(tmp_path):
+    path = str(tmp_path / "brand_new_dir" / "Book_source_audit.json")
+    write_audit_report({"ok": True}, path)
+    with open(path, encoding="utf-8") as f:
+        assert json.load(f) == {"ok": True}
+
+
+# ---- 7. decisions_by_page=None → dry_run;提供决策 → recorded --------------
+
+
+def test_audit_document_decisions_by_page_none_is_dry_run(tmp_path):
+    layout = _doc_layout(tmp_path)
+    pdf_path = str(tmp_path / "book.pdf")
+    _make_pdf(pdf_path, [[("hello world", (72, 72))]])
+    _write_manifest(layout.work_dir, page_count=1)
+    _write_page_res(
+        layout.work_dir, 1,
+        [{"block_label": "text", "block_content": "hello world",
+          "block_bbox": [0, 0, 600, 800]}],
+    )
+
+    report = audit_document(
+        pdf_path, layout, ROUTE_B_V1_UNCALIBRATED_THRESHOLDS, decisions_by_page=None
+    )
+    assert report["adoption_source"] == "dry_run"
+    assert report["born_digital_mode"] == "ocr"
+
+
+def test_audit_document_decisions_by_page_provided_is_recorded(tmp_path):
+    layout = _doc_layout(tmp_path)
+    pdf_path = str(tmp_path / "book.pdf")
+    _make_pdf(pdf_path, [[("hello world", (72, 72))]])
+    _write_manifest(layout.work_dir, page_count=1)
+    _write_page_res(
+        layout.work_dir, 1,
+        [{"block_label": "text", "block_content": "totally different ocr text",
+          "block_bbox": [0, 0, 600, 800]}],
+    )
+    # 显式给定"已记录"的决策(与现场 dry-run 推演出的结果不同,证明 recorded
+    # 分支真的消费调用方传入的决策,而不是自己重新跑了一遍现场推演)。
+    recorded = [
+        AdoptionDecision(
+            block_id=0, content_source="source_text", reasons=[],
+            block_ned=0.0, adopted_text="hello world",
+        )
+    ]
+
+    report = audit_document(
+        pdf_path, layout, ROUTE_B_V1_UNCALIBRATED_THRESHOLDS,
+        decisions_by_page={1: recorded},
+    )
+    assert report["adoption_source"] == "recorded"
+    assert report["born_digital_mode"] == "hybrid"
+    block = report["pages"][0]["blocks"][0]
+    assert block["content_source"] == "source_text"
+    assert block["reasons"] == []
+
+
+def test_audit_document_recorded_missing_page_key_marks_no_decision(tmp_path):
+    layout = _doc_layout(tmp_path)
+    pdf_path = str(tmp_path / "book.pdf")
+    _make_pdf(pdf_path, [[("hello world", (72, 72))]])
+    _write_manifest(layout.work_dir, page_count=1)
+    _write_page_res(
+        layout.work_dir, 1,
+        [{"block_label": "text", "block_content": "hello world",
+          "block_bbox": [0, 0, 600, 800]}],
+    )
+
+    # decisions_by_page 非 None,但这一页没有对应条目——honest 兜底,不得
+    # 编造一个 content_source。
+    report = audit_document(
+        pdf_path, layout, ROUTE_B_V1_UNCALIBRATED_THRESHOLDS, decisions_by_page={},
+    )
+    block = report["pages"][0]["blocks"][0]
+    assert block["content_source"] == "ocr"
+    assert block["reasons"] == ["no_decision"]
+
+
+# ---- 8. summary 不含 pages 明细的复制(结构断言) ---------------------------
+
+
+def test_audit_document_summary_has_no_page_detail_duplication(tmp_path):
+    layout = _doc_layout(tmp_path)
+    pdf_path = str(tmp_path / "book.pdf")
+    _make_pdf(pdf_path, [[("hello world", (72, 72))]])
+    _write_manifest(layout.work_dir, page_count=1)
+    _write_page_res(
+        layout.work_dir, 1,
+        [{"block_label": "text", "block_content": "hello world",
+          "block_bbox": [0, 0, 600, 800]}],
+    )
+
+    report = audit_document(
+        pdf_path, layout, ROUTE_B_V1_UNCALIBRATED_THRESHOLDS, decisions_by_page=None
+    )
+    assert set(report["summary"].keys()) == {
+        "status", "pages", "scorable_pages", "suspect_pages",
+        "adoption", "issue_counts",
+    }
+    # 顶层 report["pages"] 是逐页明细列表;summary["pages"] 只是计数(int),
+    # 两者同名不同义——summary 里绝不应嵌入页级明细。
+    assert isinstance(report["pages"], list)
+    assert isinstance(report["summary"]["pages"], int)
+    assert report["schema_version"] == 2
+    assert report["route"] == "B"
+    assert report["threshold_profile"] == THRESHOLD_PROFILE_UNCALIBRATED
+    assert report["pdf_fingerprint"]["page_count"] == 1
+    assert isinstance(report["pdf_fingerprint"]["sha256"], str)
+    assert len(report["pdf_fingerprint"]["sha256"]) == 64
+    assert report["pdf_fingerprint"]["size_bytes"] == os.path.getsize(pdf_path)
+    assert report["ocr_fingerprint"] == {"dpi": 150, "page_count": 1}
+
+
+# ---- 9. CLI:必需参数缺失报错;给全参数产出报告文件 --------------------------
+
+
+def test_cli_missing_required_arg_raises_systemexit():
+    import pytest
+    with pytest.raises(SystemExit):
+        source_audit_main(["--src", "x.pdf", "--out", "y"])  # 缺 --work-dir/--stem
+
+
+def test_cli_full_args_produces_report_file(tmp_path):
+    out_dir = tmp_path / "out"
+    work_dir_root = tmp_path / "work"
+    pdf_path = str(tmp_path / "book.pdf")
+    _make_pdf(pdf_path, [[("hello world", (72, 72))]])
+
+    layout = resolve_layout("Book", str(out_dir), str(work_dir_root))
+    _write_manifest(layout.work_dir, page_count=1)
+    _write_page_res(
+        layout.work_dir, 1,
+        [{"block_label": "text", "block_content": "hello world",
+          "block_bbox": [0, 0, 600, 800]}],
+    )
+
+    rc = source_audit_main([
+        "--src", pdf_path,
+        "--out", str(out_dir),
+        "--work-dir", str(work_dir_root),
+        "--stem", "Book",
+    ])
+    assert rc == 0
+    assert os.path.exists(layout.source_audit_path)
+    with open(layout.source_audit_path, encoding="utf-8") as f:
+        report = json.load(f)
+    assert report["schema_version"] == 2
+    assert report["stem"] == "Book"
+    assert report["adoption_source"] == "dry_run"

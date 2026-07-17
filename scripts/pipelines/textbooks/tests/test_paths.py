@@ -44,3 +44,10 @@ def test_debug_html_is_process_side_not_deliverable():
     lay = resolve_layout("Book", "/out", "/scratch")
     assert lay.debug_html_path.startswith(os.path.join("/scratch", "Book"))
     assert "/out" not in lay.debug_html_path.replace("\\", "/")
+
+
+def test_source_audit_path_is_process_side_json():
+    lay = resolve_layout("Book", "/out", "/scratch")
+    assert lay.source_audit_path == os.path.join(
+        "/scratch", "Book", "Book_source_audit.json")
+    assert "/out" not in lay.source_audit_path.replace("\\", "/")
