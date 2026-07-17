@@ -1204,6 +1204,153 @@ def test_audit_prose_weighted_aggregate_reveals_long_block_char_loss():
     assert weighted < 0.3
 
 
+# ---- 13. missing_samples/added_samples:定位样本(计划 §6.4 补齐规格) -------
+# controller 漏传的计划 §6.4 条款:"missing_samples/added_samples:最多保存
+# 少量定位样本,不把全文重复写入 JSON"。
+
+
+def test_audit_prose_missing_prose_block_records_missing_samples():
+    # 复用清单 1(漏整句)的 fixture:missing_samples 必须含缺失片段的子串。
+    words = [
+        _sw("Sentence", (0, 0, 1, 1), line_no=0, word_no=0),
+        _sw("one", (0, 0, 1, 1), line_no=0, word_no=1),
+        _sw("is", (0, 0, 1, 1), line_no=0, word_no=2),
+        _sw("here", (0, 0, 1, 1), line_no=0, word_no=3),
+        _sw("today", (0, 0, 1, 1), line_no=0, word_no=4),
+        _sw("Sentence", (0, 0, 1, 1), line_no=1, word_no=0),
+        _sw("two", (0, 0, 1, 1), line_no=1, word_no=1),
+        _sw("follows", (0, 0, 1, 1), line_no=1, word_no=2),
+        _sw("right", (0, 0, 1, 1), line_no=1, word_no=3),
+        _sw("after", (0, 0, 1, 1), line_no=1, word_no=4),
+    ]
+    blocks = [_block("text", [0, 0, 100, 100], content="Sentence one is here today")]
+    decisions = [_decision(0, "ocr", reasons=["adoption_disagreement"])]
+    assignment = _assignment({0: words})
+    thresholds = _audit_thresholds(
+        minimum_reliable_chars=5,
+        maximum_block_ned=0.9,
+        minimum_char_recall=0.7,
+        minimum_token_recall=0.7,
+        maximum_addition_ratio=0.9,
+    )
+    result = audit_prose(_audit_page(words), blocks, decisions, assignment, thresholds)
+    assert "missing_prose" in _issue_codes(result)
+    samples = result["block_metrics"][0]["missing_samples"]
+    assert samples  # 非空
+    assert any("two" in s and "follows" in s for s in samples)
+    # 样本是短片段,不是整块/整页原文
+    assert all(len(s) <= 80 for s in samples)
+    assert "added_samples" not in result["block_metrics"][0]
+
+
+def test_audit_prose_ocr_addition_block_records_added_samples():
+    # 复用清单 2(多整句)的 fixture:added_samples 必须含多出片段的子串。
+    words = [
+        _sw("Alpha", (0, 0, 1, 1), line_no=0, word_no=0),
+        _sw("beta", (0, 0, 1, 1), line_no=0, word_no=1),
+        _sw("gamma", (0, 0, 1, 1), line_no=0, word_no=2),
+        _sw("delta", (0, 0, 1, 1), line_no=0, word_no=3),
+        _sw("epsilon", (0, 0, 1, 1), line_no=0, word_no=4),
+    ]
+    ocr_text = (
+        "Alpha beta gamma delta epsilon zeta eta theta iota kappa "
+        "lambda mu nu xi omicron pi"
+    )
+    blocks = [_block("text", [0, 0, 100, 100], content=ocr_text)]
+    decisions = [_decision(0, "ocr", reasons=["adoption_disagreement"])]
+    assignment = _assignment({0: words})
+    thresholds = _audit_thresholds(
+        minimum_reliable_chars=5,
+        maximum_block_ned=0.9,
+        minimum_char_recall=0.5,
+        minimum_token_recall=0.5,
+        maximum_addition_ratio=0.2,
+    )
+    result = audit_prose(_audit_page(words), blocks, decisions, assignment, thresholds)
+    assert "ocr_addition" in _issue_codes(result)
+    samples = result["block_metrics"][0]["added_samples"]
+    assert samples
+    assert any("zeta" in s and "omicron" in s for s in samples)
+    assert all(len(s) <= 80 for s in samples)
+    assert "missing_samples" not in result["block_metrics"][0]
+
+
+def test_audit_prose_missing_samples_truncated_to_maximum_samples_per_block():
+    # 4 段各自独立的缺失(锚点 AA/BB/CC/DD/EE 都在,gap 全被 OCR 漏掉)→
+    # difflib 应产出 4 个独立 delete run;maximum_samples_per_block=2 → 只
+    # 保留前 2 条,验证真的被截断而不是恰好只有 2 条。
+    tokens = [
+        "AA", "gapone", "BB", "gaptwo", "CC", "gapthree", "DD", "gapfour", "EE",
+    ]
+    words = [
+        _sw(t, (0, 0, 1, 1), line_no=0, word_no=i) for i, t in enumerate(tokens)
+    ]
+    ocr_text = "AA BB CC DD EE"
+    blocks = [_block("text", [0, 0, 100, 100], content=ocr_text)]
+    decisions = [_decision(0, "ocr", reasons=["adoption_disagreement"])]
+    assignment = _assignment({0: words})
+    # 默认 minimum_char_recall/minimum_token_recall(0.8)足以让这份严重残缺
+    # 的 recall(约 0.27/0.56)触发 missing_prose;只覆盖 maximum_samples_per_block。
+    thresholds = _audit_thresholds(minimum_reliable_chars=5, maximum_samples_per_block=2)
+    result = audit_prose(_audit_page(words), blocks, decisions, assignment, thresholds)
+    assert "missing_prose" in _issue_codes(result)
+    samples = result["block_metrics"][0]["missing_samples"]
+    assert len(samples) == 2
+    assert samples == ["gapone", "gaptwo"]
+
+
+def test_audit_prose_clean_block_has_no_sample_fields():
+    # 清单 3(空格/断行/连字差异,无 issue)的 fixture:干净块不产样本字段
+    # (不产字段,而不是空列表——契约锁定这一种,另一种不得出现)。
+    words = [
+        _sw("Researchers", (0, 0, 1, 1), line_no=0, word_no=0),
+        _sw("co‐operate", (0, 0, 1, 1), line_no=1, word_no=0),
+        _sw("across", (0, 0, 1, 1), line_no=2, word_no=0),
+        _sw("many", (0, 0, 1, 1), line_no=2, word_no=1),
+        _sw("countries", (0, 0, 1, 1), line_no=3, word_no=0),
+    ]
+    ocr_text = "Researchers\nco-operate across\nmany  countries"
+    blocks = [_block("text", [0, 0, 100, 100], content=ocr_text)]
+    decisions = [_decision(0, "ocr", reasons=["adoption_disagreement"])]
+    assignment = _assignment({0: words})
+    thresholds = _audit_thresholds(
+        minimum_reliable_chars=5,
+        maximum_block_ned=0.05,
+        minimum_char_recall=0.95,
+        minimum_token_recall=0.95,
+        maximum_addition_ratio=0.05,
+    )
+    result = audit_prose(_audit_page(words), blocks, decisions, assignment, thresholds)
+    assert result["issues"] == []
+    block_metrics = result["block_metrics"][0]
+    assert "missing_samples" not in block_metrics
+    assert "added_samples" not in block_metrics
+
+
+def test_audit_prose_sample_string_truncated_to_eighty_chars():
+    # 单个很长的连续缺失 run(20 个长 token)→ 拼接后远超 80 字符,验证样本
+    # 本身被截断(不是恰好 diff 出短样本)。
+    long_gap_tokens = [f"longwordnumber{i:02d}" for i in range(20)]
+    tokens = ["keepstart"] + long_gap_tokens + ["keepend"]
+    words = [
+        _sw(t, (0, 0, 1, 1), line_no=0, word_no=i) for i, t in enumerate(tokens)
+    ]
+    ocr_text = "keepstart keepend"
+    blocks = [_block("text", [0, 0, 100, 100], content=ocr_text)]
+    decisions = [_decision(0, "ocr", reasons=["adoption_disagreement"])]
+    assignment = _assignment({0: words})
+    # 默认 recall 阈值(0.8)足以让这份几乎全丢的内容(22 词只剩 2 词)触发
+    # missing_prose。
+    thresholds = _audit_thresholds(minimum_reliable_chars=5)
+    result = audit_prose(_audit_page(words), blocks, decisions, assignment, thresholds)
+    full_gap = " ".join(long_gap_tokens)
+    assert len(full_gap) > 80  # 反证:不截断的话原本会超长
+    samples = result["block_metrics"][0]["missing_samples"]
+    assert len(samples) == 1
+    assert samples[0] == full_gap[:80]
+    assert len(samples[0]) == 80
+
+
 # ===========================================================================
 # Task 8:文档级聚合 audit_document + 原子写 write_audit_report + 独立 CLI。
 # ---------------------------------------------------------------------------
