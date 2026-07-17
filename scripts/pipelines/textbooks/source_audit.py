@@ -574,19 +574,21 @@ def assign_source_words(
 # 正文双向对账审计(计划 §6.4,Task 6):页级 audit_prose
 # ---------------------------------------------------------------------------
 # 输入契约(纯页级函数,不接触 fitz.Page,不做任何 bbox 几何运算——那是 Task 4
-# assign_source_words 的职责):
-#   - source_page['words'] 中每个 SourceWord.block_no,在本函数的语境下被
-#     约定为"该 word 已归属的 OCR 块下标"(与 blocks 列表下标、decisions 的
-#     block_id 同一编号体系)。这是编排层(Task 9,尚未实现)在调用 audit_prose
-#     之前,依据 assign_source_words 的 assignments 结果重新赋值该字段的产物
-#     (例如用 dataclasses.replace 重建 SourceWord),不是 fitz 原生的段落分组
-#     编号——两者数值空间不同,调用方必须完成这一步重映射。不落在
-#     [0, len(blocks)) 范围内的 block_no 视为该 word 未被任何块归属
-#     (unassigned),用于页级 possible_missing_block 聚簇检测。
+# assign_source_words 的职责,本函数直接消费其返回结构):
+#   - source_page:extract_source_page 输出;SourceWord 的 block_no/line_no/
+#     word_no 保持 Task 3 原义(fitz 原生段落/行/词分组),本模块不重解释、
+#     不要求调用方改写字段——SourceWord 是 frozen dataclass,重赋值意味着
+#     上游必须重建对象,是不必要的隐藏耦合。
 #   - blocks:apply_adoption 之后的最终内容块(block_label/block_content/...)。
 #   - decisions:Task 5 的 list[AdoptionDecision],按 block_id 与 blocks 下标
 #     一一对应。
-# 本函数只读:绝不修改 blocks / decisions / source_page,只产生 issues/metrics。
+#   - assignment:assign_source_words 的返回结构(计划 §6.1)。块内归属源
+#     words 取 assignment["assignments"][block_index](block 枚举下标,与
+#     AdoptionDecision.block_id 同一索引空间);未归属 words 取
+#     assignment["unassigned"];页面几何是否禁止采信取
+#     assignment["geometry_unscorable"]。
+# 本函数只读:绝不修改 blocks / decisions / source_page / assignment,只产生
+# issues/metrics。
 # ===========================================================================
 
 
@@ -648,16 +650,17 @@ def _weighted_ratio(pairs) -> float | None:
     return overlap_sum / total_sum
 
 
-def _single_column_sequence_ratio(words, num_blocks: int) -> float | None:
-    """多栏代理(计划 §6.4):源 words 的 block_no 序列(限已归属者)单调不减才
-    可信,否则(多栏/交错)返回 None——调用方据此跳过 sequence_ratio,绝不作硬门。
+def _single_column_sequence_ratio(words) -> float | None:
+    """多栏代理(计划 §6.4):源 words(source_page['words'] 原始顺序)的
+    block_no 序列(fitz 原生段落分组编号)单调不减才可信,否则(多栏/交错)
+    返回 None——调用方据此跳过 sequence_ratio,绝不作硬门。
 
     代理条件本身即要求全序,故一旦确认单栏,ratio 恒为 1.0;该指标只做记录用,
     不参与 status 判定,后续任务如需更细粒度的排序偏差量化可在此扩展。
     """
-    seq = [w.block_no for w in words if 0 <= w.block_no < num_blocks]
-    if len(seq) < 2:
+    if len(words) < 2:
         return None
+    seq = [w.block_no for w in words]
     for a, b in zip(seq, seq[1:]):
         if a > b:
             return None
@@ -665,16 +668,20 @@ def _single_column_sequence_ratio(words, num_blocks: int) -> float | None:
 
 
 def audit_prose(
-    source_page: dict, blocks: list[dict], decisions, thresholds: AuditThresholds
+    source_page: dict,
+    blocks: list[dict],
+    decisions,
+    assignment: dict,
+    thresholds: AuditThresholds,
 ) -> dict:
-    """页级正文双向对账审计(计划 §6.4)。只读:不改 blocks/decisions/source_page。
+    """页级正文双向对账审计(计划 §6.4)。只读:不改 blocks/decisions/source_page/assignment。
 
     按块 provenance 分派:
       - 采信块(content_source=source_text):只记录 decisions 里已有的
         block_ned,不重复告警(采信门规则 6 已兜底)。
       - 回退块(content_source=ocr)且 label 属正文白名单
         (reasons != ["label_not_adoptable"]):
-          * 页面 geometry 不可标定(reasons==["geometry_unscorable"])或本块
+          * 页面 geometry 不可标定(assignment["geometry_unscorable"])或本块
             归属源字符太少/坏码占比过高 → source_unreliable,不参与对账,
             不得把 OCR 判错。
           * 否则做完整对账:missing_prose / prose_mismatch(NED 主指标)/
@@ -692,14 +699,16 @@ def audit_prose(
     n = len(blocks)
     decisions_by_id = {d.block_id: d for d in decisions}
 
-    assigned_words: dict[int, list] = {}
+    assignment = assignment or {}
+    assignments_by_block: dict[int, list] = assignment.get("assignments", {}) or {}
+    unassigned_words: list = list(assignment.get("unassigned") or [])
+    page_geometry_unscorable = bool(assignment.get("geometry_unscorable", False))
+
+    # unassigned 源 words 按其原生 block_no(fitz 段落分组)聚簇——同一分组
+    # 内多个 words 表示同一区域整段未被任何 OCR 块归属(计划 §6.4)。
     unassigned_groups: dict[int, list] = {}
-    for w in words:
-        bn = w.block_no
-        if 0 <= bn < n:
-            assigned_words.setdefault(bn, []).append(w)
-        else:
-            unassigned_groups.setdefault(bn, []).append(w)
+    for w in unassigned_words:
+        unassigned_groups.setdefault(w.block_no, []).append(w)
 
     issues: list[dict] = []
     block_metrics: dict[int, dict] = {}
@@ -743,10 +752,11 @@ def audit_prose(
 
         # ---- 回退块(content_source == "ocr")且 label 属正文白名单 ----
         fallback_prose_count += 1
-        src_words = assigned_words.get(i, [])
+        src_words = list(assignments_by_block.get(i, []))
 
-        if decision.reasons == ["geometry_unscorable"]:
-            # 全页几何不可标定:归属本就不可信,不猜测,直接判 source_unreliable。
+        if page_geometry_unscorable:
+            # 全页几何不可标定(assignment 的权威信号):归属本就不可信,不猜测,
+            # 直接判 source_unreliable。
             source_unreliable_count += 1
             block_metrics[i] = {"content_source": "ocr", "source_unreliable": True}
             issues.append(
@@ -921,7 +931,7 @@ def audit_prose(
         ),
         "ngram_repetition_score": repetition_score,
     }
-    seq_ratio = _single_column_sequence_ratio(words, n)
+    seq_ratio = _single_column_sequence_ratio(words)
     if seq_ratio is not None:
         # 记录用,绝不据此产生 issue 或改变 status(计划 §6.4:多栏跳过/绝不作硬门)。
         metrics["sequence_ratio"] = seq_ratio
