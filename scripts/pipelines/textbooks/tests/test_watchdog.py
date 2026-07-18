@@ -181,6 +181,22 @@ def test_main_forwards_formula_repair_to_convert(monkeypatch):
     assert argv[argv.index("--formula-repair") + 1] == "agents"
 
 
+def test_main_forwards_agents_apply_to_convert(monkeypatch):
+    captured = {}
+    def fake_run_until_done(argv, max_restarts):
+        captured["argv"] = argv
+        return 0
+    monkeypatch.setattr(wd, "run_until_done", fake_run_until_done)
+    monkeypatch.setattr("sys.argv", [
+        "watchdog.py", "--src", "x.pdf", "--formula-repair", "agents-apply",
+    ])
+    with pytest.raises(SystemExit) as exc:
+        wd.main()
+    assert exc.value.code == 0
+    argv = captured["argv"]
+    assert argv[argv.index("--formula-repair") + 1] == "agents-apply"
+
+
 def test_main_formula_repair_defaults_to_deterministic(monkeypatch):
     captured = {}
     def fake_run_until_done(argv, max_restarts):

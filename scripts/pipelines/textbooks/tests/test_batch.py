@@ -819,6 +819,12 @@ def test_job_argv_passes_formula_repair_to_convert_subprocess(tmp_path):
     assert argv[argv.index("--formula-repair") + 1] == "agents"
 
 
+def test_job_argv_passes_agents_apply_to_convert_subprocess(tmp_path):
+    argv = bp._job_argv(tmp_path / "A.pdf", tmp_path / "out", None, 150,
+                        no_selfcheck_json=False, formula_repair="agents-apply")
+    assert argv[argv.index("--formula-repair") + 1] == "agents-apply"
+
+
 def test_job_argv_defaults_formula_repair_to_off(tmp_path):
     argv = bp._job_argv(tmp_path / "A.pdf", tmp_path / "out", None, 150,
                         no_selfcheck_json=False)
@@ -908,6 +914,147 @@ def test_run_formula_repair_agents_also_skips_own_katex_tail(tmp_path, monkeypat
     assert scan_calls == []
 
 
+def test_run_formula_repair_agents_apply_forwards_and_skips_own_katex_tail(
+        tmp_path, monkeypatch):
+    d = tmp_path / "src"
+    d.mkdir()
+    pdf = _make_pdf(d, 1, name="A")
+    out_root = tmp_path / "out"
+    captured = {}
+
+    def fake_runner(argv):
+        captured["argv"] = argv
+        return _fake_runner_writes_book(out_root, pdf)(argv)
+
+    scan_calls = []
+    monkeypatch.setattr(bp, "scan_katex_work_pages",
+                        lambda layout, out_path: scan_calls.append(layout.stem))
+
+    rc, results = bp.run([str(d)], out=str(out_root), dpi=150, runner=fake_runner,
+                         formula_repair="agents-apply", katex_scan_enabled=True)
+
+    assert rc == 0
+    argv = captured["argv"]
+    assert argv[argv.index("--formula-repair") + 1] == "agents-apply"
+    assert scan_calls == []
+
+
+# ---------------------------------------------------------------------------
+# Review Important(final review,agents-apply 全自动应用):熔断/回滚事件此前
+# 只印在子进程 stdout 里,batch 汇总读不到——convert.py 现在把 formula_repair
+# 结果字典落盘到 <stem>_formula_repair.json(DocLayout.formula_repair_path),
+# _read_summary 据此把 agents.circuit_broken/rolled_back 转成
+# formula_repair_flag,供逐本打印(fr=...)与 rollup 计数(FR_FLAG)使用。
+# ---------------------------------------------------------------------------
+
+def _write_formula_repair_sidecar(layout, agents_fields: dict,
+                                  mode: str = "agents-apply") -> None:
+    Path(layout.doc_work_dir).mkdir(parents=True, exist_ok=True)
+    with open(layout.formula_repair_path, "w", encoding="utf-8") as f:
+        json.dump({"mode": mode, "agents": agents_fields}, f)
+
+
+def _save_done_manifest(pdf, work: Path, route: str = "A") -> None:
+    _mark_page_done(work, 1)
+    cp.save_manifest(str(work),
+                     cp.new_manifest(str(pdf), cp.pdf_fingerprint(str(pdf)), 150, route))
+
+
+def test_read_summary_surfaces_circuit_broken_flag(tmp_path):
+    pdf = _make_pdf(tmp_path, 1, name="book")
+    out_root = tmp_path / "out"
+    layout = resolve_layout(pdf.stem, str(out_root))
+    _save_done_manifest(pdf, Path(layout.work_dir))
+    _write_formula_repair_sidecar(layout, {"circuit_broken": True, "rolled_back": False})
+
+    summary = bp._read_summary(out_root, None, pdf)
+
+    assert summary["formula_repair_flag"] == "circuit_broken"
+
+
+def test_read_summary_surfaces_rolled_back_flag(tmp_path):
+    pdf = _make_pdf(tmp_path, 1, name="book")
+    out_root = tmp_path / "out"
+    layout = resolve_layout(pdf.stem, str(out_root))
+    _save_done_manifest(pdf, Path(layout.work_dir))
+    _write_formula_repair_sidecar(layout, {"circuit_broken": False, "rolled_back": True})
+
+    summary = bp._read_summary(out_root, None, pdf)
+
+    assert summary["formula_repair_flag"] == "rolled_back"
+
+
+def test_read_summary_formula_repair_flag_none_when_sidecar_absent(tmp_path):
+    # 旧书/未跑过公式修复环时 sidecar 不存在——按"无异常"处理,不伪造标记。
+    pdf = _make_pdf(tmp_path, 1, name="book")
+    out_root = tmp_path / "out"
+    layout = resolve_layout(pdf.stem, str(out_root))
+    _save_done_manifest(pdf, Path(layout.work_dir))
+
+    summary = bp._read_summary(out_root, None, pdf)
+
+    assert summary["formula_repair_flag"] is None
+
+
+def test_read_summary_formula_repair_flag_none_when_both_false(tmp_path):
+    # 正常应用(未熔断、未回滚)不得误报。
+    pdf = _make_pdf(tmp_path, 1, name="book")
+    out_root = tmp_path / "out"
+    layout = resolve_layout(pdf.stem, str(out_root))
+    _save_done_manifest(pdf, Path(layout.work_dir))
+    _write_formula_repair_sidecar(layout, {"circuit_broken": False, "rolled_back": False})
+
+    summary = bp._read_summary(out_root, None, pdf)
+
+    assert summary["formula_repair_flag"] is None
+
+
+def test_run_prints_and_counts_formula_repair_flag(tmp_path, monkeypatch, capsys):
+    d = tmp_path / "src"
+    d.mkdir()
+    pdf = _make_pdf(d, 1, name="A")
+    out_root = tmp_path / "out"
+    layout = resolve_layout("A", str(out_root))
+
+    def fake_runner(argv):
+        rc = _fake_runner_writes_book(out_root, pdf)(argv)
+        _write_selfcheck_with_audit(layout, {
+            "status": "OK", "suspect_pages": [], "issue_counts": {},
+        })
+        _write_formula_repair_sidecar(layout, {"circuit_broken": True, "rolled_back": False})
+        return rc
+
+    monkeypatch.setattr(bp, "scan_katex_work_pages", lambda layout, out_path: {"errors": []})
+
+    rc, results = bp.run([str(d)], out=str(out_root), dpi=150, runner=fake_runner)
+
+    assert rc == 0
+    assert results[0]["formula_repair_flag"] == "circuit_broken"
+    out = capsys.readouterr().out
+    assert "fr=circuit_broken" in out
+    assert ("批处理完成: 0 OK/B / 0 SUSPECT / 0 UNSCORABLE / 0 GIVEUP / 0 SKIP / "
+            "1 FR_FLAG") in out
+
+
+def test_run_omits_fr_tag_when_flag_absent(tmp_path, monkeypatch, capsys):
+    # 常见情形(未熔断、未回滚)不得打印噪声 fr= 标记。
+    d = tmp_path / "src"
+    d.mkdir()
+    pdf = _make_pdf(d, 1, name="A")
+    out_root = tmp_path / "out"
+    fake_runner = _fake_runner_writes_book(out_root, pdf)
+
+    monkeypatch.setattr(bp, "scan_katex_work_pages", lambda layout, out_path: {"errors": []})
+
+    rc, results = bp.run([str(d)], out=str(out_root), dpi=150, runner=fake_runner)
+
+    assert rc == 0
+    assert results[0]["formula_repair_flag"] is None
+    out = capsys.readouterr().out
+    assert "fr=" not in out
+    assert "0 FR_FLAG" in out
+
+
 def test_main_forwards_formula_repair(monkeypatch):
     captured = {}
 
@@ -924,6 +1071,24 @@ def test_main_forwards_formula_repair(monkeypatch):
 
     assert rc == 0
     assert captured["kwargs"]["formula_repair"] == "deterministic"
+
+
+def test_main_forwards_agents_apply(monkeypatch):
+    captured = {}
+
+    def fake_run(src_paths, **kwargs):
+        captured["kwargs"] = kwargs
+        return 0, []
+
+    monkeypatch.setattr(bp, "run", fake_run)
+    monkeypatch.setattr("sys.argv", [
+        "batch.py", "--src", "src", "--formula-repair", "agents-apply",
+    ])
+
+    rc = bp.main()
+
+    assert rc == 0
+    assert captured["kwargs"]["formula_repair"] == "agents-apply"
 
 
 def test_main_formula_repair_defaults_to_off(monkeypatch):

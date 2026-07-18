@@ -62,9 +62,10 @@ BORN_DIGITAL_MODES = ("defer", "ocr", "hybrid")
 # convert.py 子进程,batch 现有收尾步骤与 convert 内建步骤会对同一本书各自独立
 # 跑一遍 katex_scan/katex_triage——不是崩溃风险,但是浪费(双跑)。默认 "off":
 # 不透传给子进程,batch 收尾沿用它自己已有的自动化,零行为变化、零测试改动。
-# 用户显式选 --formula-repair {deterministic,agents} 时才透传给子进程,并同时
-# 关闭 batch 自己的收尾分支(见 run() 内 dedup 逻辑),避免双跑。
-FORMULA_REPAIR_MODES = ("deterministic", "agents", "off")
+# 用户显式选 --formula-repair {deterministic,agents,agents-apply} 时才透传给
+# 子进程,并同时关闭 batch 自己的收尾分支(见 run() 内 dedup 逻辑,keyed on
+# != "off",agents-apply 天然享受同样的去重),避免双跑。
+FORMULA_REPAIR_MODES = ("deterministic", "agents", "agents-apply", "off")
 
 # selfcheck.json 里紧凑 source_audit 字段做分级要用到的最小键集合——用来判断该字段
 # 是否结构完好,而非"字段存在就信"(Review Important 1:字段存在但类型/结构损坏时,
@@ -209,7 +210,8 @@ def _read_summary(out_root: Path, work_root: Path | None, pdf: Path, *,
     deferred_marker = out_root / "_deferred_born_digital" / f"{pdf.stem}.txt"
     if deferred_marker.exists():
         return {"stem": pdf.stem, "status": "B", "route": "B",
-                "failed_pages": 0, "selfcheck": None, "source_audit_grade": None}
+                "failed_pages": 0, "selfcheck": None, "source_audit_grade": None,
+                "formula_repair_flag": None}
     layout = resolve_layout(pdf.stem, str(out_root),
                             str(work_root) if work_root else None)
     manifest = cp.load_manifest(layout.work_dir)
@@ -230,7 +232,33 @@ def _read_summary(out_root: Path, work_root: Path | None, pdf: Path, *,
         status = "SUSPECT"
     return {"stem": pdf.stem, "status": status, "route": route,
             "failed_pages": len(failed_pages), "selfcheck": selfcheck,
-            "source_audit_grade": grade}
+            "source_audit_grade": grade,
+            "formula_repair_flag": _read_formula_repair_flag(layout)}
+
+
+def _read_formula_repair_flag(layout) -> str | None:
+    """agents-apply 安全网触发事件的分诊信号(Review Important):熔断/回滚发生时,
+    corrections 悄悄退回 pending、没有人工复核(agents-apply 的设计本就不留人工
+    accept 门)——这是运行期间唯一能穿透到批量汇总的痕迹,不然只能靠事后翻
+    子进程 stdout 或逐本翻 formula_agent_ledger.jsonl。旧书/未跑过公式修复环时
+    sidecar 不存在,按"无异常"处理,不伪造。"""
+    if not os.path.exists(layout.formula_repair_path):
+        return None
+    try:
+        with open(layout.formula_repair_path, encoding="utf-8") as f:
+            fr = json.load(f)
+    except Exception:                              # noqa: BLE001 兜底读取不逃逸
+        return None
+    if not isinstance(fr, dict):
+        return None
+    agents = fr.get("agents")
+    if not isinstance(agents, dict):
+        return None
+    if agents.get("circuit_broken"):
+        return "circuit_broken"
+    if agents.get("rolled_back"):
+        return "rolled_back"
+    return None
 
 
 def _format_audit_grade(grade: dict | None, *,
@@ -291,7 +319,8 @@ def run(src_paths: list[str], out: str | None = None, dpi: int = cp.DEFAULT_DPI,
         if skip:
             print(f"  [SKIP] {pdf.stem}")
             results.append({"stem": pdf.stem, "status": "SKIP", "route": None,
-                             "failed_pages": 0, "selfcheck": None, "source_audit_grade": None})
+                             "failed_pages": 0, "selfcheck": None, "source_audit_grade": None,
+                             "formula_repair_flag": None})
             continue
         argv = _job_argv(pdf, out_root, work_root, dpi, no_selfcheck_json, allow_sleep,
                          force_ocr, work_hours, rest_minutes, born_digital_mode,
@@ -301,7 +330,8 @@ def run(src_paths: list[str], out: str | None = None, dpi: int = cp.DEFAULT_DPI,
             n_giveup += 1
             print(f"  [GIVEUP] {pdf.stem}")
             results.append({"stem": pdf.stem, "status": "GIVEUP", "route": None,
-                             "failed_pages": 0, "selfcheck": None, "source_audit_grade": None})
+                             "failed_pages": 0, "selfcheck": None, "source_audit_grade": None,
+                             "formula_repair_flag": None})
             continue
         summary = _read_summary(out_root, work_root, pdf,
                                 severe_issue_codes=severe_issue_codes, dpi=dpi)
@@ -331,8 +361,10 @@ def run(src_paths: list[str], out: str | None = None, dpi: int = cp.DEFAULT_DPI,
                 cov = f" coverage={c['in_md']}/{c['total']}"
             audit_line = _format_audit_grade(summary.get("source_audit_grade"),
                                              limit=suspect_print_limit)
+            fr_flag = summary.get("formula_repair_flag")
+            fr_line = f" fr={fr_flag}" if fr_flag else ""
             print(f"  [{summary['status']}] {pdf.stem} — route={summary['route']} "
-                  f"failed_pages={summary['failed_pages']}{cov}{audit_line}")
+                  f"failed_pages={summary['failed_pages']}{cov}{audit_line}{fr_line}")
 
     def _is_unscorable(result: dict) -> bool:
         # 审计"读不出"(报告缺失/半截/过期)不该悄悄跟"审计判 OK"共享 OK 计数——
@@ -340,12 +372,22 @@ def run(src_paths: list[str], out: str | None = None, dpi: int = cp.DEFAULT_DPI,
         grade = result.get("source_audit_grade")
         return bool(grade) and grade.get("status") == "UNSCORABLE"
 
+    def _has_formula_repair_flag(result: dict) -> bool:
+        # agents-apply 熔断/回滚同样不该悄悄计入 OK(Review Important)——单列一档,
+        # 与 UNSCORABLE 互斥统计(同一本书两者都中时只算一次,避免 n_ok 被多减)。
+        return bool(result.get("formula_repair_flag"))
+
     n_unscorable = sum(1 for r in results if r["status"] == "OK" and _is_unscorable(r))
-    n_ok = sum(1 for r in results if r["status"] in ("OK", "B")) - n_unscorable
+    n_formula_repair_flag = sum(
+        1 for r in results
+        if r["status"] in ("OK", "B") and _has_formula_repair_flag(r) and not _is_unscorable(r)
+    )
+    n_ok = sum(1 for r in results if r["status"] in ("OK", "B")) - n_unscorable - n_formula_repair_flag
     n_suspect = sum(1 for r in results if r["status"] == "SUSPECT")
     n_skip = sum(1 for r in results if r["status"] == "SKIP")
     print(f"\n{'=' * 56}\n批处理完成: {n_ok} OK/B / {n_suspect} SUSPECT / "
-          f"{n_unscorable} UNSCORABLE / {n_giveup} GIVEUP / {n_skip} SKIP → {out_root}")
+          f"{n_unscorable} UNSCORABLE / {n_giveup} GIVEUP / {n_skip} SKIP / "
+          f"{n_formula_repair_flag} FR_FLAG → {out_root}")
     return (1 if n_giveup else 0), results
 
 
@@ -377,8 +419,9 @@ def main() -> int:
     ap.add_argument("--formula-repair", choices=list(FORMULA_REPAIR_MODES), default="off",
                     help="转发给每本书 convert.py 的公式修复环档位(默认 off,沿用 batch "
                          "自身已有的 katex_scan+katex_triage 收尾自动化,不与 convert 内建"
-                         "步骤双跑):deterministic/agents 会转发给子进程且自动关闭 batch "
-                         "自己对应的收尾步骤")
+                         "步骤双跑):deterministic/agents/agents-apply 均会转发给子进程且"
+                         "自动关闭 batch 自己对应的收尾步骤;agents-apply 为全自动应用档"
+                         "(2026-07-18 裁决,安全由 orchestrator 内建熔断/回滚/快照承担)")
     args = ap.parse_args()
     if args.work_hours <= 0 or args.rest_minutes <= 0:
         ap.error("--work-hours 与 --rest-minutes 必须大于 0")

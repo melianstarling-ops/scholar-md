@@ -1332,18 +1332,16 @@ def test_convert_cli_rejects_invalid_formula_repair(monkeypatch):
 
 
 def test_formula_repair_agents_calls_agent_chain_with_propose_mode(tmp_path, monkeypatch):
-    # 红线:agents 档绝不能让 run_agents 以 "apply" 跑——corrections 只落 pending。
-    # 本测试 stub run_agents 本身,只断言编排层调用时强制传 mode="propose"。
+    # agents 审阅档保持 propose 语义,且不启用 apply 专用候选过滤器。
     pdf = _make_scan_pdf(tmp_path, 1)
     _stub_engine(monkeypatch, _one_text_block)
     _stub_katex_scan(monkeypatch, {"errors": []})
     captured = {}
 
-    def fake_run_agents(layout, *, adapters, pdf_path, dpi, mode):
-        captured["mode"] = mode
-        captured["adapters"] = adapters
+    def fake_run_agents(layout, **kwargs):
+        captured.update(kwargs)
         from scripts.pipelines.textbooks.formula_agents.orchestrator import RunReport
-        return RunReport(stem=layout.stem, mode=mode, n_candidates=0, applied=0)
+        return RunReport(stem=layout.stem, mode=kwargs["mode"], n_candidates=0, applied=0)
 
     fake_adapter = FakeAdapter("kimi", available=True)
     monkeypatch.setattr(cv, "default_adapters", lambda: [fake_adapter])
@@ -1351,8 +1349,174 @@ def test_formula_repair_agents_calls_agent_chain_with_propose_mode(tmp_path, mon
 
     res = cv.convert_pdf(pdf, str(tmp_path / "out"), dpi=100, formula_repair="agents")
 
-    assert captured["mode"] == "propose"          # 绝不是 "apply"
+    assert captured["mode"] == "propose"
+    assert "collect_fn" not in captured
     assert res["formula_repair"]["agents"]["status"] == "ok"
+
+
+def test_formula_repair_agents_apply_calls_apply_with_crops_only_collect(
+        tmp_path, monkeypatch):
+    pdf = _make_scan_pdf(tmp_path, 1)
+    _stub_engine(monkeypatch, _one_text_block)
+    _stub_katex_scan(monkeypatch, {"errors": []})
+    captured = {}
+
+    def fake_run_agents(layout, **kwargs):
+        captured.update(kwargs)
+        from scripts.pipelines.textbooks.formula_agents.orchestrator import RunReport
+        return RunReport(stem=layout.stem, mode=kwargs["mode"], n_candidates=2,
+                         applied=2)
+
+    monkeypatch.setattr(cv, "default_adapters",
+                        lambda: [FakeAdapter("kimi", available=True)])
+    monkeypatch.setattr(cv, "run_agents", fake_run_agents)
+
+    res = cv.convert_pdf(pdf, str(tmp_path / "out"), dpi=100,
+                         formula_repair="agents-apply")
+
+    assert captured["mode"] == "apply"
+    assert captured["collect_fn"] is cv.crops_only_collect
+    agents = res["formula_repair"]["agents"]
+    assert agents["status"] == "ok"
+    assert agents["run_mode"] == "apply"
+    assert agents["applied"] == 2
+
+
+def test_formula_repair_agents_apply_preserves_orchestrator_safety_fields(
+        tmp_path, monkeypatch):
+    pdf = _make_scan_pdf(tmp_path, 1)
+    _stub_engine(monkeypatch, _one_text_block)
+    _stub_katex_scan(monkeypatch, {"errors": []})
+
+    def fake_run_agents(layout, **kwargs):
+        from scripts.pipelines.textbooks.formula_agents.orchestrator import RunReport
+        return RunReport(
+            stem=layout.stem, mode="apply", n_candidates=4, applied=1,
+            rejected=[object()], pending_ids=["p0001-b0002"],
+            circuit_broken=True, rolled_back=True, reason="stub safety state")
+
+    monkeypatch.setattr(cv, "default_adapters",
+                        lambda: [FakeAdapter("kimi", available=True)])
+    monkeypatch.setattr(cv, "run_agents", fake_run_agents)
+
+    res = cv.convert_pdf(pdf, str(tmp_path / "out"), dpi=100,
+                         formula_repair="agents-apply")
+
+    agents = res["formula_repair"]["agents"]
+    assert agents["run_mode"] == "apply"
+    assert agents["applied"] == 1
+    assert agents["rejected"] == 1
+    assert agents["pending_ids"] == ["p0001-b0002"]
+    assert agents["circuit_broken"] is True
+    assert agents["rolled_back"] is True
+    assert agents["reason"] == "stub safety state"
+
+
+def test_formula_repair_result_persisted_to_sidecar_file(tmp_path, monkeypatch):
+    # Review Important:agents-apply 熔断/回滚事件此前只印到子进程 stdout,批量
+    # 收尾读不到——formula_repair 结果字典须落盘到 layout.formula_repair_path,
+    # 内容与 convert_pdf 返回值里的 formula_repair 字段逐字一致。
+    pdf = _make_scan_pdf(tmp_path, 1)
+    out = tmp_path / "out"
+    _stub_engine(monkeypatch, _one_text_block)
+    _stub_katex_scan(monkeypatch, {"errors": []})
+
+    def fake_run_agents(layout, **kwargs):
+        from scripts.pipelines.textbooks.formula_agents.orchestrator import RunReport
+        return RunReport(
+            stem=layout.stem, mode="apply", n_candidates=3, applied=0,
+            rejected=[], pending_ids=[],
+            circuit_broken=True, rolled_back=True, reason="stub circuit break")
+
+    monkeypatch.setattr(cv, "default_adapters",
+                        lambda: [FakeAdapter("kimi", available=True)])
+    monkeypatch.setattr(cv, "run_agents", fake_run_agents)
+
+    res = cv.convert_pdf(pdf, str(out), dpi=100, formula_repair="agents-apply")
+
+    layout = _layout(out)
+    assert os.path.exists(layout.formula_repair_path)
+    with open(layout.formula_repair_path, encoding="utf-8") as f:
+        on_disk = json.load(f)
+    assert on_disk == res["formula_repair"]
+    assert on_disk["agents"]["circuit_broken"] is True
+    assert on_disk["agents"]["rolled_back"] is True
+
+
+def test_formula_repair_sidecar_not_written_when_selfcheck_disabled(tmp_path, monkeypatch):
+    # write_selfcheck=False 是"不写过程根工件"的既有开关,formula_repair sidecar
+    # 复用同一开关,不新造旗标(需求明确要求)。
+    pdf = _make_scan_pdf(tmp_path, 1)
+    out = tmp_path / "out"
+    _stub_engine(monkeypatch, _one_text_block)
+    _stub_katex_scan(monkeypatch, {"errors": []})
+
+    cv.convert_pdf(pdf, str(out), dpi=100, write_selfcheck=False,
+                   formula_repair="deterministic")
+
+    layout = _layout(out)
+    assert not os.path.exists(layout.formula_repair_path)
+
+
+def test_formula_repair_off_sidecar_written_with_off_mode(tmp_path, monkeypatch):
+    # off 档也一样落盘(需求明确:不特殊处理),内容就是 {"mode": "off"}。
+    pdf = _make_scan_pdf(tmp_path, 1)
+    out = tmp_path / "out"
+    _stub_engine(monkeypatch, _one_text_block)
+
+    cv.convert_pdf(pdf, str(out), dpi=100, formula_repair="off")
+
+    layout = _layout(out)
+    assert os.path.exists(layout.formula_repair_path)
+    with open(layout.formula_repair_path, encoding="utf-8") as f:
+        assert json.load(f) == {"mode": "off"}
+
+
+def test_formula_repair_agents_apply_exception_keeps_conversion_outputs(
+        tmp_path, monkeypatch):
+    pdf = _make_scan_pdf(tmp_path, 1)
+    out = tmp_path / "out"
+    _stub_engine(monkeypatch, _one_text_block)
+    _stub_katex_scan(monkeypatch, {"errors": []})
+    monkeypatch.setattr(cv, "default_adapters",
+                        lambda: [FakeAdapter("kimi", available=True)])
+
+    def boom(*_args, **_kwargs):
+        raise RuntimeError("apply stage injected failure")
+
+    monkeypatch.setattr(cv, "run_agents", boom)
+
+    res = cv.convert_pdf(pdf, str(out), dpi=100, formula_repair="agents-apply")
+
+    assert os.path.exists(res["md_path"])
+    assert os.path.exists(_layout(out).selfcheck_path)
+    assert res["selfcheck"] is not None
+    assert res["formula_repair"]["agents"]["status"] == "error"
+    assert "apply stage injected failure" in res["formula_repair"]["agents"]["error"]
+
+
+def test_formula_repair_agents_apply_degrades_when_no_adapter_available(
+        tmp_path, monkeypatch):
+    pdf = _make_scan_pdf(tmp_path, 1)
+    _stub_engine(monkeypatch, _one_text_block)
+    _stub_katex_scan(monkeypatch, {"errors": []})
+    calls = []
+    monkeypatch.setattr(cv, "default_adapters",
+                        lambda: [FakeAdapter("kimi", available=False)])
+    monkeypatch.setattr(cv, "run_agents",
+                        lambda *args, **kwargs: calls.append((args, kwargs)))
+
+    res = cv.convert_pdf(pdf, str(tmp_path / "out"), dpi=100,
+                         formula_repair="agents-apply")
+
+    assert calls == []
+    assert res["formula_repair"]["agents"]["status"] == "degraded_deterministic"
+
+
+def test_formula_repair_rejects_removed_auto_mode(tmp_path):
+    pdf = _make_scan_pdf(tmp_path, 1)
+    with pytest.raises(ValueError, match="formula_repair"):
+        cv.convert_pdf(pdf, str(tmp_path / "out"), formula_repair="auto")
 
 
 def test_formula_repair_agents_degrades_when_no_adapter_available(tmp_path, monkeypatch):
@@ -1399,7 +1563,7 @@ def test_formula_repair_agents_end_to_end_writes_pending_corrections(tmp_path, m
         "", 0)])
     monkeypatch.setattr(cv, "default_adapters", lambda: [fake])
 
-    result = cv._run_agents_stage(layout, pdf_path="", dpi=150)
+    result = cv._run_agents_stage(layout, pdf_path="", dpi=150, agent_mode="propose")
 
     assert result["status"] == "ok"
     assert fake.calls == 1

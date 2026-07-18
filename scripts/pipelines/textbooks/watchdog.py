@@ -13,8 +13,8 @@ from scripts.pipelines.textbooks.power import keep_system_awake
 BORN_DIGITAL_MODES = ("defer", "ocr", "hybrid")
 
 # 与 convert.py 的 FORMULA_REPAIR_MODES 同步维护(独立常量,同上惯例)。单本转换
-# 收尾自动接公式修复环(Task B):watchdog 只做 argv 透传给 convert.py 子进程。
-FORMULA_REPAIR_MODES = ("deterministic", "agents", "off")
+# 收尾自动接公式修复环(Task B/Task 1):watchdog 只做 argv 透传给 convert.py 子进程。
+FORMULA_REPAIR_MODES = ("deterministic", "agents", "agents-apply", "off")
 
 
 def _default_runner(argv: list[str]) -> int:
@@ -64,7 +64,9 @@ def main() -> None:
                     default="deterministic",
                     help="转换收尾自动接的公式修复环(转发给 convert.py):"
                          "deterministic=零成本零网络确定性修复链(默认)/"
-                         "agents=额外接公式 Agent 五道门(外部 LLM,corrections 只落 pending)/"
+                         "agents=额外接公式 Agent 五道门(外部 LLM,corrections 落 pending,"
+                         "人工审阅档)/agents-apply=同样接五道门,全自动应用"
+                         "(2026-07-18 裁决,安全由 orchestrator 内建熔断/回滚/快照承担)/"
                          "off=不后处理")
     args = ap.parse_args()
     if args.work_hours <= 0 or args.rest_minutes <= 0:
