@@ -5,6 +5,11 @@ import re
 import sys
 
 from scripts.pipelines.textbooks.images import crop_filename, is_visual_block
+from scripts.pipelines.textbooks.table_audit import (
+    ParsedTable,
+    lint_table_structure,
+    parse_table_html,
+)
 
 _NUM_RE = re.compile(r"^\(?([\w.\-]+)\)?$")   # (5.30) / 5.30 → 5.30
 _EMPH_RE = re.compile(r"\\underset\{\\cdot\}\{([^{}]*)\}")
@@ -34,7 +39,7 @@ _KATEX_CMD_MAP = [
 ]
 _ENSUREMATH_RE = re.compile(r"\\ensuremath\s*\{")
 
-_PASSTHROUGH_UNORDERED_LABELS = {"table", "footnote", "figure_title"}
+_PASSTHROUGH_UNORDERED_LABELS = {"footnote", "figure_title"}
 _KNOWN_NOISE_LABELS = {"header", "number", "header_image"}
 _LATEX_ENTITY_REPL = {
     "&#x27;": "'",
@@ -43,6 +48,11 @@ _LATEX_ENTITY_REPL = {
     "&gt;": ">",
 }
 _TAG_RE = re.compile(r"\\tag\{[^{}]*\}")
+
+# C3(Task C 顺手项):PaddleOCR-VL 偶发把上下标包成冗余双花括号 _{{X}}/^{{X}}。
+# 锚定在 _/^ 之后,且要求内容 X 不含花括号(单层):\frac{{a}}{b} 的 frac 参数前面
+# 不是 _/^,天然不受影响;{\alpha} 只有单层花括号,也不匹配。绝不做全局 {{ → { 盲替换。
+_DOUBLE_BRACED_SCRIPT_RE = re.compile(r"([_^])\{\{([^{}]*)\}\}")
 
 
 def _match_braced(s: str, i: int) -> int:
@@ -153,6 +163,13 @@ def _decode_latex_entities(s: str) -> str:
 
 def _strip_latex_tags(s: str) -> str:
     return _TAG_RE.sub("", s).strip()
+
+
+def _normalize_double_braced_scripts(s: str) -> str:
+    r"""上下标双花括号归一(C3):仅 _{{X}} → _{X} 与 ^{{X}} → ^{X},且仅当 X 不含
+    花括号(单层内容)。范围严格限定在 _/^ 紧跟的双花括号——\frac{{a}}{b} 的 frac
+    参数前面不是 _/^,不受影响;{\alpha} 只有单层花括号,不匹配双花括号模式。"""
+    return _DOUBLE_BRACED_SCRIPT_RE.sub(r"\1{\2}", s)
 
 
 def _drop_unmatched_closing_braces(s: str) -> str:
@@ -674,6 +691,7 @@ def sanitize_latex(s: str) -> str:
     r"""引擎方言清洗:删冗余命令 + 合并非法相邻双脚本 + 链式 atop→substack + \cdotd 拆合。"""
     s = _decode_latex_entities(s)
     s = _drop_unescaped_dollar_tokens(s)
+    s = _normalize_double_braced_scripts(s)
     s = _repair_pseudo_bmatrix(s)
     s = _unwrap_malformed_integral_frac_runs(s)
     s = _repair_orphan_aprime_integral_limits(s)
@@ -705,6 +723,107 @@ def sanitize_formula_number(content: str) -> str:
     raw = (content or "").strip()
     m = _NUM_RE.match(raw)
     return sanitize_latex(m.group(1) if m else raw)
+
+
+# ---------------------------------------------------------------------------
+# Task C:表格降级导出——无合并单元格的简单表改发 Markdown 管道表格(公式
+# `$...$` 才能在主流渲染器里生效);结构复杂或判不准一律保留现状 HTML 直出
+# (fallback 逐字节不变)。判定与解析复用 table_audit.parse_table_html /
+# lint_table_structure(不修改 table_audit.py)。
+# ---------------------------------------------------------------------------
+_TABLE_TAG_RE = re.compile(r"<table\b", re.IGNORECASE)
+
+
+def _is_simple_table(html: str) -> tuple[bool, ParsedTable]:
+    r"""判定表格是否可安全降级为管道表格。保守优先:判不准(任一条件不满足或
+    解析异常)一律返回 False,调用方回落到现状 HTML 直出,绝不冒险改写复杂表。
+
+    简单表硬性条件(全部满足):单一 <table> 根;全部 cell rowspan==1 且
+    colspan==1;无嵌套 <table>;结构 lint 无 error 级问题;行列数 ≥1(空表/空
+    网格天然被此条排除)。"""
+    table = parse_table_html(html)
+    if "html_parse_error" in table.warnings:
+        return False, table
+    if table.root_count != 1:
+        return False, table
+    if len(_TABLE_TAG_RE.findall(html)) != table.root_count:
+        return False, table                     # 存在嵌套 <table>
+    if table.n_rows < 1 or table.n_cols < 1 or not table.cells:
+        return False, table
+    if any(c.rowspan != 1 or c.colspan != 1 for c in table.cells):
+        return False, table
+    if any(issue["severity"] == "error" for issue in lint_table_structure(table)):
+        return False, table
+    return True, table
+
+
+def _escape_pipes_outside_math(text: str) -> str:
+    r"""转义管道表格分隔符 `|`,但跳过 $...$/$$...$$ 数学区间内部——公式里常有
+    字面 `|`(绝对值 |x|),转义成 \| 会被 KaTeX 读成范数记号,语义改变。定界符
+    探测复用与 _sanitize_markdown_math_spans 相同的算法,区间内部原样透传。"""
+    out: list[str] = []
+    i, n = 0, len(text)
+    while i < n:
+        if text[i] == "$" and not _is_escaped(text, i):
+            display = i + 1 < n and text[i + 1] == "$"
+            if not display and ((i > 0 and text[i - 1] == "$") or (i + 1 < n and text[i + 1] == "$")):
+                out.append(text[i])
+                i += 1
+                continue
+            delim = "$$" if display else "$"
+            start = i + len(delim)
+            end = _find_display_math_end(text, start) if display else _find_inline_math_end(text, start)
+            if end != -1:
+                out.append(text[i:end + len(delim)])   # 数学区间原样透传,不转义
+                i = end + len(delim)
+                continue
+        if text[i] == "|":
+            out.append(r"\|")
+        else:
+            out.append(text[i])
+        i += 1
+    return "".join(out)
+
+
+def _render_table_cell_md(text: str) -> str:
+    """管道表格单个 cell 的文本处理:先走既有 math-span 清洗(公式内容原样保留,
+    只清洗定界符内部——含 C3 归一);再转义定界符外的 `|`。内部换行/连续空白
+    折叠已由 table_audit._expand_grid 完成(cell.text 产出时即已折叠),此处无需
+    重做。"""
+    return _escape_pipes_outside_math(_sanitize_markdown_math_spans(text))
+
+
+def _emit_pipe_table(table: ParsedTable) -> str:
+    """把 ParsedTable(已判定为简单表)发射成 Markdown 管道表格。首行为表头,
+    其余为数据行;列数取网格宽度 n_cols,缺失列补空 cell(短行不产生错列)。"""
+    rows: dict[int, dict[int, str]] = {}
+    for cell in table.cells:
+        rows.setdefault(cell.row, {})[cell.col] = cell.text
+    n_cols = table.n_cols
+
+    def _row_line(row_idx: int) -> str:
+        cells = rows.get(row_idx, {})
+        texts = [_render_table_cell_md(cells.get(c, "")) for c in range(n_cols)]
+        return "| " + " | ".join(texts) + " |"
+
+    lines: list[str] = []
+    if table.caption:
+        lines.append(f"*{_render_table_cell_md(table.caption)}*")
+        lines.append("")
+    lines.append(_row_line(0))
+    lines.append("| " + " | ".join(["---"] * n_cols) + " |")
+    for r in range(1, table.n_rows):
+        lines.append(_row_line(r))
+    return "\n".join(lines)
+
+
+def _render_table_block(content: str) -> str:
+    """table 块发射入口:简单表 → 管道表格;判不准/复杂表 → 现状 HTML 直出
+    (与改动前逐字节一致,fallback 完全不变)。"""
+    is_simple, table = _is_simple_table(content)
+    if is_simple:
+        return _emit_pipe_table(table)
+    return _sanitize_markdown_math_spans(restore_emphasis_dots(content))
 
 
 def restore_emphasis_dots(text: str) -> str:
@@ -830,6 +949,13 @@ def _render_unordered(blocks: list[dict], stem: str | None,
                                   "page": page, "block_id": block_id, "sample": content[:40]})
                 fragment += "\n\n" + restore_emphasis_dots(content)
             extras.append({"y0": y0, "seq": seq, "bids": [block_id], "md": fragment})
+        elif label == "table":
+            # Task C:简单表降级为管道表格(公式即时渲染);复杂/判不准表原样
+            # 走现状 HTML 直出——判定与解析见 _render_table_block/_is_simple_table。
+            if not content:
+                continue
+            extras.append({"y0": y0, "seq": seq, "bids": [block_id],
+                           "md": _render_table_block(content)})
         elif label in _PASSTHROUGH_UNORDERED_LABELS:
             if not content:
                 continue

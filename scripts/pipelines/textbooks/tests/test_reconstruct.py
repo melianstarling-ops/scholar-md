@@ -1034,3 +1034,132 @@ def test_inline_math_delimiter_all_whitespace_body_kept_as_is():
     assert "$$" not in md
     assert "a $   $ b" in md
     assert "$a+b$" not in md
+
+
+# ---------------------------------------------------------------------------
+# Task C:表格降级导出——无合并单元格的简单表改发 Markdown 管道表格(数学立即
+# 全渲染);复杂表(rowspan/colspan、多 <table> 根、嵌套表、判不准)一律保守
+# 保留现状 HTML 直出,逐字节不变。C3(顺手项):上下标双花括号归一,范围严格
+# 限定在 _/^ 紧跟的双花括号。
+# ---------------------------------------------------------------------------
+
+
+def _table_block(content, block_id=1):
+    return [{
+        "block_label": "table", "block_content": content,
+        "block_order": None, "block_bbox": [0, 0, 10, 10], "block_id": block_id,
+    }]
+
+
+def test_simple_table_with_formula_cell_becomes_pipe_table():
+    content = (
+        r'<table><tr><th>方程</th><th>说明</th></tr>'
+        r'<tr><td>$\nabla \cdot \mathbf{B} = 0$</td><td>无源</td></tr></table>'
+    )
+    md, _ = reconstruct_markdown(_table_block(content))
+    assert "<table>" not in md
+    assert "| 方程 | 说明 |" in md
+    assert "| --- | --- |" in md
+    assert r"| $\nabla \cdot \mathbf{B} = 0$ | 无源 |" in md
+
+
+def test_table_with_rowspan_falls_back_to_html_unchanged():
+    # 复杂表(rowspan≥2)回归锁定:与改动前逐字节一致(无 $/无 \underset,
+    # _sanitize_markdown_math_spans/restore_emphasis_dots 均为恒等变换)。
+    content = ('<table><tr><td rowspan="2">A</td><td>B</td></tr>'
+               '<tr><td>C</td></tr></table>')
+    md, _ = reconstruct_markdown(_table_block(content))
+    assert md == content + "\n"
+
+
+def test_table_with_colspan_falls_back_to_html_unchanged():
+    content = '<table><tr><td colspan="2">A</td></tr><tr><td>B</td><td>C</td></tr></table>'
+    md, _ = reconstruct_markdown(_table_block(content))
+    assert md == content + "\n"
+
+
+def test_table_with_multiple_roots_falls_back_to_html_unchanged():
+    content = '<table><tr><td>A</td></tr></table><table><tr><td>B</td></tr></table>'
+    md, _ = reconstruct_markdown(_table_block(content))
+    assert md == content + "\n"
+
+
+def test_table_with_nested_table_falls_back_to_html_unchanged():
+    content = '<table><tr><td><table><tr><td>inner</td></tr></table></td></tr></table>'
+    md, _ = reconstruct_markdown(_table_block(content))
+    assert md == content + "\n"
+
+
+def test_table_cell_pipe_escaped_and_newline_folded():
+    content = '<table><tr><th>H</th></tr><tr><td>a|b\nc</td></tr></table>'
+    md, _ = reconstruct_markdown(_table_block(content))
+    assert r"a\|b c" in md
+    assert "a|b" not in md          # 未转义的裸 | 不应残留(会被误读成列分隔符)
+
+
+def test_table_cell_pipe_inside_math_span_not_escaped():
+    # 数学区间内的字面 | (绝对值 |x|)不转义——转义成 \| 会被 KaTeX 读成范数记号,
+    # 语义改变。管道表格分隔符转义只作用于定界符外。
+    content = '<table><tr><th>H</th></tr><tr><td>$|x|$</td></tr></table>'
+    md, _ = reconstruct_markdown(_table_block(content))
+    assert r"$|x|$" in md
+    assert r"$\|x\|$" not in md
+
+
+def test_table_short_row_padded_no_column_misalignment():
+    content = ('<table><tr><th>A</th><th>B</th><th>C</th></tr>'
+               '<tr><td>1</td></tr></table>')
+    md, _ = reconstruct_markdown(_table_block(content))
+    lines = [l for l in md.splitlines() if l.strip()]
+    header_line = next(l for l in lines if l.startswith("| A"))
+    sep_line = next(l for l in lines if l.startswith("| ---"))
+    data_line = next(l for l in lines if l.startswith("| 1"))
+    assert header_line.count("|") == sep_line.count("|") == data_line.count("|") == 4
+
+
+def test_table_caption_emitted_above_pipe_table():
+    content = '<table><caption>表 1 参数</caption><tr><th>A</th></tr><tr><td>1</td></tr></table>'
+    md, _ = reconstruct_markdown(_table_block(content))
+    assert "表 1 参数" in md
+    assert md.index("表 1 参数") < md.index("| A |")
+
+
+def test_empty_table_falls_back_to_html():
+    content = "<table></table>"
+    md, _ = reconstruct_markdown(_table_block(content))
+    assert md == content + "\n"
+
+
+def test_sanitize_latex_normalizes_double_braced_subscript():
+    assert sanitize_latex(r"T_{{1}}") == r"T_{1}"
+
+
+def test_sanitize_latex_normalizes_double_braced_superscript():
+    assert sanitize_latex(r"x^{{2}}") == r"x^{2}"
+
+
+def test_sanitize_latex_frac_double_brace_argument_untouched():
+    # C3 只锚定在 _/^ 紧跟的双花括号;\frac 的花括号参数前面不是 _/^,不受影响
+    assert sanitize_latex(r"\frac{{a}}{b}") == r"\frac{{a}}{b}"
+
+
+def test_sanitize_latex_single_braced_group_untouched():
+    # 单层花括号(非双花括号)不匹配 C3 模式,原样保留
+    assert sanitize_latex(r"{\alpha}") == r"{\alpha}"
+
+
+def test_inline_formula_double_braced_subscript_normalized_end_to_end():
+    blocks = [{"block_label": "text", "block_content": "设 $T_{{1}}$ 为初始温度。", "block_order": 1}]
+    md, _ = reconstruct_markdown(blocks)
+    assert r"$T_{1}$" in md
+    assert r"$T_{{1}}$" not in md
+
+
+def test_display_formula_double_braced_subscript_normalized():
+    blocks = [{
+        "block_label": "display_formula", "block_content": r"$$ x_{{n}} = 1 $$",
+        "block_order": 1, "block_id": 1, "block_bbox": [0, 0, 10, 10],
+    }]
+    md, _ = reconstruct_markdown(blocks)
+    assert r"x_{n}" in md
+    assert r"x_{{n}}" not in md
