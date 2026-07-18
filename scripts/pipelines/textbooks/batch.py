@@ -53,6 +53,19 @@ AUDIT_SCHEMA_VERSION = 2
 # 与 convert.py 的 BORN_DIGITAL_MODES 同步维护(独立常量,同上惯例)。
 BORN_DIGITAL_MODES = ("defer", "ocr", "hybrid")
 
+# 与 convert.py 的 FORMULA_REPAIR_MODES 同步维护(独立常量,同上惯例)。
+#
+# batch 默认值取舍(Task B,与 convert.py 默认 "deterministic" 刻意不同——见
+# task-B-report 里的说明):batch 收尾早在本任务之前就已有自己一套 katex_scan +
+# katex_triage 自动化(见下方 run() 里的 katex_scan_enabled 分支),默认打开、
+# 已跑通、已有回归测试覆盖。若这里默认也改成 "deterministic" 并透传给每本书的
+# convert.py 子进程,batch 现有收尾步骤与 convert 内建步骤会对同一本书各自独立
+# 跑一遍 katex_scan/katex_triage——不是崩溃风险,但是浪费(双跑)。默认 "off":
+# 不透传给子进程,batch 收尾沿用它自己已有的自动化,零行为变化、零测试改动。
+# 用户显式选 --formula-repair {deterministic,agents} 时才透传给子进程,并同时
+# 关闭 batch 自己的收尾分支(见 run() 内 dedup 逻辑),避免双跑。
+FORMULA_REPAIR_MODES = ("deterministic", "agents", "off")
+
 # selfcheck.json 里紧凑 source_audit 字段做分级要用到的最小键集合——用来判断该字段
 # 是否结构完好,而非"字段存在就信"(Review Important 1:字段存在但类型/结构损坏时,
 # 必须转磁盘兜底读取,不能悄悄漏报)。
@@ -114,7 +127,8 @@ def _already_done(out_root: Path, work_root: Path | None, pdf_path: Path, dpi: i
 def _job_argv(pdf: Path, out_root: Path, work_root: Path | None, dpi: int,
               no_selfcheck_json: bool, allow_sleep: bool = False,
               force_ocr: bool = False, work_hours: float = 6,
-              rest_minutes: float = 40, born_digital_mode: str = "hybrid") -> list[str]:
+              rest_minutes: float = 40, born_digital_mode: str = "hybrid",
+              formula_repair: str = "off") -> list[str]:
     argv = ["--src", str(pdf), "--out", str(out_root), "--dpi", str(dpi)]
     if work_root:
         argv.extend(["--work-dir", str(work_root)])
@@ -127,6 +141,7 @@ def _job_argv(pdf: Path, out_root: Path, work_root: Path | None, dpi: int,
     if allow_sleep:
         argv.append("--allow-sleep")
     argv.extend(["--born-digital-mode", born_digital_mode])
+    argv.extend(["--formula-repair", formula_repair])
     return argv
 
 
@@ -246,9 +261,16 @@ def run(src_paths: list[str], out: str | None = None, dpi: int = cp.DEFAULT_DPI,
         rest_minutes: float = 40, runner=None,
         severe_issue_codes: frozenset = DEFAULT_SEVERE_ISSUE_CODES,
         suspect_print_limit: int = DEFAULT_SUSPECT_PRINT_LIMIT,
-        born_digital_mode: str = "hybrid") -> tuple[int, list[dict]]:
+        born_digital_mode: str = "hybrid",
+        formula_repair: str = "off") -> tuple[int, list[dict]]:
     if work_hours <= 0 or rest_minutes <= 0:
         raise ValueError("work_hours 与 rest_minutes 必须大于 0")
+    if formula_repair not in FORMULA_REPAIR_MODES:
+        raise ValueError(f"formula_repair 须为 {FORMULA_REPAIR_MODES},收到 {formula_repair!r}")
+    # Task B dedup(见 FORMULA_REPAIR_MODES 上方注释):formula_repair != "off" 时
+    # 每本书的 convert.py 子进程会自己跑 katex_scan+katex_triage,batch 收尾这里
+    # 对应步骤必须让路,不管调用方传的 katex_scan_enabled 是什么——避免双跑。
+    katex_scan_enabled = katex_scan_enabled and formula_repair == "off"
     pdfs = discover(src_paths)
     if limit is not None:
         pdfs = pdfs[:limit]
@@ -272,7 +294,8 @@ def run(src_paths: list[str], out: str | None = None, dpi: int = cp.DEFAULT_DPI,
                              "failed_pages": 0, "selfcheck": None, "source_audit_grade": None})
             continue
         argv = _job_argv(pdf, out_root, work_root, dpi, no_selfcheck_json, allow_sleep,
-                         force_ocr, work_hours, rest_minutes, born_digital_mode)
+                         force_ocr, work_hours, rest_minutes, born_digital_mode,
+                         formula_repair)
         rc = run_until_done(argv, max_restarts=max_restarts, runner=runner)
         if rc != 0:
             n_giveup += 1
@@ -351,6 +374,11 @@ def main() -> int:
     ap.add_argument("--born-digital-mode", choices=list(BORN_DIGITAL_MODES), default="hybrid",
                     help="路线 B(born-digital)采信模式:hybrid=块级混合采信(默认)/"
                          "defer=登记不转(回退开关)/ocr=完全走 OCR 忽略文本层(回退开关,转发给每本书的 convert.py)")
+    ap.add_argument("--formula-repair", choices=list(FORMULA_REPAIR_MODES), default="off",
+                    help="转发给每本书 convert.py 的公式修复环档位(默认 off,沿用 batch "
+                         "自身已有的 katex_scan+katex_triage 收尾自动化,不与 convert 内建"
+                         "步骤双跑):deterministic/agents 会转发给子进程且自动关闭 batch "
+                         "自己对应的收尾步骤")
     args = ap.parse_args()
     if args.work_hours <= 0 or args.rest_minutes <= 0:
         ap.error("--work-hours 与 --rest-minutes 必须大于 0")
@@ -375,7 +403,8 @@ def main() -> int:
                         force_ocr=args.force_ocr,
                         work_hours=args.work_hours,
                         rest_minutes=args.rest_minutes,
-                        born_digital_mode=args.born_digital_mode)
+                        born_digital_mode=args.born_digital_mode,
+                        formula_repair=args.formula_repair)
         return rc
     except ValueError as e:
         print(f"[ERROR] {e}", file=sys.stderr)

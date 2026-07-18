@@ -158,3 +158,45 @@ def test_main_rejects_invalid_born_digital_mode(monkeypatch):
     with pytest.raises(SystemExit) as exc:
         wd.main()
     assert exc.value.code != 0
+
+
+# ---------------------------------------------------------------------------
+# Task B(2026-07-17 所有者批准):--formula-repair 三入口透传之一——watchdog
+# 只做 argv 透传给 convert.py 子进程,不做任何编排本体(镜像 --born-digital-mode
+# 的既有透传模式)。
+# ---------------------------------------------------------------------------
+
+def test_main_forwards_formula_repair_to_convert(monkeypatch):
+    captured = {}
+    def fake_run_until_done(argv, max_restarts):
+        captured["argv"] = argv
+        return 0
+    monkeypatch.setattr(wd, "run_until_done", fake_run_until_done)
+    monkeypatch.setattr("sys.argv",
+                        ["watchdog.py", "--src", "x.pdf", "--formula-repair", "agents"])
+    with pytest.raises(SystemExit):
+        wd.main()
+    argv = captured["argv"]
+    assert "--formula-repair" in argv
+    assert argv[argv.index("--formula-repair") + 1] == "agents"
+
+
+def test_main_formula_repair_defaults_to_deterministic(monkeypatch):
+    captured = {}
+    def fake_run_until_done(argv, max_restarts):
+        captured["argv"] = argv
+        return 0
+    monkeypatch.setattr(wd, "run_until_done", fake_run_until_done)
+    monkeypatch.setattr("sys.argv", ["watchdog.py", "--src", "x.pdf"])
+    with pytest.raises(SystemExit):
+        wd.main()
+    argv = captured["argv"]
+    assert argv[argv.index("--formula-repair") + 1] == "deterministic"
+
+
+def test_main_rejects_invalid_formula_repair(monkeypatch):
+    monkeypatch.setattr("sys.argv",
+                        ["watchdog.py", "--src", "x.pdf", "--formula-repair", "bogus"])
+    with pytest.raises(SystemExit) as exc:
+        wd.main()
+    assert exc.value.code != 0

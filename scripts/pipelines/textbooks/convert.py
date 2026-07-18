@@ -22,6 +22,11 @@ from scripts.pipelines.textbooks.selfcheck import (
 )
 from scripts.pipelines.textbooks import checkpoint as cp
 from scripts.pipelines.textbooks import images
+from scripts.pipelines.textbooks import katex_triage
+from scripts.pipelines.textbooks.katex_scan import scan_katex_work_pages
+from scripts.pipelines.textbooks.formula_candidates import collect_formula_candidates
+from scripts.pipelines.textbooks.formula_agents.adapters import default_adapters
+from scripts.pipelines.textbooks.formula_agents.orchestrator import run_agents
 from scripts.pipelines.textbooks.power import keep_system_awake
 from scripts.pipelines.textbooks.source_audit import (
     extract_source_page, page_geometry, assign_source_words,
@@ -37,6 +42,15 @@ DEFAULT_WORK_SECONDS = 6 * 60 * 60
 DEFAULT_REST_SECONDS = 40 * 60
 
 BORN_DIGITAL_MODES = ("defer", "ocr", "hybrid")
+
+# Task B(2026-07-17 所有者批准):单本转换收尾自动接公式修复环。三档语义:
+#   deterministic(默认,零成本零网络) —— katex_scan → (硬错时)katex_triage 分桶
+#     + 视觉工单 → formula candidates 漏斗(确定性聚合,无 LLM 调用)。
+#   agents —— deterministic 全部 + 公式 Agent 五道门(冻结模型链,外部 LLM 调用);
+#     corrections 强制以 propose 模式落 pending,绝不自动 accept/应用(红线,见
+#     _run_agents_stage)。adapters 全不可用时优雅降级为 deterministic 行为。
+#   off —— 现状,只转换不后处理,零调用。
+FORMULA_REPAIR_MODES = ("deterministic", "agents", "off")
 
 # 审计报告 schema 版本(与 source_audit.audit_document 输出的 schema_version 一致;
 # 独立维护,断点恢复的指纹过期判定据此比对)。
@@ -167,7 +181,8 @@ def _register_deferred(pdf_path: str, out_dir: str, stem: str) -> dict:
     with open(os.path.join(deferred, stem + ".txt"), "w", encoding="utf-8") as f:
         f.write(pdf_path + "\n")
     return {"route": "B", "md_path": None, "selfcheck": None, "failed_pages": [],
-            "source_audit": None, "born_digital_mode": "defer", "adoption_error": False}
+            "source_audit": None, "born_digital_mode": "defer", "adoption_error": False,
+            "formula_repair": {"mode": "off", "reason": "route_b_deferred_no_md"}}
 
 
 class _AdoptContext:
@@ -309,14 +324,100 @@ def _maybe_remove_deferred_marker(out_dir: str, stem: str, *,
         print(f"[textbooks] B 转换完成,删除 deferred 登记标记: {marker}")
 
 
+def _safe_probe(adapter) -> bool:
+    """probe() 只做 shutil.which/进程存在性检查,理论上不该抛,但外部 adapter 是
+    第三方 CLI 封装——防御式吞异常,决不能让"检测是否可用"这一步本身崩掉整轮。"""
+    try:
+        return bool(adapter.probe())
+    except Exception:                              # noqa: BLE001 探测异常不逃逸
+        return False
+
+
+def _run_agents_stage(layout: DocLayout, pdf_path: str, dpi: int) -> dict:
+    """公式 Agent 终检链入口(stage 9)。红线:corrections 只落 pending,mode 在此
+    处硬编码为 "propose",绝不传 "apply"——不依赖 run_agents 内部熔断/闸门"恰好"
+    把它降级,由编排层直接锁死,任何情况下都不会自动 accept/改写 md。
+
+    adapters 全不可用(未装 CLI/未登录)→ 优雅降级为等价 deterministic 行为:
+    不调用 run_agents(不产生任何 agent 相关调用/文件写入),只留明确记录,不崩。"""
+    try:
+        adapters = default_adapters()
+    except Exception as e:                         # noqa: BLE001 adapter 构造异常不逃逸
+        return {"status": "error", "error": f"{type(e).__name__}: {e}"}
+    available = [a for a in adapters if _safe_probe(a)]
+    if not available:
+        return {"status": "degraded_deterministic",
+                "reason": "无可用 formula-agent CLI adapter(PATH 未装/未登录),"
+                          "已降级为 deterministic 行为,未调用任何 agent"}
+    try:
+        report = run_agents(layout, adapters=available, pdf_path=pdf_path or "",
+                            dpi=dpi, mode="propose")
+        return {"status": "ok", "run_mode": report.mode,
+                "n_candidates": report.n_candidates, "applied": report.applied,
+                "rejected": len(report.rejected), "pending_ids": report.pending_ids,
+                "reason": report.reason}
+    except Exception as e:                         # noqa: BLE001 agent 链异常不逃逸
+        return {"status": "error", "error": f"{type(e).__name__}: {e}"}
+
+
+def _run_formula_repair(layout: DocLayout, pdf_path: str, mode: str, dpi: int) -> dict:
+    """转换收尾自动接公式修复环(Task B,2026-07-17 所有者批准)。
+
+    deterministic:katex_scan(node 缺失优雅跳过)→ 有硬错才跑 katex_triage 分桶
+    + 视觉工单(镜像 batch.py 收尾已有自动化)→ formula candidates 漏斗(确定性
+    聚合,读 worklist/render_errors,无 LLM 调用)。
+    agents:deterministic 全部 + _run_agents_stage(五道门,corrections 强制 pending)。
+    off:零调用。
+
+    每个子步骤独立 try/except——一步异常不影响其它步骤继续跑,也不影响本函数
+    正常返回(顶层调用方 convert_pdf 另有一层兜底,双保险)。"""
+    result: dict = {"mode": mode}
+    if mode == "off":
+        return result
+
+    katex_result = None
+    try:
+        katex_result = scan_katex_work_pages(layout, layout.render_errors_path)
+    except Exception as e:                         # noqa: BLE001 扫描异常不逃逸
+        result["katex_scan"] = {"status": "error", "error": f"{type(e).__name__}: {e}"}
+    else:
+        if katex_result is None:
+            result["katex_scan"] = {"status": "skipped", "reason": "node_missing"}
+        else:
+            errors = katex_result.get("errors", [])
+            result["katex_scan"] = {"status": "ok", "hard_errors": len(errors)}
+            if errors:
+                try:
+                    worklist_path = katex_triage.report_for_batch(layout, katex_result)
+                    result["katex_triage"] = {"status": "ok", "worklist_path": worklist_path}
+                except Exception as e:              # noqa: BLE001 分桶异常不逃逸
+                    result["katex_triage"] = {"status": "error",
+                                              "error": f"{type(e).__name__}: {e}"}
+
+    try:
+        collected = collect_formula_candidates(layout, write=True)
+        candidates = collected.get("candidates", []) if isinstance(collected, dict) else []
+        result["formula_candidates"] = {"status": "ok", "count": len(candidates)}
+    except Exception as e:                         # noqa: BLE001 候选聚合异常不逃逸
+        result["formula_candidates"] = {"status": "error", "error": f"{type(e).__name__}: {e}"}
+
+    if mode == "agents":
+        result["agents"] = _run_agents_stage(layout, pdf_path, dpi)
+
+    return result
+
+
 def convert_pdf(pdf_path: str, deliverables_dir: str | None = None,
                 work_dir: str | None = None, dpi: int = cp.DEFAULT_DPI,
                 write_selfcheck: bool = True, force_ocr: bool = False,
                 work_seconds: float = DEFAULT_WORK_SECONDS,
                 rest_seconds: float = DEFAULT_REST_SECONDS,
-                born_digital_mode: str = "hybrid") -> dict:
+                born_digital_mode: str = "hybrid",
+                formula_repair: str = "deterministic") -> dict:
     if born_digital_mode not in BORN_DIGITAL_MODES:
         raise ValueError(f"born_digital_mode 须为 {BORN_DIGITAL_MODES},收到 {born_digital_mode!r}")
+    if formula_repair not in FORMULA_REPAIR_MODES:
+        raise ValueError(f"formula_repair 须为 {FORMULA_REPAIR_MODES},收到 {formula_repair!r}")
     stem = os.path.splitext(os.path.basename(pdf_path))[0]
     deliverables_dir = deliverables_dir or os.path.dirname(os.path.abspath(pdf_path))
     layout = resolve_layout(stem, deliverables_dir, work_dir)
@@ -441,11 +542,24 @@ def convert_pdf(pdf_path: str, deliverables_dir: str | None = None,
             deliverables_dir, stem,
             giveup=(done == 0), audit_ok=audit_report is not None)
 
+    # 转换本体到这里已成功、md/selfcheck 已落盘——后处理失败隔离硬要求(Task B):
+    # 公式修复环任何异常都不得改变本次转换已经成功这个事实,顶层兜底一次(内部
+    # _run_formula_repair 逐步骤已各自 try/except,这里是双保险,防止其自身的
+    # 编排代码本身出问题,如 default_adapters() 之外的意外)。
+    try:
+        formula_repair_result = _run_formula_repair(layout, pdf_path, formula_repair, dpi)
+    except Exception as e:                          # noqa: BLE001 后处理整体隔离,不影响已产出的 md/selfcheck
+        print(f"[textbooks] 公式修复后处理异常(md/selfcheck 完好,不受影响): "
+              f"{type(e).__name__}: {e}")
+        formula_repair_result = {"mode": formula_repair, "status": "error",
+                                 "error": f"{type(e).__name__}: {e}"}
+
     return {"route": route, "md_path": layout.md_path, "selfcheck": check,
             "failed_pages": manifest["failed_pages"],
             "source_audit": audit_report,
             "born_digital_mode": born_digital_mode if route == "B" else None,
-            "adoption_error": adoption_error}
+            "adoption_error": adoption_error,
+            "formula_repair": formula_repair_result}
 
 
 def _finalize_hybrid(pdf_path: str, layout: DocLayout, work_dir: str, total: int,
@@ -553,6 +667,13 @@ def main() -> None:
     ap.add_argument("--born-digital-mode", choices=list(BORN_DIGITAL_MODES), default="hybrid",
                     help="路线 B(born-digital)采信模式:hybrid=块级混合采信(默认)/"
                          "defer=登记不转(回退开关)/ocr=完全走 OCR 忽略文本层(回退开关)")
+    ap.add_argument("--formula-repair", choices=list(FORMULA_REPAIR_MODES),
+                    default="deterministic",
+                    help="转换收尾自动接的公式修复环:deterministic=katex_scan+"
+                         "(有硬错时)katex_triage 分桶+视觉工单+formula candidates 漏斗"
+                         "(默认,零成本零网络)/agents=deterministic 全部+公式 Agent 五道门"
+                         "(外部 LLM 调用,corrections 只落 pending,绝不自动应用)/"
+                         "off=不后处理(现状)")
     args = ap.parse_args()
     if args.work_hours <= 0 or args.rest_minutes <= 0:
         ap.error("--work-hours 与 --rest-minutes 必须大于 0")
@@ -562,7 +683,8 @@ def main() -> None:
                           force_ocr=args.force_ocr,
                           work_seconds=args.work_hours * 3600,
                           rest_seconds=args.rest_minutes * 60,
-                          born_digital_mode=args.born_digital_mode)
+                          born_digital_mode=args.born_digital_mode,
+                          formula_repair=args.formula_repair)
     print(f"[route={res['route']}] md={res['md_path']}")
     if res.get("failed_pages"):
         print(f"[textbooks] 失败页 {len(res['failed_pages'])}:",
@@ -572,6 +694,13 @@ def main() -> None:
         print(f"[Tier0] blocks {c['in_md']}/{c['total']} 覆盖, 缺 {len(c['missing'])}")
         if c.get("katex_incompat"):
             print("[Tier0] KaTeX 不兼容残留:", ", ".join(c["katex_incompat"]))
+    fr = res.get("formula_repair")
+    if fr and fr.get("mode") != "off":
+        print(f"[formula_repair] mode={fr.get('mode')} "
+              f"katex_scan={fr.get('katex_scan')} "
+              f"formula_candidates={fr.get('formula_candidates')}")
+        if "agents" in fr:
+            print(f"[formula_repair] agents={fr['agents']}")
 
 
 if __name__ == "__main__":

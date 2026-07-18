@@ -796,3 +796,156 @@ def test_main_rejects_invalid_born_digital_mode(monkeypatch):
     with pytest.raises(SystemExit) as exc:
         bp.main()
     assert exc.value.code != 0
+
+
+# ---------------------------------------------------------------------------
+# Task B(2026-07-17 所有者批准):--formula-repair 三入口透传之一——batch 比较
+# 特殊:batch 收尾本就已有自己一套 katex_scan+katex_triage 自动化(见上方
+# test_run_invokes_katex_scan_by_default 等),早于本任务、默认打开。batch 的
+# --formula-repair 默认取 "off"(与 convert.py/watchdog.py 默认 "deterministic"
+# 刻意不同,取舍见 batch.py 顶部 FORMULA_REPAIR_MODES 注释与 task-B-report):
+#   - 默认 "off":不透传给每本书的 convert.py 子进程,batch 沿用自己已有的收尾
+#     自动化,零行为变化。
+#   - 显式选 deterministic/agents:透传给子进程(该本书的 convert.py 会自己跑
+#     katex_scan+triage+candidates/agents),此时 batch 自己的收尾 katex 步骤
+#     必须让路(不管 --no-katex-scan 传的是什么),避免同一本书的 katex_scan/
+#     katex_triage 被跑两遍。
+# ---------------------------------------------------------------------------
+
+def test_job_argv_passes_formula_repair_to_convert_subprocess(tmp_path):
+    argv = bp._job_argv(tmp_path / "A.pdf", tmp_path / "out", None, 150,
+                        no_selfcheck_json=False, formula_repair="agents")
+    assert "--formula-repair" in argv
+    assert argv[argv.index("--formula-repair") + 1] == "agents"
+
+
+def test_job_argv_defaults_formula_repair_to_off(tmp_path):
+    argv = bp._job_argv(tmp_path / "A.pdf", tmp_path / "out", None, 150,
+                        no_selfcheck_json=False)
+    assert argv[argv.index("--formula-repair") + 1] == "off"
+
+
+def test_run_rejects_invalid_formula_repair(tmp_path):
+    with pytest.raises(ValueError, match="formula_repair"):
+        bp.run([str(tmp_path)], out=str(tmp_path / "out"), formula_repair="bogus")
+
+
+def _fake_runner_writes_book(out_root, pdf):
+    def fake_runner(argv):
+        layout = resolve_layout(pdf.stem, str(out_root))
+        work = Path(layout.work_dir)
+        Path(layout.doc_deliverable_dir).mkdir(parents=True, exist_ok=True)
+        Path(layout.md_path).write_text(f"# {pdf.stem}\n", encoding="utf-8")
+        _mark_page_done(work, 1)
+        cp.save_manifest(str(work),
+                         cp.new_manifest(str(pdf), cp.pdf_fingerprint(str(pdf)), 150, "A"))
+        return 0
+    return fake_runner
+
+
+def test_run_default_formula_repair_off_forwards_off_and_keeps_own_katex_tail(
+        tmp_path, monkeypatch):
+    # 默认(formula_repair="off")行为零变化:argv 里显式带 --formula-repair off,
+    # 且 batch 自己的 katex_scan 收尾照常跑(既有回归,重新断言一次防漂移)。
+    d = tmp_path / "src"
+    d.mkdir()
+    pdf = _make_pdf(d, 1, name="A")
+    out_root = tmp_path / "out"
+    fake_runner = _fake_runner_writes_book(out_root, pdf)
+    scan_calls = []
+    monkeypatch.setattr(bp, "scan_katex_work_pages",
+                        lambda layout, out_path: (scan_calls.append(layout.stem)
+                                                  or {"errors": []}))
+
+    rc, results = bp.run([str(d)], out=str(out_root), dpi=150, runner=fake_runner)
+
+    assert rc == 0
+    assert scan_calls == ["A"]
+
+
+def test_run_formula_repair_deterministic_forwards_and_skips_own_katex_tail(
+        tmp_path, monkeypatch):
+    # 不双跑:formula_repair="deterministic" 转发给子进程(该本书 convert.py
+    # 自己会跑 katex_scan+triage),batch 自己的收尾 katex_scan 不得再跑一遍——
+    # 即便 katex_scan_enabled 仍是默认 True。
+    d = tmp_path / "src"
+    d.mkdir()
+    pdf = _make_pdf(d, 1, name="A")
+    out_root = tmp_path / "out"
+    captured_argv = {}
+
+    def fake_runner(argv):
+        captured_argv["argv"] = argv
+        return _fake_runner_writes_book(out_root, pdf)(argv)
+
+    scan_calls = []
+    monkeypatch.setattr(bp, "scan_katex_work_pages",
+                        lambda layout, out_path: scan_calls.append(layout.stem))
+
+    rc, results = bp.run([str(d)], out=str(out_root), dpi=150, runner=fake_runner,
+                         formula_repair="deterministic")
+
+    assert rc == 0
+    argv = captured_argv["argv"]
+    assert argv[argv.index("--formula-repair") + 1] == "deterministic"
+    assert scan_calls == []            # batch 自己的收尾 katex 步骤已让路,未被调用
+
+
+def test_run_formula_repair_agents_also_skips_own_katex_tail(tmp_path, monkeypatch):
+    d = tmp_path / "src"
+    d.mkdir()
+    pdf = _make_pdf(d, 1, name="A")
+    out_root = tmp_path / "out"
+    fake_runner = _fake_runner_writes_book(out_root, pdf)
+    scan_calls = []
+    monkeypatch.setattr(bp, "scan_katex_work_pages",
+                        lambda layout, out_path: scan_calls.append(layout.stem))
+
+    rc, results = bp.run([str(d)], out=str(out_root), dpi=150, runner=fake_runner,
+                         formula_repair="agents", katex_scan_enabled=True)
+
+    assert rc == 0
+    assert scan_calls == []
+
+
+def test_main_forwards_formula_repair(monkeypatch):
+    captured = {}
+
+    def fake_run(src_paths, **kwargs):
+        captured["kwargs"] = kwargs
+        return 0, []
+
+    monkeypatch.setattr(bp, "run", fake_run)
+    monkeypatch.setattr("sys.argv", [
+        "batch.py", "--src", "src", "--formula-repair", "deterministic",
+    ])
+
+    rc = bp.main()
+
+    assert rc == 0
+    assert captured["kwargs"]["formula_repair"] == "deterministic"
+
+
+def test_main_formula_repair_defaults_to_off(monkeypatch):
+    captured = {}
+
+    def fake_run(src_paths, **kwargs):
+        captured["kwargs"] = kwargs
+        return 0, []
+
+    monkeypatch.setattr(bp, "run", fake_run)
+    monkeypatch.setattr("sys.argv", ["batch.py", "--src", "src"])
+
+    rc = bp.main()
+
+    assert rc == 0
+    assert captured["kwargs"]["formula_repair"] == "off"
+
+
+def test_main_rejects_invalid_formula_repair(monkeypatch):
+    monkeypatch.setattr("sys.argv", [
+        "batch.py", "--src", "src", "--formula-repair", "bogus",
+    ])
+    with pytest.raises(SystemExit) as exc:
+        bp.main()
+    assert exc.value.code != 0

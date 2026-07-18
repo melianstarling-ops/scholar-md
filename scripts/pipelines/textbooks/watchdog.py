@@ -12,6 +12,10 @@ from scripts.pipelines.textbooks.power import keep_system_awake
 # convert.py 制造不必要耦合;风格同 batch.py 的 AUDIT_SCHEMA_VERSION 惯例)。
 BORN_DIGITAL_MODES = ("defer", "ocr", "hybrid")
 
+# 与 convert.py 的 FORMULA_REPAIR_MODES 同步维护(独立常量,同上惯例)。单本转换
+# 收尾自动接公式修复环(Task B):watchdog 只做 argv 透传给 convert.py 子进程。
+FORMULA_REPAIR_MODES = ("deterministic", "agents", "off")
+
 
 def _default_runner(argv: list[str]) -> int:
     cmd = [sys.executable, "-m", "scripts.pipelines.textbooks.convert", *argv]
@@ -56,6 +60,12 @@ def main() -> None:
     ap.add_argument("--born-digital-mode", choices=list(BORN_DIGITAL_MODES), default="hybrid",
                     help="路线 B(born-digital)采信模式:hybrid=块级混合采信(默认)/"
                          "defer=登记不转(回退开关)/ocr=完全走 OCR 忽略文本层(回退开关,转发给 convert.py)")
+    ap.add_argument("--formula-repair", choices=list(FORMULA_REPAIR_MODES),
+                    default="deterministic",
+                    help="转换收尾自动接的公式修复环(转发给 convert.py):"
+                         "deterministic=零成本零网络确定性修复链(默认)/"
+                         "agents=额外接公式 Agent 五道门(外部 LLM,corrections 只落 pending)/"
+                         "off=不后处理")
     args = ap.parse_args()
     if args.work_hours <= 0 or args.rest_minutes <= 0:
         ap.error("--work-hours 与 --rest-minutes 必须大于 0")
@@ -73,6 +83,7 @@ def main() -> None:
     if args.allow_sleep:
         argv.append("--allow-sleep")
     argv += ["--born-digital-mode", args.born_digital_mode]
+    argv += ["--formula-repair", args.formula_repair]
     with keep_system_awake(enabled=not args.allow_sleep):
         rc = run_until_done(argv, max_restarts=args.max_restarts)
     sys.exit(rc)

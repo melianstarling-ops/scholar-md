@@ -5,6 +5,8 @@ import pytest
 from scripts.pipelines.textbooks import convert as cv
 from scripts.pipelines.textbooks import checkpoint as cp
 from scripts.pipelines.textbooks.paths import resolve_layout
+from scripts.pipelines.textbooks.formula_agents.protocol import RawResponse
+from scripts.pipelines.textbooks.tests.formula_agents_fakes import FakeAdapter
 
 
 def _make_scan_pdf(tmp_path, n_pages):
@@ -1137,3 +1139,274 @@ def test_audit_write_failure_does_not_escape(tmp_path, monkeypatch):
     res = cv.convert_pdf(pdf, out, dpi=100, born_digital_mode="ocr")   # 不抛
     assert res["source_audit"] is None                   # 写盘失败 → None
     assert os.path.exists(res["md_path"])                 # md 照常产出
+
+
+# ---------------------------------------------------------------------------
+# Task B(2026-07-17 所有者批准):单本转换收尾自动接公式修复环。
+# --formula-repair {deterministic(默认),agents,off} 三档语义,详见
+# 04_Docs/superpowers/sdd-archive/2026-07-16-textbooks-route-b/task-B-formula-chain-brief.md
+# 引擎/LLM 全 stub,零 GPU 零真实调用。
+# ---------------------------------------------------------------------------
+
+def _stub_katex_scan(monkeypatch, result, *, calls=None):
+    """桩掉 cv.scan_katex_work_pages。calls(若给)记录每次 (layout, out_path) 调用。"""
+    def fake(layout, out_path):
+        if calls is not None:
+            calls.append((layout.stem, out_path))
+        return result
+    monkeypatch.setattr(cv, "scan_katex_work_pages", fake)
+
+
+def _stub_katex_triage(monkeypatch, calls):
+    def fake(layout, katex_result):
+        calls.append((layout.stem, katex_result))
+        return os.path.join(layout.repair_dir, f"{layout.stem}_vision_worklist.json")
+    monkeypatch.setattr(cv.katex_triage, "report_for_batch", fake)
+
+
+def _stub_formula_candidates(monkeypatch, calls, result=None):
+    def fake(layout, write=False):
+        calls.append((layout.stem, write))
+        return result or {"candidates": [], "summary": {}}
+    monkeypatch.setattr(cv, "collect_formula_candidates", fake)
+
+
+def test_formula_repair_off_makes_zero_postprocessing_calls(tmp_path, monkeypatch):
+    pdf = _make_scan_pdf(tmp_path, 1)
+    _stub_engine(monkeypatch, _one_text_block)
+    scan_calls, triage_calls, cand_calls, agent_calls = [], [], [], []
+    _stub_katex_scan(monkeypatch, {"errors": []}, calls=scan_calls)
+    _stub_katex_triage(monkeypatch, triage_calls)
+    _stub_formula_candidates(monkeypatch, cand_calls)
+    monkeypatch.setattr(cv, "run_agents",
+                        lambda *a, **k: agent_calls.append((a, k)))
+
+    res = cv.convert_pdf(pdf, str(tmp_path / "out"), dpi=100, formula_repair="off")
+
+    assert res["formula_repair"] == {"mode": "off"}
+    assert scan_calls == [] and triage_calls == [] and cand_calls == [] and agent_calls == []
+
+
+def test_formula_repair_deterministic_default_invokes_katex_scan(tmp_path, monkeypatch):
+    pdf = _make_scan_pdf(tmp_path, 1)
+    _stub_engine(monkeypatch, _one_text_block)
+    scan_calls, triage_calls = [], []
+    _stub_katex_scan(monkeypatch, {"errors": []}, calls=scan_calls)
+    _stub_katex_triage(monkeypatch, triage_calls)
+
+    res = cv.convert_pdf(pdf, str(tmp_path / "out"), dpi=100)   # formula_repair 省略 → 默认
+
+    assert res["formula_repair"]["mode"] == "deterministic"
+    assert len(scan_calls) == 1
+    assert res["formula_repair"]["katex_scan"] == {"status": "ok", "hard_errors": 0}
+    assert triage_calls == []          # 无硬错不跑 triage
+
+
+def test_formula_repair_deterministic_runs_triage_only_when_hard_errors(tmp_path, monkeypatch):
+    pdf = _make_scan_pdf(tmp_path, 1)
+    _stub_engine(monkeypatch, _one_text_block)
+    triage_calls = []
+    katex_result = {"errors": [{"page": 1, "error": "Undefined control sequence: \\foo",
+                                "latex_head": "\\foo"}]}
+    _stub_katex_scan(monkeypatch, katex_result)
+    _stub_katex_triage(monkeypatch, triage_calls)
+
+    res = cv.convert_pdf(pdf, str(tmp_path / "out"), dpi=100)
+
+    assert res["formula_repair"]["katex_scan"] == {"status": "ok", "hard_errors": 1}
+    assert len(triage_calls) == 1
+    assert triage_calls[0][1] == katex_result
+    assert res["formula_repair"]["katex_triage"]["status"] == "ok"
+
+
+def test_formula_repair_deterministic_runs_candidate_funnel(tmp_path, monkeypatch):
+    pdf = _make_scan_pdf(tmp_path, 1)
+    _stub_engine(monkeypatch, _one_text_block)
+    _stub_katex_scan(monkeypatch, {"errors": []})
+    cand_calls = []
+    _stub_formula_candidates(monkeypatch, cand_calls)
+
+    res = cv.convert_pdf(pdf, str(tmp_path / "out"), dpi=100)
+
+    assert cand_calls == [("scan", True)]
+    assert res["formula_repair"]["formula_candidates"] == {"status": "ok", "count": 0}
+
+
+def test_formula_repair_node_missing_records_skipped(tmp_path, monkeypatch):
+    pdf = _make_scan_pdf(tmp_path, 1)
+    _stub_engine(monkeypatch, _one_text_block)
+    _stub_katex_scan(monkeypatch, None)   # node 缺失时 scan_katex_work_pages 返回 None
+
+    res = cv.convert_pdf(pdf, str(tmp_path / "out"), dpi=100)
+
+    assert res["formula_repair"]["katex_scan"] == {"status": "skipped", "reason": "node_missing"}
+
+
+def test_formula_repair_step_exception_does_not_break_convert(tmp_path, monkeypatch):
+    # 后处理失败隔离硬要求:转换本体已成功(md/selfcheck 已落盘),后处理步骤异常
+    # 只记 formula_repair 错误摘要,不改变转换本体成功这个事实。
+    pdf = _make_scan_pdf(tmp_path, 1)
+    _stub_engine(monkeypatch, _one_text_block)
+
+    def boom(layout, out_path):
+        raise RuntimeError("katex 扫描注入异常")
+    monkeypatch.setattr(cv, "scan_katex_work_pages", boom)
+
+    res = cv.convert_pdf(pdf, str(tmp_path / "out"), dpi=100)
+
+    assert res["formula_repair"]["katex_scan"]["status"] == "error"
+    assert "katex 扫描注入异常" in res["formula_repair"]["katex_scan"]["error"]
+    assert os.path.exists(res["md_path"])
+    layout = _layout(tmp_path / "out")
+    assert os.path.exists(layout.selfcheck_path)
+    assert res["selfcheck"] is not None
+
+
+def test_formula_repair_outer_wrapper_catches_unexpected_orchestration_failure(
+        tmp_path, monkeypatch):
+    # 双保险:_run_formula_repair 本身(不是某个子步骤)抛异常时,顶层 try/except
+    # 仍须兜住,convert_pdf 照常返回成功,formula_repair 字段含错误摘要。
+    pdf = _make_scan_pdf(tmp_path, 1)
+    _stub_engine(monkeypatch, _one_text_block)
+
+    def boom(*_a, **_k):
+        raise RuntimeError("编排层意外异常")
+    monkeypatch.setattr(cv, "_run_formula_repair", boom)
+
+    res = cv.convert_pdf(pdf, str(tmp_path / "out"), dpi=100)
+
+    assert res["formula_repair"]["status"] == "error"
+    assert "编排层意外异常" in res["formula_repair"]["error"]
+    assert os.path.exists(res["md_path"])
+    assert res["selfcheck"] is not None
+
+
+def test_formula_repair_rejects_invalid_mode(tmp_path, monkeypatch):
+    pdf = _make_scan_pdf(tmp_path, 1)
+    _stub_engine(monkeypatch, _one_text_block)
+    with pytest.raises(ValueError, match="formula_repair"):
+        cv.convert_pdf(pdf, str(tmp_path / "out"), dpi=100, formula_repair="bogus")
+
+
+def test_convert_cli_forwards_formula_repair(monkeypatch):
+    captured = {}
+
+    def fake_convert_pdf(*_args, **kwargs):
+        captured.update(kwargs)
+        return {"route": "A", "md_path": "x.md",
+                "selfcheck": {"total": 0, "in_md": 0, "missing": []}, "failed_pages": []}
+
+    monkeypatch.setattr(cv, "convert_pdf", fake_convert_pdf)
+    monkeypatch.setattr("sys.argv", [
+        "convert.py", "--src", "x.pdf", "--formula-repair", "agents",
+    ])
+
+    cv.main()
+
+    assert captured["formula_repair"] == "agents"
+
+
+def test_convert_cli_formula_repair_defaults_to_deterministic(monkeypatch):
+    captured = {}
+
+    def fake_convert_pdf(*_args, **kwargs):
+        captured.update(kwargs)
+        return {"route": "A", "md_path": "x.md",
+                "selfcheck": {"total": 0, "in_md": 0, "missing": []}, "failed_pages": []}
+
+    monkeypatch.setattr(cv, "convert_pdf", fake_convert_pdf)
+    monkeypatch.setattr("sys.argv", ["convert.py", "--src", "x.pdf"])
+
+    cv.main()
+
+    assert captured["formula_repair"] == "deterministic"
+
+
+def test_convert_cli_rejects_invalid_formula_repair(monkeypatch):
+    monkeypatch.setattr("sys.argv", [
+        "convert.py", "--src", "x.pdf", "--formula-repair", "bogus",
+    ])
+    with pytest.raises(SystemExit) as exc:
+        cv.main()
+    assert exc.value.code != 0
+
+
+def test_formula_repair_agents_calls_agent_chain_with_propose_mode(tmp_path, monkeypatch):
+    # 红线:agents 档绝不能让 run_agents 以 "apply" 跑——corrections 只落 pending。
+    # 本测试 stub run_agents 本身,只断言编排层调用时强制传 mode="propose"。
+    pdf = _make_scan_pdf(tmp_path, 1)
+    _stub_engine(monkeypatch, _one_text_block)
+    _stub_katex_scan(monkeypatch, {"errors": []})
+    captured = {}
+
+    def fake_run_agents(layout, *, adapters, pdf_path, dpi, mode):
+        captured["mode"] = mode
+        captured["adapters"] = adapters
+        from scripts.pipelines.textbooks.formula_agents.orchestrator import RunReport
+        return RunReport(stem=layout.stem, mode=mode, n_candidates=0, applied=0)
+
+    fake_adapter = FakeAdapter("kimi", available=True)
+    monkeypatch.setattr(cv, "default_adapters", lambda: [fake_adapter])
+    monkeypatch.setattr(cv, "run_agents", fake_run_agents)
+
+    res = cv.convert_pdf(pdf, str(tmp_path / "out"), dpi=100, formula_repair="agents")
+
+    assert captured["mode"] == "propose"          # 绝不是 "apply"
+    assert res["formula_repair"]["agents"]["status"] == "ok"
+
+
+def test_formula_repair_agents_degrades_when_no_adapter_available(tmp_path, monkeypatch):
+    # adapters 全不可用(未装 CLI/未登录)→ 优雅降级为 deterministic 行为、不崩、
+    # 明确记录,绝不调用 run_agents。
+    pdf = _make_scan_pdf(tmp_path, 1)
+    _stub_engine(monkeypatch, _one_text_block)
+    _stub_katex_scan(monkeypatch, {"errors": []})
+    run_agents_calls = []
+    monkeypatch.setattr(cv, "default_adapters",
+                        lambda: [FakeAdapter("kimi", available=False),
+                                 FakeAdapter("gemini", available=False)])
+    monkeypatch.setattr(cv, "run_agents",
+                        lambda *a, **k: run_agents_calls.append((a, k)))
+
+    res = cv.convert_pdf(pdf, str(tmp_path / "out"), dpi=100, formula_repair="agents")
+
+    assert run_agents_calls == []
+    assert res["formula_repair"]["agents"]["status"] == "degraded_deterministic"
+
+
+def test_formula_repair_agents_end_to_end_writes_pending_corrections(tmp_path, monkeypatch):
+    # 端到端(真实 run_agents + 真实五道门 + FakeAdapter,零真实 LLM/网络调用):
+    # 一条硬错公式候选被模型判定 correct 后,corrections.json 必须落 status=pending,
+    # 绝不 apply/绝不自动进 md(红线)。
+    out = str(tmp_path / "out")
+    layout = resolve_layout("book", out)
+    os.makedirs(layout.work_dir, exist_ok=True)
+    os.makedirs(layout.doc_deliverable_dir, exist_ok=True)
+    with open(layout.md_path, "w", encoding="utf-8") as f:
+        f.write("# book\n")
+    with open(cp.page_res_path(layout.work_dir, 1), "w", encoding="utf-8") as f:
+        json.dump({"parsing_res_list": [
+            {"block_order": 0, "block_id": 1, "block_label": "display_formula",
+             "block_content": "x^3"}]}, f)
+    with open(layout.render_errors_path, "w", encoding="utf-8") as f:
+        json.dump({"errors": [{"page": 1, "block_ids": [1],
+                               "error": "Undefined control sequence: \\foo",
+                               "latex_head": "x^3"}], "warnings": []}, f)
+
+    fake = FakeAdapter("kimi", responses=[RawResponse(
+        json.dumps([{"candidate_id": "p0001-b0001", "verdict": "correct",
+                    "latex": "x^2", "confidence": 0.95, "note": "视觉核对"}]),
+        "", 0)])
+    monkeypatch.setattr(cv, "default_adapters", lambda: [fake])
+
+    result = cv._run_agents_stage(layout, pdf_path="", dpi=150)
+
+    assert result["status"] == "ok"
+    assert fake.calls == 1
+    assert os.path.exists(layout.corrections_path)
+    with open(layout.corrections_path, encoding="utf-8") as f:
+        payload = json.load(f)
+    assert payload["corrections"], "至少一条修正落盘"
+    assert all(c["status"] == "pending" for c in payload["corrections"])
+    md_after = open(layout.md_path, encoding="utf-8").read()
+    assert md_after == "# book\n"          # propose 模式绝不改 md
