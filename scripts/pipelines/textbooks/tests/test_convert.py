@@ -496,6 +496,31 @@ def test_convert_selfcheck_has_four_new_fields(tmp_path, monkeypatch):
     assert res["selfcheck"]["missing_assets"] == []
 
 
+def test_convert_selfcheck_inline_math_delimiter_ws_field_clean(tmp_path, monkeypatch):
+    # 干净 md(无行内公式定界符空格残留)→ 哨兵字段计数为 0、样本为空
+    pdf = _make_scan_pdf(tmp_path, 1)
+    _stub_engine(monkeypatch, _one_text_block)
+    res = cv.convert_pdf(pdf, str(tmp_path / "out"), dpi=100)
+    assert res["selfcheck"]["inline_math_delimiter_ws"] == {"count": 0, "samples": []}
+
+
+def _one_content_label_block_with_dirty_inline_math(page):
+    # content 标签走 _hard_breaks 原样落段,不经 _sanitize_markdown_math_spans
+    # 清洗——用它构造出即便归一化生效、仍可能漏检的残留 "$ X $" 场景,验证
+    # inline_math_delimiter_ws 哨兵字段确实能在 selfcheck.json 里报出来。
+    return [{"block_order": 0, "block_label": "content",
+             "block_content": "见附录 $ B_0 $ 一节"}]
+
+
+def test_convert_selfcheck_inline_math_delimiter_ws_field_detects_residual(tmp_path, monkeypatch):
+    pdf = _make_scan_pdf(tmp_path, 1)
+    _stub_engine(monkeypatch, _one_content_label_block_with_dirty_inline_math)
+    res = cv.convert_pdf(pdf, str(tmp_path / "out"), dpi=100)
+    field = res["selfcheck"]["inline_math_delimiter_ws"]
+    assert field["count"] == 1
+    assert field["samples"] == ["$ B_0 $"]
+
+
 def _one_display_formula_block(page):
     return [{"block_order": 0, "block_label": "display_formula", "block_id": 5,
              "block_content": "$$ bad $$"}]

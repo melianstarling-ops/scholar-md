@@ -1017,4 +1017,20 @@ def test_inline_math_delimiter_normalization_preserves_internal_spacing():
     blocks = [{"block_label": "text", "block_content": "$a + b$ 保持。", "block_order": 1}]
     md, _ = reconstruct_markdown(blocks)
     assert "$a + b$" in md
+
+
+def test_inline_math_delimiter_all_whitespace_body_kept_as_is():
+    # `$   $`(内体全是空白,不是真公式)strip 后会变空,拼出 "$" + "" + "$" = "$$"
+    # ——这会被后续渲染器当成 display 定界符,可能一路吞掉后文直到下一个 $$。
+    # 全空白内体判定不是真公式,保持原样,不触发这个更危险的 "$$" 拼接。
+    # 用 inline_formula 标签(直接走 _sanitize_markdown_math_spans,不经
+    # restore_emphasis_dots)隔离验证,避免与该函数另一个预存在缺陷
+    # (_EMPH_WRAP_RE 会把无 \underset 的裸 "$...$" 全文吞掉)混在一起。
+    blocks = [{
+        "block_label": "inline_formula", "block_content": "a $   $ b",
+        "block_order": 1, "block_id": 1, "block_bbox": [0, 0, 10, 10],
+    }]
+    md, _ = reconstruct_markdown(blocks)
+    assert "$$" not in md
+    assert "a $   $ b" in md
     assert "$a+b$" not in md

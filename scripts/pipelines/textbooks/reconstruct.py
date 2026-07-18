@@ -234,7 +234,11 @@ def _sanitize_markdown_math_spans(text: str) -> str:
                     # pandoc 等主流渲染器要求行内 $ 紧贴内容,否则按字面文本显示
                     # (KaTeX 门只验编译不验定界符,漏检)。只去内侧首尾空白,内容
                     # 中间的空格(词间距)不动;display $$ 无此渲染规则问题,不改。
-                    body = body.strip()
+                    stripped = body.strip()
+                    # 内体全是空白(如 `$   $`)不是真公式:strip 后会拼出 "$" + ""
+                    # + "$" = "$$",被后续渲染器当成 display 定界符起点,可能一路
+                    # 吞掉后文直到下一个 $$(比误伤货币 $ 更危险)。保持原样不动。
+                    body = stripped if stripped else body
                 out.append(sanitize_latex(body))
                 out.append(delim)
                 i = end + len(delim)
