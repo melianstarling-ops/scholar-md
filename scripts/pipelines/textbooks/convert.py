@@ -572,6 +572,14 @@ def convert_pdf(pdf_path: str, deliverables_dir: str | None = None,
         formula_repair_result = {"mode": formula_repair, "status": "error",
                                  "error": f"{type(e).__name__}: {e}"}
 
+    # 落盘供批量收尾分诊(Review Important):agents-apply 的熔断/回滚等安全网
+    # 触发事件此前只留在子进程 stdout 里,batch 汇总读不到——同 selfcheck 写盘
+    # 同一套 write_selfcheck 开关,不新造旗标。
+    if write_selfcheck:
+        os.makedirs(layout.doc_work_dir, exist_ok=True)
+        with open(layout.formula_repair_path, "w", encoding="utf-8") as f:
+            json.dump(formula_repair_result, f, ensure_ascii=False, indent=2)
+
     return {"route": route, "md_path": layout.md_path, "selfcheck": check,
             "failed_pages": manifest["failed_pages"],
             "source_audit": audit_report,

@@ -1412,6 +1412,66 @@ def test_formula_repair_agents_apply_preserves_orchestrator_safety_fields(
     assert agents["reason"] == "stub safety state"
 
 
+def test_formula_repair_result_persisted_to_sidecar_file(tmp_path, monkeypatch):
+    # Review Important:agents-apply 熔断/回滚事件此前只印到子进程 stdout,批量
+    # 收尾读不到——formula_repair 结果字典须落盘到 layout.formula_repair_path,
+    # 内容与 convert_pdf 返回值里的 formula_repair 字段逐字一致。
+    pdf = _make_scan_pdf(tmp_path, 1)
+    out = tmp_path / "out"
+    _stub_engine(monkeypatch, _one_text_block)
+    _stub_katex_scan(monkeypatch, {"errors": []})
+
+    def fake_run_agents(layout, **kwargs):
+        from scripts.pipelines.textbooks.formula_agents.orchestrator import RunReport
+        return RunReport(
+            stem=layout.stem, mode="apply", n_candidates=3, applied=0,
+            rejected=[], pending_ids=[],
+            circuit_broken=True, rolled_back=True, reason="stub circuit break")
+
+    monkeypatch.setattr(cv, "default_adapters",
+                        lambda: [FakeAdapter("kimi", available=True)])
+    monkeypatch.setattr(cv, "run_agents", fake_run_agents)
+
+    res = cv.convert_pdf(pdf, str(out), dpi=100, formula_repair="agents-apply")
+
+    layout = _layout(out)
+    assert os.path.exists(layout.formula_repair_path)
+    with open(layout.formula_repair_path, encoding="utf-8") as f:
+        on_disk = json.load(f)
+    assert on_disk == res["formula_repair"]
+    assert on_disk["agents"]["circuit_broken"] is True
+    assert on_disk["agents"]["rolled_back"] is True
+
+
+def test_formula_repair_sidecar_not_written_when_selfcheck_disabled(tmp_path, monkeypatch):
+    # write_selfcheck=False 是"不写过程根工件"的既有开关,formula_repair sidecar
+    # 复用同一开关,不新造旗标(需求明确要求)。
+    pdf = _make_scan_pdf(tmp_path, 1)
+    out = tmp_path / "out"
+    _stub_engine(monkeypatch, _one_text_block)
+    _stub_katex_scan(monkeypatch, {"errors": []})
+
+    cv.convert_pdf(pdf, str(out), dpi=100, write_selfcheck=False,
+                   formula_repair="deterministic")
+
+    layout = _layout(out)
+    assert not os.path.exists(layout.formula_repair_path)
+
+
+def test_formula_repair_off_sidecar_written_with_off_mode(tmp_path, monkeypatch):
+    # off 档也一样落盘(需求明确:不特殊处理),内容就是 {"mode": "off"}。
+    pdf = _make_scan_pdf(tmp_path, 1)
+    out = tmp_path / "out"
+    _stub_engine(monkeypatch, _one_text_block)
+
+    cv.convert_pdf(pdf, str(out), dpi=100, formula_repair="off")
+
+    layout = _layout(out)
+    assert os.path.exists(layout.formula_repair_path)
+    with open(layout.formula_repair_path, encoding="utf-8") as f:
+        assert json.load(f) == {"mode": "off"}
+
+
 def test_formula_repair_agents_apply_exception_keeps_conversion_outputs(
         tmp_path, monkeypatch):
     pdf = _make_scan_pdf(tmp_path, 1)
