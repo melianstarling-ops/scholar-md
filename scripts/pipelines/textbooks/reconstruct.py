@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import re
 import sys
+from html.parser import HTMLParser
 
 from scripts.pipelines.textbooks.images import crop_filename, is_visual_block
 from scripts.pipelines.textbooks.table_audit import (
@@ -733,14 +734,68 @@ def sanitize_formula_number(content: str) -> str:
 # ---------------------------------------------------------------------------
 _TABLE_TAG_RE = re.compile(r"<table\b", re.IGNORECASE)
 
+# C1 加固(review 裁定 Important):表结构以外的任何标签(br/sup/sub/b/i/…)一律
+# 触发 HTML 回落——parse_table_html 只留纯文本,5<br>10 会拼成 510(数值损坏),
+# <sup>2</sup> 会丢上标语义。用 html.parser 收集真实标签名(不是正则匹配子串,
+# 避免属性/实体误伤),不在这七个表结构标签白名单内的任何标签都算"非结构标签"。
+_TABLE_STRUCTURAL_TAGS = frozenset({"table", "thead", "tbody", "tfoot", "tr", "td", "th", "caption"})
+
+
+class _TagCollector(HTMLParser):
+    """收集内容里出现过的所有起始标签名(html.parser 自动转小写)。"""
+
+    def __init__(self) -> None:
+        super().__init__(convert_charrefs=True)
+        self.tags: set[str] = set()
+
+    def handle_starttag(self, tag, attrs):
+        self.tags.add(tag)
+
+
+def _has_non_structural_tags(html: str) -> bool:
+    collector = _TagCollector()
+    try:
+        collector.feed(html)
+        collector.close()
+    except Exception:
+        return True                              # 判不准 → 保守当作"有非结构标签"
+    return bool(collector.tags - _TABLE_STRUCTURAL_TAGS)
+
+
+def _math_span_contains_pipe(text: str) -> bool:
+    r"""cell 文本里任一 $...$/$$...$$ 数学区间内部是否含字面 `|`(绝对值 |x|、
+    条件概率 P(A|B)、集合记号等)。管道表格按未转义 `|` 切列(块级切列先于行内
+    math 规则),数学区间内的 `|` 转义会被 KaTeX 读成 \| 范数记号(语义改变),
+    不转义又会被表格切列引擎错误切分(超额列被渲染器丢弃)——两难之下按判不准
+    原则整表回落 HTML,不做半吊子转义(review 裁定 Critical)。定界符探测复用
+    与 _sanitize_markdown_math_spans/_escape_pipes_outside_math 相同的算法。"""
+    i, n = 0, len(text)
+    while i < n:
+        if text[i] == "$" and not _is_escaped(text, i):
+            display = i + 1 < n and text[i + 1] == "$"
+            if not display and ((i > 0 and text[i - 1] == "$") or (i + 1 < n and text[i + 1] == "$")):
+                i += 1
+                continue
+            delim = "$$" if display else "$"
+            start = i + len(delim)
+            end = _find_display_math_end(text, start) if display else _find_inline_math_end(text, start)
+            if end != -1:
+                if "|" in text[start:end]:
+                    return True
+                i = end + len(delim)
+                continue
+        i += 1
+    return False
+
 
 def _is_simple_table(html: str) -> tuple[bool, ParsedTable]:
     r"""判定表格是否可安全降级为管道表格。保守优先:判不准(任一条件不满足或
     解析异常)一律返回 False,调用方回落到现状 HTML 直出,绝不冒险改写复杂表。
 
     简单表硬性条件(全部满足):单一 <table> 根;全部 cell rowspan==1 且
-    colspan==1;无嵌套 <table>;结构 lint 无 error 级问题;行列数 ≥1(空表/空
-    网格天然被此条排除)。"""
+    colspan==1;无嵌套 <table>;无表结构以外的标签(br/sup/sub/…);结构 lint
+    无 error 级问题;行列数 ≥1(空表/空网格天然被此条排除);无 cell 的数学
+    区间内含字面 `|`。"""
     table = parse_table_html(html)
     if "html_parse_error" in table.warnings:
         return False, table
@@ -748,11 +803,15 @@ def _is_simple_table(html: str) -> tuple[bool, ParsedTable]:
         return False, table
     if len(_TABLE_TAG_RE.findall(html)) != table.root_count:
         return False, table                     # 存在嵌套 <table>
+    if _has_non_structural_tags(html):
+        return False, table                     # 存在表结构以外的标签
     if table.n_rows < 1 or table.n_cols < 1 or not table.cells:
         return False, table
     if any(c.rowspan != 1 or c.colspan != 1 for c in table.cells):
         return False, table
     if any(issue["severity"] == "error" for issue in lint_table_structure(table)):
+        return False, table
+    if any(_math_span_contains_pipe(c.text) for c in table.cells):
         return False, table
     return True, table
 

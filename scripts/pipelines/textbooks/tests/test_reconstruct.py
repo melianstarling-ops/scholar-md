@@ -1097,13 +1097,54 @@ def test_table_cell_pipe_escaped_and_newline_folded():
     assert "a|b" not in md          # 未转义的裸 | 不应残留(会被误读成列分隔符)
 
 
-def test_table_cell_pipe_inside_math_span_not_escaped():
-    # 数学区间内的字面 | (绝对值 |x|)不转义——转义成 \| 会被 KaTeX 读成范数记号,
-    # 语义改变。管道表格分隔符转义只作用于定界符外。
-    content = '<table><tr><th>H</th></tr><tr><td>$|x|$</td></tr></table>'
+def test_table_cell_math_span_with_literal_pipe_falls_back_to_html():
+    # review 裁定 Critical:数学区间内的字面 | (绝对值 |x|、条件概率 P(A|B))
+    # 转义会被 KaTeX 读成 \| 范数记号(语义改变),不转义又会被管道表格切列引擎
+    # 错误切分(块级按未转义 | 切列,先于行内 math 规则,超额列被渲染器丢弃)。
+    # 两难之下按判不准原则整表回落 HTML,不做半吊子转义。
+    content = '<table><tr><th>H</th></tr><tr><td>$P(A|B)$</td></tr></table>'
     md, _ = reconstruct_markdown(_table_block(content))
-    assert r"$|x|$" in md
-    assert r"$\|x\|$" not in md
+    assert md == content + "\n"
+
+
+def test_table_cell_math_span_with_literal_pipe_display_falls_back_to_html():
+    # display $$...$$ 内的字面 | 同样触发回落(不止行内 $...$)。这里只断言"没
+    # 被错误切列成管道表格"(仍是 <table> 结构、无 "| --- |" 分隔行),不断言
+    # 逐字节相等——该 content 恰好命中 restore_emphasis_dots 一个与本任务无关
+    # 的既有缺陷:_EMPH_WRAP_RE 对无 \underset 内容的相邻裸 "$$" 也会当成空
+    # 着重号包裹整体吞掉(与表格/Task C 无关,任意 "$$ x $$" 单独调用
+    # restore_emphasis_dots 同样复现,已记入报告疑虑,不在本任务范围内修)。
+    content = '<table><tr><th>H</th></tr><tr><td>$$|x|$$</td></tr></table>'
+    md, _ = reconstruct_markdown(_table_block(content))
+    assert "<table>" in md
+    assert "| --- |" not in md
+
+
+def test_table_with_non_structural_tag_falls_back_to_html():
+    # review 裁定 Important:parse_table_html 只留纯文本,5<br>10 会拼成 510
+    # (数值损坏)。表结构标签(table/thead/tbody/tfoot/tr/td/th/caption)以外的
+    # 任何标签一律触发 HTML 回落,不猜语义。
+    content = '<table><tr><th>H</th></tr><tr><td>5<br>10</td></tr></table>'
+    md, _ = reconstruct_markdown(_table_block(content))
+    assert md == content + "\n"
+
+
+def test_table_with_sup_tag_falls_back_to_html():
+    content = '<table><tr><th>H</th></tr><tr><td>x<sup>2</sup></td></tr></table>'
+    md, _ = reconstruct_markdown(_table_block(content))
+    assert md == content + "\n"
+
+
+def test_table_pure_text_and_formula_still_degrades_to_pipe_table():
+    # 回归确认:纯文本 + 公式(无非结构标签、无数学区间内 |)的简单表仍降级
+    # 为管道表格——上面两个新回落条件不应误伤主路径。
+    content = (
+        r'<table><tr><th>方程</th><th>说明</th></tr>'
+        r'<tr><td>$\nabla \cdot \mathbf{B} = 0$</td><td>无源</td></tr></table>'
+    )
+    md, _ = reconstruct_markdown(_table_block(content))
+    assert "<table>" not in md
+    assert r"| $\nabla \cdot \mathbf{B} = 0$ | 无源 |" in md
 
 
 def test_table_short_row_padded_no_column_misalignment():
