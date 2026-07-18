@@ -47,7 +47,7 @@ def test_paragraph_title_sanitizes_inline_math_symbols():
         "block_order": 1,
     }]
     md, _ = reconstruct_markdown(blocks)
-    assert r"## 12.4 CE Analyst $ ^{\text{TM}} $" in md
+    assert r"## 12.4 CE Analyst $^{\text{TM}}$" in md
 
 
 def test_display_formula_binds_adjacent_number():
@@ -506,8 +506,8 @@ def test_table_pass_through_sanitizes_inline_math_entities():
         "block_id": 3,
     }]
     md, _ = reconstruct_markdown(blocks)
-    assert r"$ R_{S}<Z_{C} $" in md
-    assert r"$ \varepsilon'_{r} $" in md
+    assert r"$R_{S}<Z_{C}$" in md
+    assert r"$\varepsilon'_{r}$" in md
 
 
 def test_inline_formula_block_sanitizes_math_body():
@@ -951,4 +951,70 @@ def test_reconstruct_wraps_cjk_inside_table_math_span():
         "block_id": 3,
     }]
     md, _ = reconstruct_markdown(blocks)
-    assert r"$ \text{电压} U=1 $" in md
+    assert r"$\text{电压} U=1$" in md
+
+
+# ---------------------------------------------------------------------------
+# Task A:行内公式定界符空格归一。PaddleOCR-VL 输出 `$ X $`(定界符内侧带空格),
+# 主流 Markdown 渲染器(VSCode 预览/pandoc)要求开 $ 后、闭 $ 前非空格,否则按字面
+# 文本显示;KaTeX 门只验编译不验定界符,故 0 硬错也漏过此类问题。归一化只在识别出
+# 公式包裹的 math-span 路径生效(_sanitize_markdown_math_spans),不做全文盲目正则,
+# 防止误伤正文里的孤立 $(货币场景)。display $$...$$ 无此渲染规则问题,不受影响。
+# ---------------------------------------------------------------------------
+
+def test_inline_math_delimiter_ws_stripped_in_text_block():
+    blocks = [{"block_label": "text", "block_content": "场强 $ B_0 $ 恒定。", "block_order": 1}]
+    md, _ = reconstruct_markdown(blocks)
+    assert "$B_0$" in md
+    assert "$ B_0 $" not in md
+
+
+def test_inline_math_delimiter_multi_space_stripped():
+    blocks = [{"block_label": "text",
+               "block_content": r"场强 $  \mathbf{B}_0  $ 恒定。", "block_order": 1}]
+    md, _ = reconstruct_markdown(blocks)
+    assert r"$\mathbf{B}_0$" in md
+
+
+def test_inline_math_delimiter_single_sided_space_stripped():
+    blocks = [{"block_label": "text", "block_content": "场强 $B_0 $ 恒定。", "block_order": 1}]
+    md, _ = reconstruct_markdown(blocks)
+    assert "$B_0$" in md
+    blocks2 = [{"block_label": "text", "block_content": "场强 $ B_0$ 恒定。", "block_order": 1}]
+    md2, _ = reconstruct_markdown(blocks2)
+    assert "$B_0$" in md2
+
+
+def test_inline_math_delimiter_ws_stripped_in_heading():
+    blocks = [{
+        "block_label": "paragraph_title",
+        "block_content": "1.3 磁感应强度 $ B_{0} $ 的定义",
+        "block_order": 1,
+    }]
+    md, _ = reconstruct_markdown(blocks)
+    assert "## 1.3 磁感应强度 $B_{0}$ 的定义" in md
+
+
+def test_display_formula_delimiter_spacing_untouched_by_inline_normalization():
+    # inline_formula 块内容本身可自带 $$...$$(见 test_inline_formula_block_sanitizes_math_body);
+    # 走 math-span 清洗时 display 分支不受行内归一化影响。
+    blocks = [{
+        "block_label": "inline_formula", "block_content": r"$$ B_0 = 1 $$",
+        "block_order": 1, "block_id": 1, "block_bbox": [0, 0, 10, 10],
+    }]
+    md, _ = reconstruct_markdown(blocks)
+    assert r"$$ B_0 = 1 $$" in md
+
+
+def test_inline_math_delimiter_already_normalized_is_idempotent():
+    blocks = [{"block_label": "text", "block_content": "$B_0$ 不变。", "block_order": 1}]
+    md, _ = reconstruct_markdown(blocks)
+    assert "$B_0$" in md
+
+
+def test_inline_math_delimiter_normalization_preserves_internal_spacing():
+    # 只去定界符内侧首尾空白;公式内容中间的空格(词间距)不动
+    blocks = [{"block_label": "text", "block_content": "$a + b$ 保持。", "block_order": 1}]
+    md, _ = reconstruct_markdown(blocks)
+    assert "$a + b$" in md
+    assert "$a+b$" not in md

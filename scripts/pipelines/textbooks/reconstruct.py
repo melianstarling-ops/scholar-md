@@ -228,7 +228,14 @@ def _sanitize_markdown_math_spans(text: str) -> str:
             end = _find_display_math_end(text, start) if display else _find_inline_math_end(text, start)
             if end != -1:
                 out.append(delim)
-                out.append(sanitize_latex(text[start:end]))
+                body = text[start:end]
+                if not display:
+                    # PaddleOCR-VL 常吐出 `$ X $`(定界符内侧带空格);VSCode 预览/
+                    # pandoc 等主流渲染器要求行内 $ 紧贴内容,否则按字面文本显示
+                    # (KaTeX 门只验编译不验定界符,漏检)。只去内侧首尾空白,内容
+                    # 中间的空格(词间距)不动;display $$ 无此渲染规则问题,不改。
+                    body = body.strip()
+                out.append(sanitize_latex(body))
                 out.append(delim)
                 i = end + len(delim)
                 continue

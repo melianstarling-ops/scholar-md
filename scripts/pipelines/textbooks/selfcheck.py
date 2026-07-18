@@ -7,7 +7,10 @@ import re
 
 from scripts.pipelines.textbooks.reconstruct import (
     KATEX_INCOMPAT_COMMANDS,
+    _find_display_math_end,
+    _find_inline_math_end,
     _formula_body,
+    _is_escaped,
     _match_braced,
     _sanitize_markdown_math_spans,
     restore_emphasis_dots,
@@ -19,6 +22,42 @@ from scripts.pipelines.textbooks.reconstruct import (
 def katex_incompat_scan(md: str) -> list[str]:
     """Tier0 lint:md 不应残留已知 KaTeX 不兼容命令(与清洗层同源清单)。返回命中命令。"""
     return [c for c in KATEX_INCOMPAT_COMMANDS if c in md]
+
+
+_INLINE_MATH_WS_SAMPLE_LIMIT = 5
+
+
+def inline_math_delimiter_ws_scan(md: str) -> dict:
+    r"""Tier0 lint 回归哨兵:md 不应残留 `$ X $` 形态(开行内 $ 后/闭行内 $ 前带
+    空白)——PaddleOCR-VL 常见输出,VSCode 预览/pandoc 等主流渲染器要求行内 $
+    紧贴内容,否则按字面文本显示;KaTeX 门只验编译不验定界符,漏检。归一化在
+    reconstruct 的 sanitize 链(_sanitize_markdown_math_spans)已生效,这里独立复
+    查一遍,充当"清洗遗漏/回归"报警(同 katex_incompat_scan 的定位)。
+
+    只走与 reconstruct 同一套 $ 定界符配对逻辑(_find_inline_math_end 等),不做
+    全文盲目正则,避免误伤正文里的孤立 $(货币场景)。display $$...$$ 无此渲染
+    规则问题,不计入。返回 {"count": 命中总数, "samples": 命中原文(至多 5 条)}。
+    """
+    hits: list[str] = []
+    i, n = 0, len(md)
+    while i < n:
+        if md[i] == "$" and not _is_escaped(md, i):
+            display = i + 1 < n and md[i + 1] == "$"
+            if not display and ((i > 0 and md[i - 1] == "$") or (i + 1 < n and md[i + 1] == "$")):
+                i += 1
+                continue
+            delim = "$$" if display else "$"
+            start = i + len(delim)
+            end = _find_display_math_end(md, start) if display else _find_inline_math_end(md, start)
+            if end != -1:
+                if not display:
+                    body = md[start:end]
+                    if body != body.strip():
+                        hits.append(md[i:end + len(delim)])
+                i = end + len(delim)
+                continue
+        i += 1
+    return {"count": len(hits), "samples": hits[:_INLINE_MATH_WS_SAMPLE_LIMIT]}
 
 
 # 通常必带上下标的大算符:裸用(后面没跟 _/^)高度疑似 OCR 漏识别了积分限/围道/指标。

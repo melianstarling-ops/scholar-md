@@ -5,6 +5,7 @@ from scripts.pipelines.textbooks.selfcheck import (
     block_coverage, katex_incompat_scan, detect_column_layout, aggregate_warnings,
     scan_formula_suspicions, summarize_suspicions,
     build_source_audit_field, build_ocr_degeneration_field,
+    inline_math_delimiter_ws_scan,
 )
 
 
@@ -181,6 +182,39 @@ def test_katex_scan_detects_residual():
 
 def test_katex_scan_clean_returns_empty():
     assert katex_incompat_scan(r"$$ \int_{S} \displaystyle x $$") == []
+
+
+# ---------------------------------------------------------------------------
+# Task A:inline_math_delimiter_ws 回归哨兵。归一化(reconstruct sanitize 链)生效
+# 后 md 里不应再残留 `$ X $` 形态(开 $ 后/闭 $ 前带空白的行内公式);该检测项独立
+# 于 reconstruct 复查一遍,充当"清洗遗漏/回归"报警(同 katex_incompat_scan 的定位)。
+# ---------------------------------------------------------------------------
+
+def test_inline_math_delimiter_ws_detects_leading_and_trailing_space():
+    md = "场强 $ B_0 $ 恒定，另见 $C_1 $ 与 $ D_2$。"
+    result = inline_math_delimiter_ws_scan(md)
+    assert result["count"] == 3
+    assert "$ B_0 $" in result["samples"]
+    assert "$C_1 $" in result["samples"]
+    assert "$ D_2$" in result["samples"]
+
+
+def test_inline_math_delimiter_ws_clean_md_returns_zero():
+    md = r"场强 $B_0$ 恒定，公式 $$ B_0 = 1 $$ 不受影响。"
+    result = inline_math_delimiter_ws_scan(md)
+    assert result == {"count": 0, "samples": []}
+
+
+def test_inline_math_delimiter_ws_samples_capped_at_five():
+    md = " ".join(f"$ x{i} $" for i in range(8))
+    result = inline_math_delimiter_ws_scan(md)
+    assert result["count"] == 8
+    assert len(result["samples"]) == 5
+
+
+def test_inline_math_delimiter_ws_ignores_display_math():
+    md = r"$$ a = 1 $$"
+    assert inline_math_delimiter_ws_scan(md) == {"count": 0, "samples": []}
 
 
 def test_detect_column_layout_true_for_side_by_side_blocks():
