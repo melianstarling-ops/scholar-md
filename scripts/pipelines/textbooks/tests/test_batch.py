@@ -819,6 +819,12 @@ def test_job_argv_passes_formula_repair_to_convert_subprocess(tmp_path):
     assert argv[argv.index("--formula-repair") + 1] == "agents"
 
 
+def test_job_argv_passes_agents_apply_to_convert_subprocess(tmp_path):
+    argv = bp._job_argv(tmp_path / "A.pdf", tmp_path / "out", None, 150,
+                        no_selfcheck_json=False, formula_repair="agents-apply")
+    assert argv[argv.index("--formula-repair") + 1] == "agents-apply"
+
+
 def test_job_argv_defaults_formula_repair_to_off(tmp_path):
     argv = bp._job_argv(tmp_path / "A.pdf", tmp_path / "out", None, 150,
                         no_selfcheck_json=False)
@@ -908,6 +914,31 @@ def test_run_formula_repair_agents_also_skips_own_katex_tail(tmp_path, monkeypat
     assert scan_calls == []
 
 
+def test_run_formula_repair_agents_apply_forwards_and_skips_own_katex_tail(
+        tmp_path, monkeypatch):
+    d = tmp_path / "src"
+    d.mkdir()
+    pdf = _make_pdf(d, 1, name="A")
+    out_root = tmp_path / "out"
+    captured = {}
+
+    def fake_runner(argv):
+        captured["argv"] = argv
+        return _fake_runner_writes_book(out_root, pdf)(argv)
+
+    scan_calls = []
+    monkeypatch.setattr(bp, "scan_katex_work_pages",
+                        lambda layout, out_path: scan_calls.append(layout.stem))
+
+    rc, results = bp.run([str(d)], out=str(out_root), dpi=150, runner=fake_runner,
+                         formula_repair="agents-apply", katex_scan_enabled=True)
+
+    assert rc == 0
+    argv = captured["argv"]
+    assert argv[argv.index("--formula-repair") + 1] == "agents-apply"
+    assert scan_calls == []
+
+
 def test_main_forwards_formula_repair(monkeypatch):
     captured = {}
 
@@ -924,6 +955,24 @@ def test_main_forwards_formula_repair(monkeypatch):
 
     assert rc == 0
     assert captured["kwargs"]["formula_repair"] == "deterministic"
+
+
+def test_main_forwards_agents_apply(monkeypatch):
+    captured = {}
+
+    def fake_run(src_paths, **kwargs):
+        captured["kwargs"] = kwargs
+        return 0, []
+
+    monkeypatch.setattr(bp, "run", fake_run)
+    monkeypatch.setattr("sys.argv", [
+        "batch.py", "--src", "src", "--formula-repair", "agents-apply",
+    ])
+
+    rc = bp.main()
+
+    assert rc == 0
+    assert captured["kwargs"]["formula_repair"] == "agents-apply"
 
 
 def test_main_formula_repair_defaults_to_off(monkeypatch):

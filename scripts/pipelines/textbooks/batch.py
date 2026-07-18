@@ -62,9 +62,10 @@ BORN_DIGITAL_MODES = ("defer", "ocr", "hybrid")
 # convert.py 子进程,batch 现有收尾步骤与 convert 内建步骤会对同一本书各自独立
 # 跑一遍 katex_scan/katex_triage——不是崩溃风险,但是浪费(双跑)。默认 "off":
 # 不透传给子进程,batch 收尾沿用它自己已有的自动化,零行为变化、零测试改动。
-# 用户显式选 --formula-repair {deterministic,agents} 时才透传给子进程,并同时
-# 关闭 batch 自己的收尾分支(见 run() 内 dedup 逻辑),避免双跑。
-FORMULA_REPAIR_MODES = ("deterministic", "agents", "off")
+# 用户显式选 --formula-repair {deterministic,agents,agents-apply} 时才透传给
+# 子进程,并同时关闭 batch 自己的收尾分支(见 run() 内 dedup 逻辑,keyed on
+# != "off",agents-apply 天然享受同样的去重),避免双跑。
+FORMULA_REPAIR_MODES = ("deterministic", "agents", "agents-apply", "off")
 
 # selfcheck.json 里紧凑 source_audit 字段做分级要用到的最小键集合——用来判断该字段
 # 是否结构完好,而非"字段存在就信"(Review Important 1:字段存在但类型/结构损坏时,
@@ -377,8 +378,9 @@ def main() -> int:
     ap.add_argument("--formula-repair", choices=list(FORMULA_REPAIR_MODES), default="off",
                     help="转发给每本书 convert.py 的公式修复环档位(默认 off,沿用 batch "
                          "自身已有的 katex_scan+katex_triage 收尾自动化,不与 convert 内建"
-                         "步骤双跑):deterministic/agents 会转发给子进程且自动关闭 batch "
-                         "自己对应的收尾步骤")
+                         "步骤双跑):deterministic/agents/agents-apply 均会转发给子进程且"
+                         "自动关闭 batch 自己对应的收尾步骤;agents-apply 为全自动应用档"
+                         "(2026-07-18 裁决,安全由 orchestrator 内建熔断/回滚/快照承担)")
     args = ap.parse_args()
     if args.work_hours <= 0 or args.rest_minutes <= 0:
         ap.error("--work-hours 与 --rest-minutes 必须大于 0")

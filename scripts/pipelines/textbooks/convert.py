@@ -27,6 +27,7 @@ from scripts.pipelines.textbooks.katex_scan import scan_katex_work_pages
 from scripts.pipelines.textbooks.formula_candidates import collect_formula_candidates
 from scripts.pipelines.textbooks.formula_agents.adapters import default_adapters
 from scripts.pipelines.textbooks.formula_agents.orchestrator import run_agents
+from scripts.pipelines.textbooks.formula_agents.cli import crops_only_collect
 from scripts.pipelines.textbooks.power import keep_system_awake
 from scripts.pipelines.textbooks.source_audit import (
     extract_source_page, page_geometry, assign_source_words,
@@ -43,14 +44,20 @@ DEFAULT_REST_SECONDS = 40 * 60
 
 BORN_DIGITAL_MODES = ("defer", "ocr", "hybrid")
 
-# Task B(2026-07-17 所有者批准):单本转换收尾自动接公式修复环。三档语义:
+# Task B(2026-07-17 所有者批准)+ Task 1(2026-07-18 所有者裁决):单本转换收尾
+# 自动接公式修复环。四档语义:
 #   deterministic(默认,零成本零网络) —— katex_scan → (硬错时)katex_triage 分桶
 #     + 视觉工单 → formula candidates 漏斗(确定性聚合,无 LLM 调用)。
 #   agents —— deterministic 全部 + 公式 Agent 五道门(冻结模型链,外部 LLM 调用);
-#     corrections 强制以 propose 模式落 pending,绝不自动 accept/应用(红线,见
-#     _run_agents_stage)。adapters 全不可用时优雅降级为 deterministic 行为。
+#     corrections 以 propose 模式落 pending,供人工审阅档使用。adapters 全不可用
+#     时优雅降级为 deterministic 行为。
+#   agents-apply —— deterministic 全部 + 公式 Agent 五道门,以 apply 模式全自动
+#     应用(所有者 2026-07-18 裁决:撤销旧版"人工 accept 红线",安全兜底改由
+#     orchestrator 内建机制承担——五道门/置信阈值 0.8/熔断阈值 0.6/自动回滚/
+#     `.pre_agent.bak` 快照,编排层不再额外拦截)。adapters 全不可用时同样降级
+#     为 deterministic 行为。
 #   off —— 现状,只转换不后处理,零调用。
-FORMULA_REPAIR_MODES = ("deterministic", "agents", "off")
+FORMULA_REPAIR_MODES = ("deterministic", "agents", "agents-apply", "off")
 
 # 审计报告 schema 版本(与 source_audit.audit_document 输出的 schema_version 一致;
 # 独立维护,断点恢复的指纹过期判定据此比对)。
@@ -333,10 +340,16 @@ def _safe_probe(adapter) -> bool:
         return False
 
 
-def _run_agents_stage(layout: DocLayout, pdf_path: str, dpi: int) -> dict:
-    """公式 Agent 终检链入口(stage 9)。红线:corrections 只落 pending,mode 在此
-    处硬编码为 "propose",绝不传 "apply"——不依赖 run_agents 内部熔断/闸门"恰好"
-    把它降级,由编排层直接锁死,任何情况下都不会自动 accept/改写 md。
+def _run_agents_stage(layout: DocLayout, pdf_path: str, dpi: int,
+                      agent_mode: str) -> dict:
+    """公式 Agent 终检链入口(stage 9)。agent_mode 语义(所有者 2026-07-18 裁决,
+    撤销旧版"绝不传 apply"红线——见 convert.py 顶部 FORMULA_REPAIR_MODES 注释块):
+      - "propose":对应 --formula-repair agents,corrections 落 pending,供人工
+        审阅档使用,不传 collect_fn(propose 档现状不变,回归锁定)。
+      - "apply":对应 --formula-repair agents-apply,全自动应用,传
+        collect_fn=crops_only_collect 过滤候选(硬性要求,见同一注释块)。安全
+        兜底完全由 run_agents 内建的五道门/置信阈值/熔断/自动回滚/快照承担,
+        编排层只透传 mode,不重新实现任何拦截逻辑。
 
     adapters 全不可用(未装 CLI/未登录)→ 优雅降级为等价 deterministic 行为:
     不调用 run_agents(不产生任何 agent 相关调用/文件写入),只留明确记录,不崩。"""
@@ -350,12 +363,14 @@ def _run_agents_stage(layout: DocLayout, pdf_path: str, dpi: int) -> dict:
                 "reason": "无可用 formula-agent CLI adapter(PATH 未装/未登录),"
                           "已降级为 deterministic 行为,未调用任何 agent"}
     try:
+        kwargs = {"collect_fn": crops_only_collect} if agent_mode == "apply" else {}
         report = run_agents(layout, adapters=available, pdf_path=pdf_path or "",
-                            dpi=dpi, mode="propose")
+                            dpi=dpi, mode=agent_mode, **kwargs)
         return {"status": "ok", "run_mode": report.mode,
                 "n_candidates": report.n_candidates, "applied": report.applied,
                 "rejected": len(report.rejected), "pending_ids": report.pending_ids,
-                "reason": report.reason}
+                "circuit_broken": report.circuit_broken,
+                "rolled_back": report.rolled_back, "reason": report.reason}
     except Exception as e:                         # noqa: BLE001 agent 链异常不逃逸
         return {"status": "error", "error": f"{type(e).__name__}: {e}"}
 
@@ -366,7 +381,9 @@ def _run_formula_repair(layout: DocLayout, pdf_path: str, mode: str, dpi: int) -
     deterministic:katex_scan(node 缺失优雅跳过)→ 有硬错才跑 katex_triage 分桶
     + 视觉工单(镜像 batch.py 收尾已有自动化)→ formula candidates 漏斗(确定性
     聚合,读 worklist/render_errors,无 LLM 调用)。
-    agents:deterministic 全部 + _run_agents_stage(五道门,corrections 强制 pending)。
+    agents / agents-apply:deterministic 全部 + _run_agents_stage(五道门),
+    仅 agent_mode 不同("propose" 落 pending / "apply" 全自动应用,见
+    _run_agents_stage docstring)。
     off:零调用。
 
     每个子步骤独立 try/except——一步异常不影响其它步骤继续跑,也不影响本函数
@@ -401,8 +418,9 @@ def _run_formula_repair(layout: DocLayout, pdf_path: str, mode: str, dpi: int) -
     except Exception as e:                         # noqa: BLE001 候选聚合异常不逃逸
         result["formula_candidates"] = {"status": "error", "error": f"{type(e).__name__}: {e}"}
 
-    if mode == "agents":
-        result["agents"] = _run_agents_stage(layout, pdf_path, dpi)
+    if mode in ("agents", "agents-apply"):
+        agent_mode = "apply" if mode == "agents-apply" else "propose"
+        result["agents"] = _run_agents_stage(layout, pdf_path, dpi, agent_mode)
 
     return result
 
@@ -672,7 +690,9 @@ def main() -> None:
                     help="转换收尾自动接的公式修复环:deterministic=katex_scan+"
                          "(有硬错时)katex_triage 分桶+视觉工单+formula candidates 漏斗"
                          "(默认,零成本零网络)/agents=deterministic 全部+公式 Agent 五道门"
-                         "(外部 LLM 调用,corrections 只落 pending,绝不自动应用)/"
+                         "(外部 LLM 调用,corrections 落 pending,人工审阅档)/"
+                         "agents-apply=deterministic 全部+公式 Agent 五道门,全自动应用"
+                         "(2026-07-18 裁决,安全由 orchestrator 内建熔断/回滚/快照承担)/"
                          "off=不后处理(现状)")
     args = ap.parse_args()
     if args.work_hours <= 0 or args.rest_minutes <= 0:
