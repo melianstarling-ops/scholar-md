@@ -934,6 +934,40 @@ def test_reassemble_md_audit_error_book_still_adopts(tmp_path, monkeypatch):
     assert md == md_before
 
 
+def test_reassemble_md_route_b_without_audit_report_fails_loud(tmp_path, monkeypatch):
+    # 审计报告缺失/损坏时无法区分 hybrid/ocr——静默按非 hybrid 重组会把 hybrid 书
+    # 的采信内容丢成纯 OCR。route B 书正常转换后报告必在盘上,缺=异常态,拒绝重组。
+    _inject_thresholds(monkeypatch)
+    pdf = _make_prose_pdf(tmp_path, 2)
+    _stub_engine_adopt(monkeypatch)
+    out = str(tmp_path / "out")
+    res = cv.convert_pdf(pdf, out, dpi=100, born_digital_mode="hybrid")
+    md_before = open(res["md_path"], encoding="utf-8").read()
+    layout = resolve_layout("born", out)
+    os.remove(layout.source_audit_path)         # 模拟报告丢失(如当初写盘失败)
+
+    with pytest.raises(RuntimeError):
+        cv.reassemble_md(layout, pdf_path=pdf, dpi=100)
+    assert open(layout.md_path, encoding="utf-8").read() == md_before   # md 未被破坏
+
+
+def test_reassemble_md_hybrid_rejects_mismatched_pdf(tmp_path, monkeypatch):
+    # 换了源 PDF(指纹与检查点不符)重放采信会产出错位文本——fail-loud 拒绝。
+    _inject_thresholds(monkeypatch)
+    pdf = _make_prose_pdf(tmp_path, 2)
+    _stub_engine_adopt(monkeypatch)
+    out = str(tmp_path / "out")
+    res = cv.convert_pdf(pdf, out, dpi=100, born_digital_mode="hybrid")
+    md_before = open(res["md_path"], encoding="utf-8").read()
+    layout = resolve_layout("born", out)
+    (tmp_path / "other").mkdir()
+    other = _make_prose_pdf(tmp_path / "other", 3)   # 页数不同 → 指纹必失配
+
+    with pytest.raises(RuntimeError):
+        cv.reassemble_md(layout, pdf_path=other, dpi=100)
+    assert open(layout.md_path, encoding="utf-8").read() == md_before
+
+
 def test_resume_rebuilds_missing_audit_without_reocr(tmp_path, monkeypatch):
     _inject_thresholds(monkeypatch)
     pdf = _make_prose_pdf(tmp_path, 2)

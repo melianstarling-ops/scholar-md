@@ -183,6 +183,13 @@ def reassemble_md(layout: DocLayout, pdf_path: str | None, dpi: int) -> str | No
     if not total:
         return None
     report = _load_audit_report(layout.source_audit_path)
+    if report is None and manifest.get("route") == "B":
+        # 路线 B 书正常转换后审计报告必在盘上;缺失/损坏时无法区分 hybrid/ocr,
+        # 静默按非 hybrid 重组会把 hybrid 书的采信内容丢成纯 OCR——拒绝,
+        # 让操作者重跑 convert 再生报告(检查点复用,只重算采信/审计,秒级)。
+        raise RuntimeError(
+            f"路线 B 书审计报告缺失或损坏: {layout.source_audit_path}。"
+            "无法判定是否 hybrid 采信书,拒绝重组以免静默丢采信;请重跑 convert 再生报告。")
     issue_counts = ((report or {}).get("summary") or {}).get("issue_counts") or {}
     hybrid_recorded = (report is not None
                        and report.get("born_digital_mode") == "hybrid"
@@ -194,6 +201,10 @@ def reassemble_md(layout: DocLayout, pdf_path: str | None, dpi: int) -> str | No
             raise RuntimeError(
                 f"hybrid 书重组需要源 PDF 重放采信,但未提供或不存在: {pdf_path!r}。"
                 "拒绝在无 adopt_ctx 下重组——那会把全书采信内容静默回退成纯 OCR。")
+        if not cp.fingerprint_ok(manifest, pdf_path, dpi):
+            raise RuntimeError(
+                f"源 PDF 与检查点指纹不符(换源或 DPI 变): {pdf_path!r}。"
+                "重放采信会把新 PDF 的词映射到旧 OCR 块上产出错位文本——拒绝重组。")
         pdf_doc = fitz.open(pdf_path)
     try:
         adopt_ctx = (_AdoptContext(pdf_doc, layout.work_dir, ROUTE_B_ADOPTION_THRESHOLDS)
