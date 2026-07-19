@@ -827,6 +827,113 @@ def test_audit_failure_keeps_checkpoints_and_returns_suspect(tmp_path, monkeypat
     assert "brown" in md and "browm" not in md          # 保留已采信 md,不回退
 
 
+# ---------------------------------------------------------------------------
+# reassemble_md × hybrid:重组必须重放采信,绝不把采信内容静默回退成纯 OCR
+# (缺陷:reassemble_md 调 assemble 时不带 adopt_ctx,hybrid 书全书采信块丢失)
+# ---------------------------------------------------------------------------
+
+def test_reassemble_md_preserves_hybrid_adoption(tmp_path, monkeypatch):
+    _inject_thresholds(monkeypatch)
+    pdf = _make_prose_pdf(tmp_path, 2)
+    _stub_engine_adopt(monkeypatch)
+    out = str(tmp_path / "out")
+    res = cv.convert_pdf(pdf, out, dpi=100, born_digital_mode="hybrid")
+    md_before = open(res["md_path"], encoding="utf-8").read()
+    assert "brown" in md_before and "browm" not in md_before
+
+    layout = resolve_layout("born", out)
+    md_path = cv.reassemble_md(layout, pdf_path=pdf, dpi=100)
+
+    md_after = open(md_path, encoding="utf-8").read()
+    assert md_after == md_before                # 采信确定性 → 重组逐字节一致,零回退
+
+
+def test_reassemble_md_hybrid_applies_correction_and_keeps_adoption(tmp_path, monkeypatch):
+    from scripts.pipelines.textbooks.vision_repair import content_fingerprint
+    _inject_thresholds(monkeypatch)
+    pdf = _make_prose_pdf(tmp_path, 2)
+
+    def fake_predict(png_path, work_dir):
+        stem = os.path.splitext(os.path.basename(png_path))[0]
+        page = int(stem.split("_")[1])
+        blocks = (_adopt_ocr_block(page) if page == 1 else
+                  [{"block_order": 0, "block_label": "display_formula", "block_id": 5,
+                    "block_content": "$$ bad $$", "block_bbox": [0, 0, 1000, 1000]}])
+        os.makedirs(work_dir, exist_ok=True)
+        with open(os.path.join(work_dir, f"{stem}_res.json"), "w", encoding="utf-8") as f:
+            json.dump({"parsing_res_list": blocks, "width": 1000, "height": 1000}, f)
+        return blocks
+    monkeypatch.setattr(cv, "predict_page", fake_predict)
+
+    out = str(tmp_path / "out")
+    cv.convert_pdf(pdf, out, dpi=100, born_digital_mode="hybrid")
+    layout = resolve_layout("born", out)
+    os.makedirs(layout.doc_work_dir, exist_ok=True)
+    corrections = {"stem": "born", "corrections": [
+        {"page": 2, "block_id": 5, "corrected_latex": "$$ good $$",
+         "content_fingerprint": content_fingerprint("$$ bad $$"), "status": "accepted"}]}
+    with open(layout.corrections_path, "w", encoding="utf-8") as f:
+        json.dump(corrections, f)
+
+    md = open(cv.reassemble_md(layout, pdf_path=pdf, dpi=100), encoding="utf-8").read()
+    assert "good" in md and "bad" not in md     # 采纳的公式修正生效
+    assert "brown" in md and "browm" not in md  # 且采信内容不回退——两者共存
+
+
+def test_reassemble_md_hybrid_without_pdf_fails_loud(tmp_path, monkeypatch):
+    _inject_thresholds(monkeypatch)
+    pdf = _make_prose_pdf(tmp_path, 2)
+    _stub_engine_adopt(monkeypatch)
+    out = str(tmp_path / "out")
+    res = cv.convert_pdf(pdf, out, dpi=100, born_digital_mode="hybrid")
+    md_before = open(res["md_path"], encoding="utf-8").read()
+    layout = resolve_layout("born", out)
+
+    with pytest.raises(RuntimeError):           # 缺源 PDF:拒绝重组,绝不静默降级
+        cv.reassemble_md(layout, pdf_path=None, dpi=100)
+    assert open(layout.md_path, encoding="utf-8").read() == md_before   # md 未被破坏
+
+
+def test_reassemble_md_adoption_error_book_stays_ocr(tmp_path, monkeypatch):
+    # 整本回退过的书(adoption_error):md 本就是纯 OCR,重组无采信可重放,
+    # 无 PDF 也不抛;若实现错误地重建 ctx,monkeypatch 的 boom 会当场炸出来。
+    _inject_thresholds(monkeypatch)
+    pdf = _make_prose_pdf(tmp_path, 2)
+    _stub_engine_adopt(monkeypatch)
+
+    def boom(*_a, **_k):
+        raise RuntimeError("adoption boom")
+    monkeypatch.setattr(cv, "adopt_prose_blocks", boom)
+
+    out = str(tmp_path / "out")
+    cv.convert_pdf(pdf, out, dpi=100, born_digital_mode="hybrid")
+    layout = resolve_layout("born", out)
+
+    md_path = cv.reassemble_md(layout, pdf_path=None, dpi=100)
+    md = open(md_path, encoding="utf-8").read()
+    assert "browm" in md and "brown" not in md  # 保持整本回退语义,不含采信内容
+
+
+def test_reassemble_md_audit_error_book_still_adopts(tmp_path, monkeypatch):
+    # 纯审计异常的书:采信已成功、md 是采信内容 → 重组必须同样重放采信。
+    _inject_thresholds(monkeypatch)
+    pdf = _make_prose_pdf(tmp_path, 2)
+    _stub_engine_adopt(monkeypatch)
+
+    def boom(*_a, **_k):
+        raise RuntimeError("audit boom")
+    monkeypatch.setattr(cv, "audit_document", boom)
+
+    out = str(tmp_path / "out")
+    res = cv.convert_pdf(pdf, out, dpi=100, born_digital_mode="hybrid")
+    md_before = open(res["md_path"], encoding="utf-8").read()
+    assert "brown" in md_before
+    layout = resolve_layout("born", out)
+
+    md = open(cv.reassemble_md(layout, pdf_path=pdf, dpi=100), encoding="utf-8").read()
+    assert md == md_before
+
+
 def test_resume_rebuilds_missing_audit_without_reocr(tmp_path, monkeypatch):
     _inject_thresholds(monkeypatch)
     pdf = _make_prose_pdf(tmp_path, 2)

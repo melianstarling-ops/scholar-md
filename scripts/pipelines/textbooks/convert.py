@@ -165,17 +165,45 @@ def assemble(work_dir: str, total: int, stem: str, assets_dir: str,
 
 
 def reassemble_md(layout: DocLayout, pdf_path: str | None, dpi: int) -> str | None:
-    """幂等对账:读 _work 检查点 → 应用采纳的修正 → 重组 → 覆盖写 layout.md_path。
-    复用 convert_pdf 用的同一个 assemble(),保证 debug 采纳出的 md 与正式转换逐字一致。
-    只写 md,不写 selfcheck、不动 manifest。manifest 缺失/total 为 0 时返回 None。"""
+    """幂等对账:读 _work 检查点 → 应用采纳的修正 → (hybrid 书)重放采信 → 重组 →
+    覆盖写 layout.md_path。复用 convert_pdf 用的同一个 assemble(),保证 debug 采纳
+    出的 md 与正式转换逐字一致。只写 md,不写 selfcheck、不动 manifest。
+    manifest 缺失/total 为 0 时返回 None。
+
+    hybrid 书(审计报告 born_digital_mode=hybrid 且 adoption_source=recorded,
+    排除 adoption_error 整本回退的情形)必须重建 _AdoptContext 重放采信:检查点
+    永远是纯 OCR(见 _finalize_hybrid),不带 adopt_ctx 重组会把全书采信块静默
+    回退成 OCR。采信纯确定性(checkpoint+源 PDF+冻结阈值,见 _AdoptContext),
+    重放与初次转换逐字节一致。缺源 PDF 时 fail-loud 拒绝重组——静默丢采信比
+    报错危险得多。"""
     manifest = cp.load_manifest(layout.work_dir)
     if not manifest:
         return None
     total = manifest["fingerprint"]["page_count"]
     if not total:
         return None
-    result = assemble(layout.work_dir, total, layout.stem, layout.assets_dir,
-                      pdf_path, dpi, corrections_dir=layout.doc_work_dir)
+    report = _load_audit_report(layout.source_audit_path)
+    issue_counts = ((report or {}).get("summary") or {}).get("issue_counts") or {}
+    hybrid_recorded = (report is not None
+                       and report.get("born_digital_mode") == "hybrid"
+                       and report.get("adoption_source") == "recorded"
+                       and not issue_counts.get("adoption_error"))
+    pdf_doc = None
+    if hybrid_recorded:
+        if not pdf_path or not os.path.exists(pdf_path):
+            raise RuntimeError(
+                f"hybrid 书重组需要源 PDF 重放采信,但未提供或不存在: {pdf_path!r}。"
+                "拒绝在无 adopt_ctx 下重组——那会把全书采信内容静默回退成纯 OCR。")
+        pdf_doc = fitz.open(pdf_path)
+    try:
+        adopt_ctx = (_AdoptContext(pdf_doc, layout.work_dir, ROUTE_B_ADOPTION_THRESHOLDS)
+                     if pdf_doc is not None else None)
+        result = assemble(layout.work_dir, total, layout.stem, layout.assets_dir,
+                          pdf_path, dpi, corrections_dir=layout.doc_work_dir,
+                          adopt_ctx=adopt_ctx)
+    finally:
+        if pdf_doc is not None:
+            pdf_doc.close()
     os.makedirs(layout.doc_deliverable_dir, exist_ok=True)
     with open(layout.md_path, "w", encoding="utf-8") as f:
         f.write(result["md"])
