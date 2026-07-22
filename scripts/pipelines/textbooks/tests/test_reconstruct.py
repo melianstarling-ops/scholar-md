@@ -87,6 +87,16 @@ def test_restore_emphasis_dots():
     assert out == "根本差别：没有自由。"
 
 
+def test_restore_emphasis_dots_does_not_merge_adjacent_unrelated_inline_spans():
+    # 根因回归:_EMPH_WRAP_RE 内层用 *(零次或多次),允许捕获组为空,导致正则从
+    # 第一个公式的收尾 $ 出发、越过空白、匹配到第二个公式的起始 $,把中间的
+    # "$ $"(收尾$ + 空格 + 起始$)当成"内容为空的 underset 包裹"整体删掉,焊死
+    # 两个本该独立的行内公式。真实语料:Jackson p237,"$J \Delta\sigma$ $d\mathbf{l}$"
+    # 被吃成 "$J \Delta\sigmad\mathbf{l}$"(\sigma 和 d 被强行焊在一起)。
+    s = r"but $J \Delta\sigma$ $d\mathbf{l}$ is equal to X."
+    assert restore_emphasis_dots(s) == s
+
+
 def test_golden_jackson_chinese():
     blocks = json.loads((FIX / "jackson_p200_res.json").read_text(encoding="utf-8"))["parsing_res_list"]
     md, _ = reconstruct_markdown(blocks)
@@ -423,6 +433,18 @@ def test_sanitize_latex_still_downgrades_real_left_delimiter():
     # 守卫不影响真定界符:\left. 后接非字母,仍按原逻辑降级(不回归既有行为)
     assert sanitize_latex(r"\left\{a\right.}\\ &{}&{\left.+b\right.}\\ &{}&{c\right\}") == \
         r"\{a\\ &{}&{+b}\\ &{}&{c\}"
+
+
+def test_sanitize_latex_null_delimiter_deletion_does_not_glue_control_word():
+    # 根因回归(Kong p460):\quad\left.k^{2} 中的 \left. 按既有降级判定确实该删
+    # (与 test_sanitize_latex_still_downgrades_real_left_delimiter 是同一套判定,
+    # 这里不改判定本身),但删成 "" 会把 \quad 焊死成未定义控制序列 \quadk。
+    # 改删成单个空格(数学模式下空格恰是控制词的天然终止符,视觉上与"空定界符
+    # 本不可见"等价),\quad 与 k 之间保住边界。
+    s = r"\left[a\right.+\\&\quad\left.k^{2}\right]"
+    out = sanitize_latex(s)
+    assert r"\quadk" not in out
+    assert r"\quad k^{2}" in out
 
 
 def test_sanitize_latex_maps_pit_to_pi_t():

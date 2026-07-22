@@ -14,7 +14,12 @@ from scripts.pipelines.textbooks.table_audit import (
 
 _NUM_RE = re.compile(r"^\(?([\w.\-]+)\)?$")   # (5.30) / 5.30 → 5.30
 _EMPH_RE = re.compile(r"\\underset\{\\cdot\}\{([^{}]*)\}")
-_EMPH_WRAP_RE = re.compile(r"\$\s*((?:\\underset\{\\cdot\}\{[^{}]*\}\s*)*)\s*\$")
+#   内层原为 *(零次或多次)时,捕获组允许为空,导致本正则从相邻两个独立行内公式
+#   中间的"收尾$ + 空格 + 起始$"处误配对(把"空内容包裹"当真命中),焊死本该独立
+#   的两个 $...$ span(真实语料:Jackson p237 "$J \Delta\sigma$ $d\mathbf{l}$"
+#   被吃成 "...\sigmad\mathbf{l}$")。改 +(一次或多次),强制至少命中一个真实
+#   \underset{\cdot}{...},不再匹配退化的"纯空白/空内容"span。
+_EMPH_WRAP_RE = re.compile(r"\$\s*((?:\\underset\{\\cdot\}\{[^{}]*\}\s*)+)\s*\$")
 
 # KaTeX(Typora 默认渲染器)不认、但在 $$ display 模式里语义冗余的命令。
 # 新踩坑命令追加到这里即可;清洗层(sanitize_latex)与 Tier0 lint(selfcheck) 共用此单一清单。
@@ -437,6 +442,22 @@ def _downgrade_split_invisible_delimiters(s: str) -> str:
             return pos + 2, s[pos:pos + 2]
         return pos + 1, s[pos]
 
+    def _safe_delete(start: int, end: int) -> str:
+        # 空定界符(\left./\right.)被判定要删时,若紧跟一个 ASCII 字母、且紧邻的前文
+        # 是"反斜杠+连续字母"的控制词(如 \quad),直接删成 "" 会把控制词与后面的字母
+        # 焊死(\quad\left.k → \quadk,KaTeX 报未定义控制序列)。删成单个空格——数学
+        # 模式下空格恰是控制词的天然终止符,渲染效果与"空定界符本就不可见"等价,
+        # 不影响任何已锁定的降级判定(删哪个、留哪个的逻辑完全不动,只改删成什么)。
+        if end < len(s) and s[end].isascii() and s[end].isalpha():
+            p = start - 1
+            if p >= 0 and s[p].isascii() and s[p].isalpha():
+                j = p
+                while j >= 0 and s[j].isascii() and s[j].isalpha():
+                    j -= 1
+                if j >= 0 and s[j] == "\\":
+                    return " "
+        return ""
+
     repl: list[tuple[int, int, str]] = []
     stack: list[tuple[int, int, str]] = []
     i = 0
@@ -448,7 +469,7 @@ def _downgrade_split_invisible_delimiters(s: str) -> str:
         if s.startswith(r"\left", i) and not s[i + len(r"\left"):i + len(r"\left") + 1].isalpha():
             end, delim = _delim_end(i + len(r"\left"))
             if delim == ".":
-                repl.append((i, end, ""))
+                repl.append((i, end, _safe_delete(i, end)))
             else:
                 stack.append((i, end, delim))
             i = end
@@ -458,13 +479,13 @@ def _downgrade_split_invisible_delimiters(s: str) -> str:
             if stack:
                 stack.pop()
             else:
-                repl.append((i, end, "" if delim == "." else delim))
+                repl.append((i, end, _safe_delete(i, end) if delim == "." else delim))
             i = end
             continue
         i += 1
 
     for start, end, delim in stack:
-        repl.append((start, end, "" if delim == "." else delim))
+        repl.append((start, end, _safe_delete(start, end) if delim == "." else delim))
     if not repl:
         return s
     repl.sort()
