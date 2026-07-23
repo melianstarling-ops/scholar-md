@@ -335,3 +335,297 @@ def test_numeric_missing_when_source_number_absent_from_ocr():
     codes = [i["code"] for i in result["content_issues"]]
     assert "numeric_missing" in codes
     assert result["status"] == "SUSPECT"
+
+
+# ---------------------------------------------------------------------------
+# 14. 审计专用数值规范化：表示差异不得伪造 high 数值错误
+# ---------------------------------------------------------------------------
+def test_numeric_audit_canonicalizes_equivalent_cell_notation():
+    equivalent_cases = [
+        ("0.44", r"$ \le0.44 $"),
+        ("0,621", "0, 621"),
+        ("±5%", r"$ \pm 5\% $"),
+        ("×10−12", r"$ \times 10^{-12} $"),
+        ("*10-12", r"$ \times 10^{-12} $"),
+        ("—1—", "-1—"),
+    ]
+
+    for source_text, ocr_text in equivalent_cases:
+        block = {
+            "block_label": "table",
+            "block_content": f"<table><tr><td>{ocr_text}</td></tr></table>",
+        }
+        result = audit_table(block, [_word(source_text)])
+        high_codes = {
+            issue["code"]
+            for issue in result["content_issues"]
+            if issue["severity"] == "high"
+        }
+        assert high_codes == set(), (source_text, ocr_text, result)
+
+
+def test_numeric_audit_canonicalization_preserves_real_decimal_shift():
+    block = {
+        "block_label": "table",
+        "block_content": "<table><tr><td>2011.2</td></tr></table>",
+    }
+    result = audit_table(block, [_word("201.12")])
+    assert [i["code"] for i in result["content_issues"]] == ["decimal_shift"]
+
+
+# ---------------------------------------------------------------------------
+# 15. mismatch 只在双方唯一兼容时配对，避免全表 first-match 乱配
+# ---------------------------------------------------------------------------
+def test_ambiguous_mismatch_candidates_are_not_greedily_paired():
+    block = {
+        "block_label": "table",
+        "block_content": "<table><tr><td>-1</td></tr></table>",
+    }
+    words = [
+        _word("1", block_no=0, line_no=0),
+        _word("1", block_no=0, line_no=1),
+    ]
+    result = audit_table(block, words)
+    codes = [i["code"] for i in result["content_issues"]]
+    assert "sign_flip" not in codes
+    assert codes.count("numeric_missing") == 2
+
+
+def test_attached_en_dash_and_spaced_percent_are_local_not_numeric_changes():
+    block = {
+        "block_label": "table",
+        "block_content": (
+            r"<table><tr><td>amplifier -3 dB; tolerance $\pm 5\%$</td></tr></table>"
+        ),
+    }
+    result = audit_table(
+        block, [_word("amplifier –3 dB; tolerance ±5 %")]
+    )
+    high_codes = {
+        issue["code"]
+        for issue in result["content_issues"]
+        if issue["severity"] == "high"
+    }
+    assert high_codes == set()
+
+
+def test_percent_suffix_is_not_misclassified_as_decimal_shift():
+    block = {
+        "block_label": "table",
+        "block_content": "<table><tr><td>5%</td></tr></table>",
+    }
+    result = audit_table(block, [_word("5")])
+    codes = [issue["code"] for issue in result["content_issues"]]
+    assert "decimal_shift" not in codes
+    assert "numeric_missing" in codes
+
+
+# ---------------------------------------------------------------------------
+# 16. 含图像节点的表格不能做纯文本数值结论，改走视觉复核
+# ---------------------------------------------------------------------------
+def test_image_table_is_visual_unscorable_without_high_numeric_missing():
+    block = {
+        "block_label": "table",
+        "block_content": (
+            '<table><tr><td><img src="diagram.png" alt="diagram" /></td></tr></table>'
+        ),
+    }
+    result = audit_table(block, [_word("250")])
+    assert result["status"] == "visual_unscorable"
+    assert result["metrics"]["visual_node_count"] == 1
+    assert [i["code"] for i in result["content_issues"]] == [
+        "visual_table_unscorable"
+    ]
+    assert result["content_issues"][0]["severity"] == "warning"
+
+
+# ---------------------------------------------------------------------------
+# 17. 源层变量跨行：只在同一 OCR cell 的局部上下文证实时拼回 B1
+# ---------------------------------------------------------------------------
+def test_source_identifier_wrap_rejoins_b1_without_false_numeric_missing():
+    block = {
+        "block_label": "table",
+        "block_content": (
+            "<table><tr><td>最大感应场（以B1均值归一化，该均值取自调整体积）"
+            "</td></tr></table>"
+        ),
+    }
+    words = [
+        _word("最大感应场（以B", block_no=0, line_no=0),
+        _word("1均值归一化，该", block_no=1, line_no=0),
+        _word("均值取自调整体积）", block_no=2, line_no=0),
+    ]
+    result = audit_table(block, words)
+    assert not any(
+        issue["code"] == "numeric_missing" for issue in result["content_issues"]
+    )
+
+
+def test_source_identifier_wrap_never_swallows_independent_one():
+    block = {
+        "block_label": "table",
+        "block_content": (
+            "<table><tr><td>另一个变量B1</td><td>分组B</td>"
+            "<td>该独立数值已被OCR漏掉</td></tr></table>"
+        ),
+    }
+    words = [
+        _word("分组B", block_no=0, line_no=0),
+        _word("1个独立数值", block_no=1, line_no=0),
+    ]
+    result = audit_table(block, words)
+    missing = [
+        issue for issue in result["content_issues"]
+        if issue["code"] == "numeric_missing"
+    ]
+    assert len(missing) == 1
+    assert "'1'" in missing[0]["detail"]
+
+
+# ---------------------------------------------------------------------------
+# 18. locale 小数点/逗号等价，但真正移位仍须告警
+# ---------------------------------------------------------------------------
+def test_decimal_dot_and_short_decimal_comma_are_audit_equivalent():
+    block = {
+        "block_label": "table",
+        "block_content": "<table><tr><td>3,2</td><td>0,47</td></tr></table>",
+    }
+    result = audit_table(
+        block,
+        [
+            _word("3.2", line_no=0),
+            _word("0.47", line_no=1),
+        ],
+    )
+    assert not any(
+        issue["severity"] == "high" for issue in result["content_issues"]
+    )
+
+
+# ---------------------------------------------------------------------------
+# 19. 双侧破折号数字是占位符；真正的负数仍参与对账
+# ---------------------------------------------------------------------------
+def test_dash_wrapped_placeholder_is_not_an_independent_number():
+    placeholder = {
+        "block_label": "table",
+        "block_content": "<table><tr><td>−/−</td></tr></table>",
+    }
+    result = audit_table(placeholder, [_word("—1—")])
+    assert not any(
+        issue["code"] == "numeric_missing" for issue in result["content_issues"]
+    )
+
+    real_negative = {
+        "block_label": "table",
+        "block_content": "<table><tr><td>missing</td></tr></table>",
+    }
+    result_negative = audit_table(real_negative, [_word("−1")])
+    assert any(
+        issue["code"] == "numeric_missing"
+        for issue in result_negative["content_issues"]
+    )
+
+
+# ---------------------------------------------------------------------------
+# 20. 符号单位紧黏英文正文：μTincident → μT + incident
+# ---------------------------------------------------------------------------
+def test_symbol_unit_is_separated_from_attached_prose_suffix():
+    block = {
+        "block_label": "table",
+        "block_content": (
+            "<table><tr><td>Ermsmax at 1 μT incident B1 field</td></tr></table>"
+        ),
+    }
+    result = audit_table(block, [_word("Ermsmax at 1μTincident B1 field")])
+    assert not any(
+        issue["code"] == "unit_missing" for issue in result["content_issues"]
+    )
+
+
+# ---------------------------------------------------------------------------
+# 21. Annex O/0 只在引用标签 + 同 cell 局部上下文双证据时等价
+# ---------------------------------------------------------------------------
+def test_annex_o_source_zero_glyph_is_not_a_numeric_missing():
+    block = {
+        "block_label": "table",
+        "block_content": (
+            "<table><tr><td>采用ISO 10974：2012附录O中的性能。</td></tr></table>"
+        ),
+    }
+    result = audit_table(block, [_word("采用ISO 10974：2012附录0中的性能。")])
+    assert not any(
+        issue["code"] == "numeric_missing" and "'0'" in issue["detail"]
+        for issue in result["content_issues"]
+    )
+
+
+def test_o_zero_equivalence_does_not_hide_real_numeric_zero():
+    block = {
+        "block_label": "table",
+        "block_content": "<table><tr><td>温度O度（OCR错误）</td></tr></table>",
+    }
+    result = audit_table(block, [_word("温度0度（真实数值）")])
+    assert any(
+        issue["code"] == "numeric_missing" and "'0'" in issue["detail"]
+        for issue in result["content_issues"]
+    )
+
+
+# ---------------------------------------------------------------------------
+# 22. 表内 LaTeX 裸比较号不能被 HTML 解析器误吞
+# ---------------------------------------------------------------------------
+def test_inline_math_less_than_is_preserved_inside_html_cell():
+    table = parse_table_html(
+        "<table><tr><td>$10<l<63$</td><td>next</td></tr></table>"
+    )
+    assert table.n_rows == 1
+    assert table.n_cols == 2
+    assert [cell.text for cell in table.cells] == ["$10<l<63$", "next"]
+
+
+# ---------------------------------------------------------------------------
+# 23. ISO10974-CN 表 A.3：源层公式 l/1 与科学记数排版差异
+# ---------------------------------------------------------------------------
+def test_formula_glyph_and_scientific_notation_reconciliation_is_evidence_gated():
+    block = {
+        "block_label": "table",
+        "block_content": (
+            "<table>"
+            r"<tr><td>$L_x=f(r,l)^d$</td></tr>"
+            r"<tr><td>$L_x=16{,}0\times10^{-2}l$</td></tr>"
+            r"<tr><td>$10<l<63$</td></tr>"
+            r"<tr><td>$L_x=8{,}87\times10^{-2}l+7{,}13\times10^{-1}$</td></tr>"
+            r"<tr><td>$L_x=\frac{l^2}{2\pi}\times10^2$</td></tr>"
+            r"<tr><td>$L_x=0{,}5\pi a r\times10^2$</td></tr>"
+            "</table>"
+        ),
+    }
+    words = [
+        _word("Lx=f(r,1)d", block_no=0, line_no=0),
+        _word("=16,0 E-2×1", block_no=1, line_no=0),
+        _word("10<1<63", block_no=2, line_no=0),
+        _word("=8,87 E-2×1+7,13 E-1", block_no=3, line_no=0),
+        _word("=12/2π×1 E+2", block_no=4, line_no=0),
+        _word("=0,5×π×a×r×1E+2", block_no=5, line_no=0),
+    ]
+    result = audit_table(block, words)
+    assert not any(
+        issue["severity"] == "high" for issue in result["content_issues"]
+    )
+    assert any(
+        issue["code"] == "source_formula_glyph_ambiguous"
+        and issue["severity"] == "warning"
+        for issue in result["content_issues"]
+    )
+
+
+def test_single_l_one_disagreement_keeps_real_numeric_missing():
+    block = {
+        "block_label": "table",
+        "block_content": "<table><tr><td>$x=l$</td></tr></table>",
+    }
+    result = audit_table(block, [_word("x=1")])
+    assert any(
+        issue["code"] == "numeric_missing" and "'1'" in issue["detail"]
+        for issue in result["content_issues"]
+    )

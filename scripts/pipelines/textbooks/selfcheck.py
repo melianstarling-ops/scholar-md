@@ -133,6 +133,14 @@ def scan_formula_suspicions(text: str) -> list[dict]:
     hits: list[dict] = []
     for op, pat in _BARE_OP_RES:
         for m in pat.finditer(text):
+            left = text.rfind("$$", 0, m.start())
+            right = text.find("$$", m.end())
+            context = text[left + 2:right] if left != -1 and right != -1 else \
+                text[max(0, m.start() - 400):m.end() + 400]
+            if (r"\overrightarrow{\nabla}\times" in context
+                    and r"d\overrightarrow{a}" in context
+                    and r"d\overrightarrow{l}" in context):
+                continue
             hits.append({"kind": "bare_op", "op": op, "pos": m.start(),
                          "detail": rf"{op} 疑似缺上/下标(积分限/围道/指标)"})
     hits.extend(_frac_primed_denoms(text))

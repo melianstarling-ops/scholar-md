@@ -1,6 +1,7 @@
 """断点/manifest/指纹/毒页 簿记(纯确定性,无 GPU)。"""
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import shutil
@@ -109,6 +110,73 @@ def load_page_result(work_dir: str, page: int) -> dict:
 
 def load_page_blocks(work_dir: str, page: int) -> list[dict]:
     return load_page_result(work_dir, page).get("parsing_res_list", [])
+
+
+def ocr_results_fingerprint(work_dir: str, page_count: int, dpi: int) -> dict:
+    """Return a stable strong fingerprint of the inputs consumed by source audit.
+
+    PDF size/page count and DPI alone are insufficient on resume: a previously
+    missing/failed ``page_*_res.json`` may appear, or an existing result may be
+    corrected without changing any of those values.  Hash canonical JSON page
+    content plus the current manifest failure set, with explicit missing/corrupt
+    markers so every audit-relevant state transition invalidates the report.
+    """
+    digest = hashlib.sha256()
+    digest.update(
+        json.dumps(
+            {"dpi": dpi, "page_count": page_count},
+            sort_keys=True, separators=(",", ":"),
+        ).encode("utf-8")
+    )
+    result_page_count = 0
+    for page in range(1, page_count + 1):
+        path = page_res_path(work_dir, page)
+        state: dict
+        if not os.path.exists(path):
+            state = {"page": page, "state": "missing"}
+        else:
+            try:
+                with open(path, encoding="utf-8") as handle:
+                    payload = json.load(handle)
+            except (OSError, ValueError):
+                state = {"page": page, "state": "corrupt"}
+            else:
+                result_page_count += 1
+                state = {"page": page, "state": "result", "content": payload}
+        digest.update(
+            json.dumps(
+                state, ensure_ascii=False, sort_keys=True, separators=(",", ":"),
+            ).encode("utf-8")
+        )
+
+    manifest = load_manifest(work_dir) or {}
+    failures = [
+        {
+            "page": failure.get("page"),
+            "kind": failure.get("kind"),
+            "error": failure.get("error"),
+        }
+        for failure in (manifest.get("failed_pages") or [])
+        if isinstance(failure, dict)
+    ]
+    failures.sort(key=lambda item: (
+        item.get("page") if isinstance(item.get("page"), int) else -1,
+        str(item.get("kind") or ""),
+        str(item.get("error") or ""),
+    ))
+    digest.update(
+        json.dumps(
+            {"failed_pages": failures},
+            ensure_ascii=False, sort_keys=True, separators=(",", ":"),
+        ).encode("utf-8")
+    )
+    return {
+        "dpi": dpi,
+        "page_count": page_count,
+        "result_page_count": result_page_count,
+        "failed_page_count": len(failures),
+        "result_set_sha256": digest.hexdigest(),
+    }
 
 
 def pages_todo(work_dir: str, total: int) -> list[int]:

@@ -36,6 +36,61 @@ _NUMERIC_START_RE = re.compile(r"^[+\-]\d|^\d")
 _EXPONENT_CARET_RE = re.compile(r"\^([+\-]?\d+)$")
 _EXPONENT_E_RE = re.compile(r"[eE]([+\-]?\d+)$")
 _DIGITS_ONLY_RE = re.compile(r"[^0-9]")
+_LATEX_COMMAND_RE = re.compile(r"\\[A-Za-z]+")
+_INLINE_MATH_RE = re.compile(
+    r"(?P<delimiter>\$\$|\$)(?P<body>.*?)(?P=delimiter)",
+    re.DOTALL,
+)
+_BRACED_DECIMAL_COMMA_RE = re.compile(
+    r"(?<=\d)\s*\{\s*,\s*\}\s*(?=\d)"
+)
+_SCIENTIFIC_E_RE = re.compile(
+    r"(?<![A-Za-z0-9])(?P<mantissa>\d+(?:\.\d+)?)\s*"
+    r"[eE]\s*(?P<sign>[+\-−])\s*(?P<exp>\d+)"
+)
+_LATEX_BRACED_EXPONENT_RE = re.compile(
+    r"(?P<base>10)\s*\^\s*\{\s*(?P<exp>[+\-−]?\d+)\s*\}"
+)
+_TIMES_PLAIN_EXPONENT_RE = re.compile(
+    r"(?P<prefix>[×xX*]\s*10)\s*(?P<sign>[+\-−])\s*(?P<exp>\d+)"
+)
+_DECIMAL_COMMA_SPACE_RE = re.compile(r"(?<=\d),\s+(?=\d)")
+_SPACED_PERCENT_RE = re.compile(r"(?<=\d)\s+(?=%)")
+_ATTACHED_DASH_MINUS_RE = re.compile(r"(?<![A-Za-z0-9])[‒–−](?=\d)")
+_SHORT_DECIMAL_COMMA_RE = re.compile(
+    r"(?<![\d,])(?P<integer>[+\-−]?\d+),(?P<fraction>\d{1,2})(?!\d)"
+)
+_DASH_WRAPPED_NUMBER_RE = re.compile(
+    r"^\s*[—–\-]\s*(?P<number>\d+(?:[.,]\d+)?%?)\s*[—–\-]\s*$"
+)
+_ATTACHED_MICRO_T_PROSE_RE = re.compile(
+    r"(?<=\d)(?P<unit>[µμ]T)(?=[A-Za-z]{3,})"
+)
+_SINGLE_ASCII_IDENTIFIER_TAIL_RE = re.compile(r"(?<![A-Za-z])([A-Za-z])$")
+_LEADING_IDENTIFIER_INDEX_RE = re.compile(
+    r"^(?P<index>\d{1,3})(?=[A-Za-z\u3400-\u9fff])"
+)
+_ANNEX_ZERO_RE = re.compile(
+    r"(?P<label>附录|annex|appendix)(?P<space>\s*)(?P<zero>0)"
+    r"(?=[A-Za-z\u3400-\u9fff])",
+    re.IGNORECASE,
+)
+_AMBIGUOUS_ONE_RE = re.compile(r"(?<![A-Za-z0-9])1(?![A-Za-z0-9])")
+_AMBIGUOUS_L_SQUARED_RE = re.compile(r"(?<!\d)12(?=\s*/)")
+_FORMULA_EVIDENCE_STRIP_RE = re.compile(r"[^A-Za-z0-9\u3400-\u9fff.\-]+")
+_PLAIN_DECIMAL_VALUE_RE = re.compile(r"^\d+(?:[.,]\d+)*$")
+_LATEX_SYMBOL_COMMANDS = {
+    r"\times": "×",
+    r"\pm": "±",
+    r"\leq": "≤",
+    r"\le": "≤",
+    r"\geq": "≥",
+    r"\ge": "≥",
+    r"\mu": "μ",
+    r"\sigma": "σ",
+    r"\lambda": "λ",
+    r"\pi": "π",
+}
 
 
 def _is_pua(ch: str) -> bool:
@@ -81,6 +136,7 @@ class ParsedTable:
     # 额外字段(不在接口"至少含"清单内,内部/下游诊断用):
     root_count: int = 1
     header_row_count: int = 0
+    visual_node_count: int = 0
 
 
 # ===========================================================================
@@ -127,6 +183,7 @@ class _TableHTMLParser(HTMLParser):
         self.caption: str | None = None
 
         self.orphan_cell_count = 0
+        self.visual_node_count = 0
 
     # -- 结构上下文判定:仅顶层根 1、且未处于嵌套子表内时才记入网格 --------
     def _structural_context_ok(self) -> bool:
@@ -142,6 +199,10 @@ class _TableHTMLParser(HTMLParser):
             return
 
         if not self._structural_context_ok():
+            return
+
+        if tag in ("img", "svg", "canvas", "chart"):
+            self.visual_node_count += 1
             return
 
         if tag in ("thead", "tbody", "tfoot"):
@@ -301,7 +362,18 @@ def parse_table_html(content: str) -> ParsedTable:
     warnings: list[str] = []
     if content:
         try:
-            parser.feed(content)
+            # LaTeX 比较式常直接写在 HTML cell 中（如 ``$10<l<63$``）。
+            # 裸 ``<`` 会被 HTMLParser 当成畸形标签并吞掉余下 cell/闭合标签；
+            # 这里只在数学定界符内部转义，供审计解析使用，不改写原始内容。
+            audit_content = _INLINE_MATH_RE.sub(
+                lambda m: (
+                    m.group("delimiter")
+                    + m.group("body").replace("<", "&lt;")
+                    + m.group("delimiter")
+                ),
+                content,
+            )
+            parser.feed(audit_content)
             parser.close()
         except Exception:
             # 畸形 HTML 兜底:不抛异常,按已解析到的部分继续,记一条警告。
@@ -329,6 +401,7 @@ def parse_table_html(content: str) -> ParsedTable:
         warnings=warnings,
         root_count=parser.root_count,
         header_row_count=header_row_count,
+        visual_node_count=parser.visual_node_count,
     )
 
 
@@ -482,6 +555,76 @@ def _strip_inline_math_wrappers(text: str) -> str:
     return out
 
 
+def _canonicalize_numeric_audit_text(text: str) -> str:
+    """把同一数值的 OCR/源层表示折叠到审计专用视图。
+
+    只供数值对账使用，不回写 OCR HTML：
+    - LaTeX 符号命令先换成 Unicode，剩余命令换成分隔空格，避免
+      ``\\le0.44`` 的命令尾字母吞掉前导 ``0.``；
+    - ``\\%``、数字间小数逗号空格、短小数逗号做保守等价折叠；
+    - 双侧破折号包裹的数字视为表格占位符，不当作独立数值；
+    - ``10^{-12}`` 与源层常见的 ``×10−12`` 统一为 caret 指数。
+    """
+    out = _strip_inline_math_wrappers(text or "")
+    out = out.replace(r"\%", "%")
+    for command, symbol in _LATEX_SYMBOL_COMMANDS.items():
+        out = re.sub(re.escape(command) + r"(?![A-Za-z])", symbol, out)
+
+    out = _LATEX_BRACED_EXPONENT_RE.sub(
+        lambda m: (
+            f"{m.group('base')}^"
+            f"{m.group('exp').replace('−', '-').lstrip('+')}"
+        ),
+        out,
+    )
+    out = _TIMES_PLAIN_EXPONENT_RE.sub(
+        lambda m: (
+            f"{m.group('prefix')}^"
+            f"{m.group('sign').replace('−', '-').replace('+', '')}"
+            f"{m.group('exp')}"
+        ),
+        out,
+    )
+
+    # LaTeX ``16{,}0`` 中的花括号只用于抑制逗号后的数学间距；它与
+    # born-digital 文字层的 ``16,0`` 是同一小数，不能先拆括号再分成
+    # 两个独立数值 token。
+    out = _BRACED_DECIMAL_COMMA_RE.sub(",", out)
+    out = _SCIENTIFIC_E_RE.sub(
+        lambda m: (
+            ("" if m.group("mantissa") == "1" else m.group("mantissa") + "×")
+            + "10^"
+            + m.group("sign").replace("−", "-").replace("+", "")
+            + m.group("exp")
+        ),
+        out,
+    )
+
+    # 未识别的 LaTeX 命令仅作 token 分隔，不吃其花括号内的普通数字。
+    out = _LATEX_COMMAND_RE.sub(" ", out)
+    out = out.replace("{", " ").replace("}", " ")
+    out = _DECIMAL_COMMA_SPACE_RE.sub(",", out)
+    # born-digital 表层常用 en dash 表示负号；只接受“紧贴数字且左侧不是
+    # 标识符/数字”的强局部形状，`Table – 3` 之类版式破折号不会命中。
+    out = _ATTACHED_DASH_MINUS_RE.sub("-", out)
+    # `±5 %` 与 LaTeX `\pm 5\%` 是同一 cell 内的表示差异。
+    out = _SPACED_PERCENT_RE.sub("", out)
+    out = _SHORT_DECIMAL_COMMA_RE.sub(
+        lambda m: (
+            f"{m.group('integer').replace('−', '-')}.{m.group('fraction')}"
+        ),
+        out,
+    )
+    out = _ATTACHED_MICRO_T_PROSE_RE.sub(
+        lambda m: f"{m.group('unit')} ", out
+    )
+
+    wrapped = _DASH_WRAPPED_NUMBER_RE.fullmatch(out)
+    if wrapped:
+        out = ""
+    return out
+
+
 def _is_numeric_value_token(tok: str) -> bool:
     """extract_numeric_tokens 返回的 token 里,数值 token 与紧随其后的单位
     token 混在同一个列表里、无标记区分——用 token 是否以数字/正负号开头
@@ -522,7 +665,14 @@ def _classify_numeric_mismatch(source_tok: str, ocr_tok: str) -> str | None:
 
     s_digits = _digits_only(s_rest)
     o_digits = _digits_only(o_rest)
-    if s_digits and o_digits and s_digits.lstrip("0") == o_digits.lstrip("0") and s_rest != o_rest:
+    if (
+        _PLAIN_DECIMAL_VALUE_RE.fullmatch(s_rest)
+        and _PLAIN_DECIMAL_VALUE_RE.fullmatch(o_rest)
+        and s_digits
+        and o_digits
+        and s_digits.lstrip("0") == o_digits.lstrip("0")
+        and s_rest != o_rest
+    ):
         return "decimal_shift"
 
     s_mant, s_exp = _exponent_info(source_tok)
@@ -534,6 +684,35 @@ def _classify_numeric_mismatch(source_tok: str, ocr_tok: str) -> str | None:
             return "exponent_change"
 
     return None
+
+
+def _unique_mismatch_pairs(
+    source_tokens: list[str], ocr_tokens: list[str]
+) -> dict[int, tuple[int, str]]:
+    """只返回双方唯一兼容的 mismatch 配对。
+
+    旧实现按源 token 顺序拿第一个兼容 OCR token，会在大表中跨行乱配，
+    既伪造 sign/decimal 告警，也可能吃掉真正 missing。这里要求：
+    source 仅有一个候选，且该 OCR 也仅被这一个 source 兼容。
+    """
+    source_candidates: dict[int, list[tuple[int, str]]] = {}
+    ocr_candidates: dict[int, list[int]] = {}
+    for source_idx, source_tok in enumerate(source_tokens):
+        for ocr_idx, ocr_tok in enumerate(ocr_tokens):
+            code = _classify_numeric_mismatch(source_tok, ocr_tok)
+            if code is None:
+                continue
+            source_candidates.setdefault(source_idx, []).append((ocr_idx, code))
+            ocr_candidates.setdefault(ocr_idx, []).append(source_idx)
+
+    pairs: dict[int, tuple[int, str]] = {}
+    for source_idx, candidates in source_candidates.items():
+        if len(candidates) != 1:
+            continue
+        ocr_idx, code = candidates[0]
+        if len(ocr_candidates.get(ocr_idx, [])) == 1:
+            pairs[source_idx] = (ocr_idx, code)
+    return pairs
 
 
 def _group_words_by_line(words: list) -> list[str]:
@@ -560,6 +739,133 @@ def _group_words_by_line(words: list) -> list[str]:
         ordered = sorted(lines[key], key=lambda t: t[0])
         line_texts.append(" ".join(t for _, t in ordered))
     return line_texts
+
+
+def _compact_compare_text(text: str) -> str:
+    return _WS_RE.sub("", normalize_prose_for_compare(text or ""))
+
+
+def _stitch_source_identifier_wraps(
+    source_lines: list[str], table: ParsedTable
+) -> list[str]:
+    """只在 OCR cell 提供完整局部证据时拼回源层跨行变量下标。
+
+    born-digital 表格偶尔把 ``B1`` 的 ``B`` 与 ``1`` 分进相邻 PDF text
+    block；逐行抽数会把下一行开头的 ``1`` 错当独立数值。合并门刻意很窄：
+    上一行须以单个 ASCII 变量字母结束，下一行须以 1--3 位数字紧接正文，
+    且同一个 OCR cell 必须含边界两侧的局部上下文。仅在别处出现 ``B1``
+    不够，因此真正独立的数值 ``1`` 不会被吞掉。
+    """
+    cell_texts = [_compact_compare_text(cell.text) for cell in table.cells]
+    stitched: list[str] = []
+    for line in source_lines:
+        if stitched:
+            previous = stitched[-1]
+            previous_compact = _compact_compare_text(previous)
+            current_compact = _compact_compare_text(line)
+            tail = _SINGLE_ASCII_IDENTIFIER_TAIL_RE.search(previous_compact)
+            index = _LEADING_IDENTIFIER_INDEX_RE.match(current_compact)
+            if tail and index:
+                # 两侧都带少量正文上下文，避免只凭一个常见的 B1 在全表误并。
+                left_context = previous_compact[-8:]
+                right_context = current_compact[:8]
+                needle = left_context + right_context
+                if (
+                    len(left_context) >= 2
+                    and len(right_context) > len(index.group("index"))
+                    and any(needle in cell_text for cell_text in cell_texts)
+                ):
+                    stitched[-1] = previous + line
+                    continue
+        stitched.append(line)
+    return stitched
+
+
+def _reconcile_source_annex_o_glyphs(
+    source_lines: list[str], table: ParsedTable
+) -> list[str]:
+    """在强局部证据下把引用标签中的源层 ``Annex 0`` 视作字母 ``O``。
+
+    只处理 ``附录/Annex/Appendix + 0``，且把 0 换成 O 后的两侧局部文本
+    必须出现在同一个 OCR cell。普通正文数值 0 不命中引用标签，因此仍会
+    正常参与 missing 对账。
+    """
+    cell_texts = [_compact_compare_text(cell.text) for cell in table.cells]
+    reconciled: list[str] = []
+    for original in source_lines:
+        line = original
+        while True:
+            match = _ANNEX_ZERO_RE.search(line)
+            if match is None:
+                break
+            zero_start, zero_end = match.span("zero")
+            candidate = line[:zero_start] + "O" + line[zero_end:]
+            candidate_compact = _compact_compare_text(candidate)
+            compact_match = _ANNEX_ZERO_RE.search(_compact_compare_text(line))
+            if compact_match is None:
+                break
+            compact_zero = compact_match.start("zero")
+            needle = candidate_compact[
+                max(0, compact_zero - 12): compact_zero + 13
+            ]
+            if len(needle) >= 5 and any(
+                needle in cell_text for cell_text in cell_texts
+            ):
+                line = candidate
+                continue
+            break
+        reconciled.append(line)
+    return reconciled
+
+
+def _formula_evidence_key(text: str) -> str:
+    """公式局部证据键：只折叠排版符号，不折叠数字本身。"""
+    canonical = _canonicalize_numeric_audit_text(text).replace("_", "")
+    return _FORMULA_EVIDENCE_STRIP_RE.sub("", canonical)
+
+
+def _reconcile_source_formula_digit_glyphs(
+    source_lines: list[str], table: ParsedTable
+) -> tuple[list[str], int]:
+    """仅在同 cell 局部证据 + 表内重复证据下调和源层 ``l/1`` 字形。
+
+    中文标准 PDF 的 born-digital 字体有时把变量小写 ``l`` 导出为数字
+    ``1``，并把 ``l²`` 导出为 ``12``。直接把所有 1 当作 l 会吞掉真实数值，
+    所以门限刻意不是比例阈值，而是两个离散证据：
+
+    1. 把疑似字形替换后，整条公式的数字/字母键必须出现在同一个 OCR cell；
+    2. 同一张表至少有两条不同源行获得这种局部证据。
+
+    命中时只修改审计视图，并由调用方留下 warning；不回写 OCR/Markdown。
+    """
+    cell_keys = [_formula_evidence_key(cell.text) for cell in table.cells]
+    candidates: dict[int, str] = {}
+    for index, original in enumerate(source_lines):
+        canonical = _canonicalize_numeric_audit_text(original)
+        if not any(op in canonical for op in ("=", "<", ">", "≤", "≥", "×", "/", "^")):
+            continue
+
+        candidate = _AMBIGUOUS_L_SQUARED_RE.sub("l^2", canonical)
+
+        def _one_to_l(match: re.Match) -> str:
+            prefix = candidate[max(0, match.start() - 3): match.start()]
+            # 指数位是真数值，不属于 l/1 字形歧义。
+            if prefix.endswith(("^", "^-", "^+")):
+                return match.group(0)
+            return "l"
+
+        candidate = _AMBIGUOUS_ONE_RE.sub(_one_to_l, candidate)
+        if candidate == canonical:
+            continue
+        key = _formula_evidence_key(candidate)
+        if len(key) >= 5 and any(key in cell_key for cell_key in cell_keys):
+            candidates[index] = candidate
+
+    if len(candidates) < 2:
+        return source_lines, 0
+    return [
+        candidates.get(index, line) for index, line in enumerate(source_lines)
+    ], len(candidates)
 
 
 def _word_text(w) -> str:
@@ -606,7 +912,28 @@ def audit_table(
         "n_rows": table.n_rows,
         "n_cols": table.n_cols,
         "structure_issue_count": len(structure_issues),
+        "visual_node_count": table.visual_node_count,
     }
+
+    # ---- 含图片/图表节点：文字 token 无法覆盖视觉真值，改路由视觉复核 ----
+    if table.visual_node_count:
+        metrics["source_numeric_token_count"] = None
+        metrics["ocr_numeric_token_count"] = None
+        return {
+            "status": "visual_unscorable",
+            "structure_issues": structure_issues,
+            "content_issues": [
+                {
+                    "code": "visual_table_unscorable",
+                    "severity": "warning",
+                    "detail": (
+                        f"表格含 {table.visual_node_count} 个图片/图表节点，"
+                        "不以纯文本数值缺失作高严重度结论，需视觉复核"
+                    ),
+                }
+            ],
+            "metrics": metrics,
+        }
 
     # ---- 源不可信/为空 → table_unscorable,绝不对 OCR 数值误报 ------------
     if not words or any(_has_bad_codes(t) for t in raw_texts):
@@ -621,19 +948,39 @@ def audit_table(
 
     # ---- 源数值 token:按行分组抽取(与 shuffle 无关,见 _group_words_by_line) --
     source_numeric_tokens: list[str] = []
-    for line_text in _group_words_by_line(words):
-        source_numeric_tokens.extend(extract_numeric_tokens(line_text))
+    source_lines = _stitch_source_identifier_wraps(
+        _group_words_by_line(words), table
+    )
+    source_lines = _reconcile_source_annex_o_glyphs(source_lines, table)
+    source_lines, formula_glyph_reconciliation_count = (
+        _reconcile_source_formula_digit_glyphs(source_lines, table)
+    )
+    for line_text in source_lines:
+        source_numeric_tokens.extend(
+            extract_numeric_tokens(_canonicalize_numeric_audit_text(line_text))
+        )
 
     # ---- OCR 数值 token:逐 cell 抽取(去 inline math 包装后),按 (row,col) 顺序 --
     ocr_numeric_tokens: list[str] = []
     for cell in sorted(table.cells, key=lambda c: (c.row, c.col)):
-        unwrapped = _strip_inline_math_wrappers(cell.text)
-        ocr_numeric_tokens.extend(extract_numeric_tokens(unwrapped))
+        canonical = _canonicalize_numeric_audit_text(cell.text)
+        ocr_numeric_tokens.extend(extract_numeric_tokens(canonical))
 
     metrics["source_numeric_token_count"] = len(source_numeric_tokens)
     metrics["ocr_numeric_token_count"] = len(ocr_numeric_tokens)
 
     content_issues: list[dict] = []
+    if formula_glyph_reconciliation_count:
+        content_issues.append(
+            {
+                "code": "source_formula_glyph_ambiguous",
+                "severity": "warning",
+                "detail": (
+                    "源层公式中的 l/1 字形仅在同 cell 局部证据与表内重复证据"
+                    f"同时成立时调和（{formula_glyph_reconciliation_count} 行）"
+                ),
+            }
+        )
 
     # ---- 数值 token(以数字/符号开头) vs 单位 token,分别多重集对账 --------
     source_values = [t for t in source_numeric_tokens if _is_numeric_value_token(t)]
@@ -645,17 +992,13 @@ def audit_table(
     leftover_source_values = list((Counter(source_values) - value_overlap).elements())
     leftover_ocr_values = list((Counter(ocr_values) - value_overlap).elements())
 
-    for src_tok in leftover_source_values:
-        matched_code = None
-        matched_idx = None
-        for idx, ocr_tok in enumerate(leftover_ocr_values):
-            code = _classify_numeric_mismatch(src_tok, ocr_tok)
-            if code is not None:
-                matched_code = code
-                matched_idx = idx
-                break
-        if matched_code is not None:
-            leftover_ocr_values.pop(matched_idx)
+    mismatch_pairs = _unique_mismatch_pairs(
+        leftover_source_values, leftover_ocr_values
+    )
+    for source_idx, src_tok in enumerate(leftover_source_values):
+        pair = mismatch_pairs.get(source_idx)
+        if pair is not None:
+            _ocr_idx, matched_code = pair
             content_issues.append(
                 {
                     "code": matched_code,

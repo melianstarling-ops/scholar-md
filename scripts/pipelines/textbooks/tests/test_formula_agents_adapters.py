@@ -6,7 +6,7 @@ argv 已按真机逐一实测通过的调用校准(见 adapters.py 模块 docstr
 import os
 
 from scripts.pipelines.textbooks.formula_agents.adapters import (
-    _MODELS, _crop_dirs, _image_flags, build_invocation,
+    _MODELS, CliAdapter, _crop_dirs, _image_flags, build_invocation,
 )
 
 
@@ -91,3 +91,13 @@ def test_model_provenance_matches_verified_pressure_run():
     assert _MODELS["gemini"]["model"] == "Gemini 3.1 Pro (High)"
     assert _MODELS["codex"]["model"] == "gpt-5.6-terra"
     assert _MODELS["claude"]["model"] == "claude-sonnet-4-6"
+
+
+def test_explicit_model_and_effort_override_do_not_change_frozen_defaults():
+    argv, _ = build_invocation(
+        "codex", [], "PROMPT", model="gpt-5.6-sol", effort="high")
+    assert argv[argv.index("--model") + 1] == "gpt-5.6-sol"
+    assert 'model_reasoning_effort="high"' in argv
+    adapter = CliAdapter("codex", model="gpt-5.6-sol", effort="high")
+    assert (adapter.model, adapter.effort) == ("gpt-5.6-sol", "high")
+    assert _MODELS["codex"] == {"model": "gpt-5.6-terra", "effort": "medium"}

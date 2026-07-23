@@ -1,11 +1,18 @@
 import json
 import os
+from types import SimpleNamespace
 import fitz
 import pytest
 from scripts.pipelines.textbooks import convert as cv
 from scripts.pipelines.textbooks import checkpoint as cp
 from scripts.pipelines.textbooks.paths import resolve_layout
+from scripts.pipelines.textbooks.document_lock import (
+    DocumentLock,
+    DocumentLockedError,
+)
 from scripts.pipelines.textbooks.formula_agents.protocol import RawResponse
+from scripts.pipelines.textbooks.quality_repair.models import Finding, Severity
+from scripts.pipelines.textbooks.repair_policy import AgentSpec as RepairAgentSpec
 from scripts.pipelines.textbooks.tests.formula_agents_fakes import FakeAdapter
 
 
@@ -55,6 +62,50 @@ def _layout(out, stem="scan"):
     return resolve_layout(stem, str(out))
 
 
+def test_convert_rejects_competing_document_lock_before_implementation(
+        tmp_path, monkeypatch):
+    pdf = tmp_path / "book.pdf"
+    out = tmp_path / "out"
+    work_root = tmp_path / "work"
+    layout = resolve_layout("book", str(out), str(work_root))
+    calls = []
+
+    monkeypatch.setattr(
+        cv, "_convert_pdf_impl",
+        lambda *_args, **_kwargs: calls.append(True) or {"ok": True})
+
+    with DocumentLock(layout.doc_work_dir, run_id="already-running"):
+        with pytest.raises(DocumentLockedError):
+            cv.convert_pdf(str(pdf), str(out), str(work_root))
+
+        assert calls == []
+        assert not out.exists()
+        assert not os.path.exists(layout.work_dir)
+        assert not os.path.exists(layout.repair_dir)
+
+    assert cv.convert_pdf(str(pdf), str(out), str(work_root)) == {"ok": True}
+    assert calls == [True]
+    with DocumentLock(layout.doc_work_dir, run_id="after-convert"):
+        pass
+
+
+def test_convert_releases_document_lock_when_implementation_raises(
+        tmp_path, monkeypatch):
+    out = tmp_path / "out"
+    work_root = tmp_path / "work"
+    layout = resolve_layout("book", str(out), str(work_root))
+
+    def fail(*_args, **_kwargs):
+        raise RuntimeError("conversion failed")
+
+    monkeypatch.setattr(cv, "_convert_pdf_impl", fail)
+    with pytest.raises(RuntimeError, match="conversion failed"):
+        cv.convert_pdf(str(tmp_path / "book.pdf"), str(out), str(work_root))
+
+    with DocumentLock(layout.doc_work_dir, run_id="recovery"):
+        pass
+
+
 def test_convert_full_run_A(tmp_path, monkeypatch):
     pdf = _make_scan_pdf(tmp_path, 3)
     _stub_engine(monkeypatch, _one_text_block)
@@ -64,6 +115,7 @@ def test_convert_full_run_A(tmp_path, monkeypatch):
     md = open(res["md_path"], encoding="utf-8").read()
     assert "page 1 content" in md and "page 3 content" in md
     assert res["failed_pages"] == []
+    assert res["completion_status"] == cv.CompletionStatus.OK
 
 
 def test_convert_force_ocr_processes_clean_text_pdf(tmp_path, monkeypatch):
@@ -153,6 +205,155 @@ def test_convert_bad_page_isolated(tmp_path, monkeypatch):
     assert "page 1 content" in md and "page 3 content" in md
     assert [f["page"] for f in res["failed_pages"]] == [2]
     assert res["failed_pages"][0]["kind"] == "page-exception"
+    assert res["completion_status"] == cv.CompletionStatus.SUSPECT
+
+
+def test_convert_cli_main_returns_completion_status(monkeypatch):
+    def fake_convert_pdf(*_args, **_kwargs):
+        return {
+            "route": "A", "md_path": "x.md",
+            "selfcheck": {"total": 1, "in_md": 0, "missing": ["lost"]},
+            "failed_pages": [],
+            "formula_repair": {"mode": "deterministic"},
+            "quality_repair": {"mode": "apply", "status": "SUSPECT"},
+            "completion_status": cv.CompletionStatus.SUSPECT,
+        }
+
+    monkeypatch.setattr(cv, "convert_pdf", fake_convert_pdf)
+    monkeypatch.setattr("sys.argv", ["convert.py", "--src", "x.pdf"])
+
+    assert cv.main() == cv.CompletionStatus.SUSPECT
+
+
+def test_completion_status_marks_unresolved_formula_candidate_suspect():
+    status = cv._determine_completion_status(
+        failed_pages=[],
+        selfcheck={"missing": [], "missing_assets": [],
+                   "katex_incompat": [], "column_layout_suspected": [],
+                   "inline_math_delimiter_ws": {"count": 0}},
+        source_audit={"summary": {"status": "OK"}},
+        adoption_error=False,
+        formula_repair={
+            "mode": "deterministic",
+            "formula_candidates": {"status": "ok", "count": 1},
+        },
+        quality_repair={"mode": "off"},
+    )
+
+    assert status == cv.CompletionStatus.SUSPECT
+
+
+def test_completion_status_ok_for_clean_existing_signals():
+    status = cv._determine_completion_status(
+        failed_pages=[],
+        selfcheck={"missing": [], "missing_assets": [],
+                   "katex_incompat": [], "column_layout_suspected": [],
+                   "inline_math_delimiter_ws": {"count": 0}},
+        source_audit={"summary": {"status": "NOT_APPLICABLE"}},
+        adoption_error=False,
+        formula_repair={
+            "mode": "deterministic",
+            "katex_scan": {"status": "ok", "hard_errors": 0},
+            "formula_candidates": {"status": "ok", "count": 0},
+        },
+        quality_repair={"mode": "apply", "status": "OK"},
+    )
+
+    assert status == cv.CompletionStatus.OK
+
+
+def test_completion_status_suspect_when_agents_apply_degrades_to_propose():
+    status = cv._determine_completion_status(
+        failed_pages=[],
+        selfcheck={"missing": [], "missing_assets": [],
+                   "katex_incompat": [], "column_layout_suspected": [],
+                   "inline_math_delimiter_ws": {"count": 0}},
+        source_audit={"summary": {"status": "NOT_APPLICABLE"}},
+        adoption_error=False,
+        formula_repair={
+            "mode": "agents-apply",
+            "formula_candidates": {"status": "ok", "count": 2},
+            "agents": {
+                "status": "ok", "run_mode": "propose", "applied": 0,
+                "rejected": 0, "pending_ids": [],
+                "reason": "degraded to proposal-only",
+            },
+        },
+        quality_repair={"mode": "apply", "status": "OK"},
+    )
+
+    assert status == cv.CompletionStatus.SUSPECT
+
+
+def test_completion_status_allows_column_signal_after_conclusive_quality():
+    status = cv._determine_completion_status(
+        failed_pages=[],
+        selfcheck={"missing": [], "missing_assets": [],
+                   "katex_incompat": [], "column_layout_suspected": [2, 4],
+                   "inline_math_delimiter_ws": {"count": 0}},
+        source_audit={"summary": {"status": "NOT_APPLICABLE"}},
+        adoption_error=False,
+        formula_repair={
+            "mode": "deterministic",
+            "formula_candidates": {"status": "ok", "count": 0},
+        },
+        quality_repair={
+            "mode": "apply", "status": "OK", "findings": 0,
+            "conflicts": 0, "rolled_back": False, "reason": "",
+            "stop_reason": "resolved", "unresolved": [],
+            "unresolved_events": [], "unresolved_count": 0,
+            "unresolved_event_count": 0,
+        },
+    )
+
+    assert status == cv.CompletionStatus.OK
+
+
+def test_completion_status_allows_column_signal_after_conclusive_auto_quality():
+    status = cv._determine_completion_status(
+        failed_pages=[],
+        selfcheck={"missing": [], "missing_assets": [],
+                   "katex_incompat": [], "column_layout_suspected": [2],
+                   "inline_math_delimiter_ws": {"count": 0}},
+        source_audit={"summary": {"status": "NOT_APPLICABLE"}},
+        adoption_error=False,
+        formula_repair={
+            "mode": "deterministic",
+            "formula_candidates": {"status": "ok", "count": 0},
+        },
+        quality_repair={
+            "mode": "auto", "status": "OK", "findings": 0,
+            "conflicts": 0, "rolled_back": False, "reason": "",
+            "stop_reason": "resolved", "unresolved": [],
+            "unresolved_events": [], "unresolved_count": 0,
+            "unresolved_event_count": 0,
+        },
+    )
+
+    assert status == cv.CompletionStatus.OK
+
+
+def test_completion_status_keeps_column_signal_when_quality_not_conclusive():
+    status = cv._determine_completion_status(
+        failed_pages=[],
+        selfcheck={"missing": [], "missing_assets": [],
+                   "katex_incompat": [], "column_layout_suspected": [2],
+                   "inline_math_delimiter_ws": {"count": 0}},
+        source_audit={"summary": {"status": "NOT_APPLICABLE"}},
+        adoption_error=False,
+        formula_repair={
+            "mode": "deterministic",
+            "formula_candidates": {"status": "ok", "count": 0},
+        },
+        quality_repair={
+            "mode": "apply", "status": "OK", "findings": 0,
+            "conflicts": 0, "rolled_back": False, "reason": "",
+            "stop_reason": "max_rounds", "unresolved": [],
+            "unresolved_events": [],
+        },
+    )
+
+    assert status == cv.CompletionStatus.SUSPECT
 
 
 def test_convert_empty_page_checkpointed(tmp_path, monkeypatch):
@@ -517,7 +718,8 @@ def _one_content_label_block_with_dirty_inline_math(page):
 def test_convert_selfcheck_inline_math_delimiter_ws_field_detects_residual(tmp_path, monkeypatch):
     pdf = _make_scan_pdf(tmp_path, 1)
     _stub_engine(monkeypatch, _one_content_label_block_with_dirty_inline_math)
-    res = cv.convert_pdf(pdf, str(tmp_path / "out"), dpi=100)
+    res = cv.convert_pdf(
+        pdf, str(tmp_path / "out"), dpi=100, quality_repair="off")
     field = res["selfcheck"]["inline_math_delimiter_ws"]
     assert field["count"] == 1
     assert field["samples"] == ["$ B_0 $"]
@@ -610,6 +812,26 @@ def test_reassemble_md_applies_accepted(tmp_path):
     assert md_path == layout.md_path
     md = open(md_path, encoding="utf-8").read()
     assert "good" in md and "bad" not in md
+
+
+def test_build_reassembled_markdown_does_not_overwrite_final_md(tmp_path):
+    layout = _layout(tmp_path)
+    os.makedirs(layout.work_dir, exist_ok=True)
+    os.makedirs(layout.doc_deliverable_dir, exist_ok=True)
+    with open(cp.page_res_path(layout.work_dir, 1), "w", encoding="utf-8") as f:
+        json.dump({"parsing_res_list": [
+            {"block_label": "text", "block_content": "candidate",
+             "block_order": 0}
+        ]}, f)
+    cp.save_manifest(layout.work_dir, cp.new_manifest(
+        "x.pdf", {"page_count": 1, "size_bytes": 0}, 100, "A"))
+    with open(layout.md_path, "w", encoding="utf-8") as f:
+        f.write("baseline\n")
+
+    candidate = cv.build_reassembled_markdown(layout, pdf_path=None, dpi=100)
+
+    assert "candidate" in candidate
+    assert open(layout.md_path, encoding="utf-8").read() == "baseline\n"
 
 
 def test_reassemble_md_does_not_apply_pending(tmp_path):
@@ -1034,6 +1256,166 @@ def test_stale_audit_fingerprint_recomputed(tmp_path, monkeypatch):
     assert res2["source_audit"]["pdf_fingerprint"]["page_count"] == 2  # 已重算
 
 
+def test_resume_recomputes_audit_when_page_result_content_changed_without_reocr(
+        tmp_path, monkeypatch):
+    _inject_thresholds(monkeypatch)
+    pdf = _make_prose_pdf(tmp_path, 2)
+    calls = []
+    _stub_engine_adopt(monkeypatch, calls)
+    out = str(tmp_path / "out")
+
+    first = cv.convert_pdf(pdf, out, dpi=100, born_digital_mode="ocr")
+    layout = resolve_layout("born", out)
+    old_fingerprint = dict(first["source_audit"]["ocr_fingerprint"])
+    calls.clear()
+
+    # 模拟续跑补写/修正已有 page_res；页数与 DPI 都不变。
+    page_two = cp.load_page_result(layout.work_dir, 2)
+    page_two["parsing_res_list"][0]["block_content"] = "changed OCR checkpoint"
+    with open(cp.page_res_path(layout.work_dir, 2), "w", encoding="utf-8") as f:
+        json.dump(page_two, f)
+
+    audit_calls = []
+    real_audit = cv.audit_document
+
+    def recording_audit(*args, **kwargs):
+        audit_calls.append(True)
+        return real_audit(*args, **kwargs)
+
+    monkeypatch.setattr(cv, "audit_document", recording_audit)
+    second = cv.convert_pdf(pdf, out, dpi=100, born_digital_mode="ocr")
+
+    assert calls == []                         # 只重跑审计，不重跑 OCR
+    assert audit_calls == [True]
+    assert second["source_audit"]["ocr_fingerprint"] != old_fingerprint
+
+
+def test_old_audit_without_result_set_fingerprint_is_stale(tmp_path, monkeypatch):
+    _inject_thresholds(monkeypatch)
+    pdf = _make_prose_pdf(tmp_path, 2)
+    calls = []
+    _stub_engine_adopt(monkeypatch, calls)
+    out = str(tmp_path / "out")
+    first = cv.convert_pdf(pdf, out, dpi=100, born_digital_mode="ocr")
+    layout = resolve_layout("born", out)
+    legacy = first["source_audit"]
+    legacy["ocr_fingerprint"] = {"dpi": 100, "page_count": 2}
+    with open(layout.source_audit_path, "w", encoding="utf-8") as f:
+        json.dump(legacy, f)
+    calls.clear()
+
+    audit_calls = []
+    real_audit = cv.audit_document
+
+    def recording_audit(*args, **kwargs):
+        audit_calls.append(True)
+        return real_audit(*args, **kwargs)
+
+    monkeypatch.setattr(cv, "audit_document", recording_audit)
+    cv.convert_pdf(pdf, out, dpi=100, born_digital_mode="ocr")
+
+    assert calls == []
+    assert audit_calls == [True]
+
+
+def test_resume_persists_recovered_page_before_source_audit(tmp_path, monkeypatch):
+    _inject_thresholds(monkeypatch)
+    pdf = _make_prose_pdf(tmp_path, 2)
+    calls = []
+    _stub_engine_adopt(monkeypatch, calls)
+    out = str(tmp_path / "out")
+    layout = resolve_layout("born", out)
+    for page in (1, 2):
+        _write_adopt_checkpoint(layout.work_dir, page)
+    manifest = cp.new_manifest(pdf, cp.pdf_fingerprint(pdf), 100, "B")
+    # 崩溃恢复现场：结果文件已成功落盘，但旧 manifest 仍将该页标失败。
+    manifest["failed_pages"] = [
+        {"page": 2, "kind": "page-exception", "error": "stale failure"}]
+    cp.save_manifest(layout.work_dir, manifest)
+
+    result = cv.convert_pdf(pdf, out, dpi=100, born_digital_mode="ocr")
+
+    assert calls == []
+    assert result["source_audit"]["ocr_fingerprint"]["failed_page_count"] == 0
+    assert result["source_audit"]["summary"]["issue_counts"].get("page_failed", 0) == 0
+    assert (cp.load_manifest(layout.work_dir) or {})["failed_pages"] == []
+
+
+def test_audit_freshness_binds_strong_corrections_hash(tmp_path):
+    from scripts.pipelines.textbooks.source_audit import corrections_file_fingerprint
+
+    pdf = _make_prose_pdf(tmp_path, 1)
+    out = str(tmp_path / "out")
+    layout = resolve_layout("born", out)
+    _write_adopt_checkpoint(layout.work_dir, 1)
+    cp.save_manifest(
+        layout.work_dir,
+        cp.new_manifest(pdf, cp.pdf_fingerprint(pdf), 100, "B"),
+    )
+    os.makedirs(layout.doc_work_dir, exist_ok=True)
+    first = {"stem": "born", "corrections": [{"status": "accepted", "value": "A"}]}
+    with open(layout.corrections_path, "w", encoding="utf-8") as f:
+        json.dump(first, f, sort_keys=True)
+
+    pdf_fp = cp.pdf_fingerprint(pdf)
+    report = {
+        "schema_version": cv.AUDIT_SCHEMA_VERSION,
+        "born_digital_mode": "hybrid",
+        "pdf_fingerprint": {
+            "page_count": pdf_fp["page_count"],
+            "size_bytes": pdf_fp["size_bytes"],
+        },
+        "ocr_fingerprint": cp.ocr_results_fingerprint(
+            layout.work_dir, pdf_fp["page_count"], 100),
+        "corrections_fingerprint": corrections_file_fingerprint(
+            layout.corrections_path),
+        "summary": {"issue_counts": {}},
+    }
+    assert cv._audit_fresh(
+        report, pdf, 100, "hybrid", layout.work_dir,
+        corrections_path=layout.corrections_path,
+    )
+
+    # 同长度内容变化:mtime/size 检查会漏掉,强 SHA-256 必须判旧报告 stale。
+    second = {"stem": "born", "corrections": [{"status": "accepted", "value": "B"}]}
+    with open(layout.corrections_path, "w", encoding="utf-8") as f:
+        json.dump(second, f, sort_keys=True)
+    assert os.path.getsize(layout.corrections_path) == \
+        report["corrections_fingerprint"]["size_bytes"]
+    assert not cv._audit_fresh(
+        report, pdf, 100, "hybrid", layout.work_dir,
+        corrections_path=layout.corrections_path,
+    )
+
+
+def test_audit_freshness_without_corrections_keeps_legacy_behavior(tmp_path):
+    pdf = _make_prose_pdf(tmp_path, 1)
+    out = str(tmp_path / "out")
+    layout = resolve_layout("born", out)
+    _write_adopt_checkpoint(layout.work_dir, 1)
+    cp.save_manifest(
+        layout.work_dir,
+        cp.new_manifest(pdf, cp.pdf_fingerprint(pdf), 100, "B"),
+    )
+    pdf_fp = cp.pdf_fingerprint(pdf)
+    legacy_report = {
+        "schema_version": cv.AUDIT_SCHEMA_VERSION,
+        "born_digital_mode": "hybrid",
+        "pdf_fingerprint": {
+            "page_count": pdf_fp["page_count"],
+            "size_bytes": pdf_fp["size_bytes"],
+        },
+        "ocr_fingerprint": cp.ocr_results_fingerprint(
+            layout.work_dir, pdf_fp["page_count"], 100),
+        "summary": {"issue_counts": {}},
+    }
+    assert not os.path.exists(layout.corrections_path)
+    assert cv._audit_fresh(
+        legacy_report, pdf, 100, "hybrid", layout.work_dir,
+        corrections_path=layout.corrections_path,
+    )
+
+
 def test_hybrid_then_ocr_rerun_recomputes_audit_no_stale_provenance(tmp_path, monkeypatch):
     # F1(a):hybrid 跑完后按 README 用 ocr 模式重跑(失灵回退路径)——md 变纯 OCR,
     # 旧 hybrid 报告(mode=hybrid/adoption_source=recorded)绝不得复用,必须强制重算。
@@ -1284,7 +1666,7 @@ def test_audit_write_failure_does_not_escape(tmp_path, monkeypatch):
 
 # ---------------------------------------------------------------------------
 # Task B(2026-07-17 所有者批准):单本转换收尾自动接公式修复环。
-# --formula-repair {deterministic(默认),agents,off} 三档语义,详见
+# --formula-repair {agents-apply(默认),deterministic,agents,off} 四档语义,详见
 # 04_Docs/superpowers/sdd-archive/2026-07-16-textbooks-route-b/task-B-formula-chain-brief.md
 # 引擎/LLM 全 stub,零 GPU 零真实调用。
 # ---------------------------------------------------------------------------
@@ -1328,7 +1710,7 @@ def test_formula_repair_off_makes_zero_postprocessing_calls(tmp_path, monkeypatc
     assert scan_calls == [] and triage_calls == [] and cand_calls == [] and agent_calls == []
 
 
-def test_formula_repair_deterministic_default_invokes_katex_scan(tmp_path, monkeypatch):
+def test_formula_repair_deterministic_api_default_invokes_katex_scan(tmp_path, monkeypatch):
     pdf = _make_scan_pdf(tmp_path, 1)
     _stub_engine(monkeypatch, _one_text_block)
     scan_calls, triage_calls = [], []
@@ -1445,9 +1827,10 @@ def test_convert_cli_forwards_formula_repair(monkeypatch):
     cv.main()
 
     assert captured["formula_repair"] == "agents"
+    assert captured["formula_agents"] is None
 
 
-def test_convert_cli_formula_repair_defaults_to_deterministic(monkeypatch):
+def test_convert_cli_auto_defaults_to_deterministic_formula_and_quality_apply(monkeypatch):
     captured = {}
 
     def fake_convert_pdf(*_args, **kwargs):
@@ -1461,6 +1844,76 @@ def test_convert_cli_formula_repair_defaults_to_deterministic(monkeypatch):
     cv.main()
 
     assert captured["formula_repair"] == "deterministic"
+    assert captured["quality_repair"] == "apply"
+    assert captured["quality_agents"] == []
+    assert captured["repair_workers"] == 4
+    assert captured["quality_max_rounds"] == 2
+
+
+def test_convert_cli_auto_with_explicit_agent_enables_formula_agents_apply(monkeypatch):
+    captured = {}
+
+    def fake_convert_pdf(*_args, **kwargs):
+        captured.update(kwargs)
+        return {"route": "A", "md_path": "x.md",
+                "selfcheck": {"total": 0, "in_md": 0, "missing": []},
+                "failed_pages": []}
+
+    monkeypatch.setattr(cv, "convert_pdf", fake_convert_pdf)
+    monkeypatch.setattr("sys.argv", [
+        "convert.py", "--src", "x.pdf",
+        "--repair-agent", "codex:gpt-5.6-sol:high",
+    ])
+
+    cv.main()
+
+    assert captured["formula_repair"] == "agents-apply"
+    assert captured["formula_agents"] == ["codex:gpt-5.6-sol:high"]
+    assert captured["quality_repair"] == "apply"
+    assert captured["quality_agents"] == ["codex:gpt-5.6-sol:high"]
+    assert captured["repair_workers"] == 4
+    assert captured["quality_max_rounds"] == 2
+
+
+def test_convert_cli_repair_off_maps_both_existing_stages_off(monkeypatch):
+    captured = {}
+
+    def fake_convert_pdf(*_args, **kwargs):
+        captured.update(kwargs)
+        return {"route": "A", "md_path": "x.md",
+                "selfcheck": {"total": 0, "in_md": 0, "missing": []},
+                "failed_pages": []}
+
+    monkeypatch.setattr(cv, "convert_pdf", fake_convert_pdf)
+    monkeypatch.setattr("sys.argv", [
+        "convert.py", "--src", "x.pdf", "--repair", "off",
+    ])
+
+    cv.main()
+
+    assert captured["formula_repair"] == "off"
+    assert captured["quality_repair"] == "off"
+
+
+def test_convert_cli_explicit_legacy_quality_mode_stays_single_round(monkeypatch):
+    captured = {}
+
+    def fake_convert_pdf(*_args, **kwargs):
+        captured.update(kwargs)
+        return {"route": "A", "md_path": "x.md",
+                "selfcheck": {"total": 0, "in_md": 0, "missing": []},
+                "failed_pages": []}
+
+    monkeypatch.setattr(cv, "convert_pdf", fake_convert_pdf)
+    monkeypatch.setattr("sys.argv", [
+        "convert.py", "--src", "x.pdf",
+        "--quality-repair", "apply", "--repair-max-rounds", "7",
+    ])
+
+    cv.main()
+
+    assert captured["quality_repair"] == "apply"
+    assert captured["quality_max_rounds"] == 1
 
 
 def test_convert_cli_rejects_invalid_formula_repair(monkeypatch):
@@ -1470,6 +1923,240 @@ def test_convert_cli_rejects_invalid_formula_repair(monkeypatch):
     with pytest.raises(SystemExit) as exc:
         cv.main()
     assert exc.value.code != 0
+
+
+def test_quality_repair_explicit_off_makes_no_quality_runner_call(tmp_path, monkeypatch):
+    pdf = _make_scan_pdf(tmp_path, 1)
+    _stub_engine(monkeypatch, _one_text_block)
+    _stub_katex_scan(monkeypatch, {"errors": []})
+    calls = []
+    monkeypatch.setattr(cv, "_run_quality_repair", lambda *a, **k: calls.append((a, k)))
+    result = cv.convert_pdf(pdf, str(tmp_path / "out"), dpi=100,
+                            formula_repair="off", quality_repair="off")
+    assert calls == []
+    assert result["quality_repair"] == {"mode": "off"}
+
+
+def test_convert_python_api_defaults_are_safe_and_do_not_use_frozen_agents(
+        tmp_path, monkeypatch):
+    pdf = _make_scan_pdf(tmp_path, 1)
+    _stub_engine(monkeypatch, _one_text_block)
+    calls = []
+    monkeypatch.setattr(
+        cv, "default_adapters",
+        lambda: pytest.fail("Python API defaults must not invoke frozen Agents"))
+
+    def fake_quality(_layout, mode, *_args, **_kwargs):
+        calls.append(mode)
+        return {"mode": mode, "status": "OK", "findings": 0}
+
+    monkeypatch.setattr(cv, "_run_quality_repair", fake_quality)
+
+    result = cv.convert_pdf(pdf, str(tmp_path / "out"), dpi=100)
+
+    assert result["formula_repair"]["mode"] == "deterministic"
+    assert calls == ["apply"]
+
+
+def test_quality_repair_audit_runs_once_after_formula_tail(tmp_path, monkeypatch):
+    pdf = _make_scan_pdf(tmp_path, 1)
+    _stub_engine(monkeypatch, _one_text_block)
+    calls = []
+
+    def fake_quality(layout, mode, agents, discovery, learn, timeout, **kwargs):
+        calls.append((layout.stem, mode, agents, discovery, learn, timeout, kwargs))
+        return {"mode": mode, "status": "OK", "findings": 0}
+
+    monkeypatch.setattr(cv, "_run_quality_repair", fake_quality)
+    result = cv.convert_pdf(
+        pdf, str(tmp_path / "out"), dpi=100, formula_repair="off",
+        quality_repair="audit", quality_agents=["codex:gpt-5.6-sol:high"],
+        quality_discovery="signals", quality_learn="package",
+        quality_agent_timeout=123)
+    assert calls == [("scan", "audit", ["codex:gpt-5.6-sol:high"],
+                      "signals", "package", 123,
+                      {"workers": 1, "max_rounds": 1})]
+    assert result["quality_repair"]["status"] == "OK"
+
+
+def test_formula_then_quality_each_see_and_return_refreshed_selfcheck(
+        tmp_path, monkeypatch):
+    pdf = _make_scan_pdf(tmp_path, 1)
+    _stub_engine(monkeypatch, _one_text_block)
+    observed = {}
+
+    def fake_formula(layout, *_args, **_kwargs):
+        with open(layout.md_path, "w", encoding="utf-8") as handle:
+            handle.write("formula now has $ x $ delimiter whitespace\n")
+        return {
+            "mode": "deterministic",
+            "formula_candidates": {"status": "ok", "count": 0},
+        }
+
+    def fake_quality(layout, mode, *_args, **_kwargs):
+        with open(layout.selfcheck_path, encoding="utf-8") as handle:
+            observed["before_quality"] = json.load(handle)
+        with open(layout.md_path, "w", encoding="utf-8") as handle:
+            handle.write("formula is repaired as $x$\n")
+        return {"mode": mode, "status": "OK", "findings": 0}
+
+    monkeypatch.setattr(cv, "_run_formula_repair", fake_formula)
+    monkeypatch.setattr(cv, "_run_quality_repair", fake_quality)
+
+    result = cv.convert_pdf(
+        pdf, str(tmp_path / "out"), dpi=100,
+        formula_repair="deterministic", quality_repair="audit")
+
+    assert observed["before_quality"]["inline_math_delimiter_ws"]["count"] == 1
+    assert result["selfcheck"]["inline_math_delimiter_ws"]["count"] == 0
+    with open(_layout(tmp_path / "out").selfcheck_path, encoding="utf-8") as handle:
+        on_disk = json.load(handle)
+    assert on_disk["inline_math_delimiter_ws"]["count"] == 0
+    assert result["completion_status"] == cv.CompletionStatus.OK
+
+
+def _quality_apply_result(*, finding, applied, report_dir, reason=""):
+    findings = () if finding is None else (finding,)
+    return SimpleNamespace(
+        proposal_run=SimpleNamespace(
+            summary=SimpleNamespace(
+                finding_count=1, report_dir=str(report_dir)),
+            patch_plan=SimpleNamespace(conflicts=()),
+            findings=() if finding is None else (finding,),
+            event_batch=SimpleNamespace(events=()),
+        ),
+        transaction=SimpleNamespace(
+            applied=applied, rolled_back=False, reason=reason),
+        after_findings=findings,
+    )
+
+
+def test_quality_apply_reaudits_until_resolved_and_forwards_workers(
+        tmp_path, monkeypatch):
+    from scripts.pipelines.textbooks.quality_repair import engine
+
+    layout = resolve_layout(
+        "book", str(tmp_path / "out"), str(tmp_path / "work"))
+    os.makedirs(layout.doc_deliverable_dir, exist_ok=True)
+    os.makedirs(layout.work_dir, exist_ok=True)
+    with open(layout.md_path, "w", encoding="utf-8") as handle:
+        handle.write("before\n")
+    finding = Finding.create(
+        capability="test", kind="test_issue", severity=Severity.P1,
+        message="still present", page=7)
+    calls = []
+
+    def fake_apply(context, **kwargs):
+        calls.append((context.run_dir.name, kwargs["agent_workers"]))
+        with open(layout.md_path, "a", encoding="utf-8") as handle:
+            handle.write(f"round-{len(calls)}\n")
+        return _quality_apply_result(
+            finding=finding if len(calls) == 1 else None,
+            applied=1, report_dir=context.run_dir)
+
+    monkeypatch.setattr(engine, "apply_document", fake_apply)
+
+    result = cv._run_quality_repair(
+        layout, "apply", [], "signals", "off", 30,
+        workers=3, max_rounds=4)
+
+    assert calls == [("round-01", 3), ("round-02", 3)]
+    assert result["status"] == "OK"
+    assert result["round_count"] == 2
+    assert result["stop_reason"] == "resolved"
+    assert result["applied"] == 2
+    assert result["unresolved"] == []
+
+
+def test_quality_apply_stops_immediately_when_no_progress(
+        tmp_path, monkeypatch):
+    from scripts.pipelines.textbooks.quality_repair import engine
+
+    layout = resolve_layout(
+        "book", str(tmp_path / "out"), str(tmp_path / "work"))
+    os.makedirs(layout.doc_deliverable_dir, exist_ok=True)
+    os.makedirs(layout.work_dir, exist_ok=True)
+    with open(layout.md_path, "w", encoding="utf-8") as handle:
+        handle.write("unchanged\n")
+    finding = Finding.create(
+        capability="test", kind="test_issue", severity=Severity.P1,
+        message="cannot fix safely", page=9)
+    calls = []
+
+    def fake_apply(context, **kwargs):
+        calls.append(context.run_dir)
+        return _quality_apply_result(
+            finding=finding, applied=0, report_dir=context.run_dir,
+            reason="empty patch plan")
+
+    monkeypatch.setattr(engine, "apply_document", fake_apply)
+
+    result = cv._run_quality_repair(
+        layout, "apply", [], "signals", "off", 30,
+        workers=2, max_rounds=5)
+
+    assert len(calls) == 1
+    assert result["status"] == "SUSPECT"
+    assert result["stop_reason"] == "no_progress"
+    assert result["unresolved_count"] == 1
+    assert result["unresolved"][0]["page"] == 9
+
+
+def test_quality_apply_honors_max_rounds_when_each_round_progresses(
+        tmp_path, monkeypatch):
+    from scripts.pipelines.textbooks.quality_repair import engine
+
+    layout = resolve_layout(
+        "book", str(tmp_path / "out"), str(tmp_path / "work"))
+    os.makedirs(layout.doc_deliverable_dir, exist_ok=True)
+    os.makedirs(layout.work_dir, exist_ok=True)
+    with open(layout.md_path, "w", encoding="utf-8") as handle:
+        handle.write("before\n")
+    finding = Finding.create(
+        capability="test", kind="moving_issue", severity=Severity.P1,
+        message="more work remains", page=11)
+    calls = []
+
+    def fake_apply(context, **kwargs):
+        calls.append(context.run_dir)
+        with open(layout.md_path, "a", encoding="utf-8") as handle:
+            handle.write(f"progress-{len(calls)}\n")
+        return _quality_apply_result(
+            finding=finding, applied=1, report_dir=context.run_dir)
+
+    monkeypatch.setattr(engine, "apply_document", fake_apply)
+
+    result = cv._run_quality_repair(
+        layout, "apply", [], "signals", "off", 30,
+        workers=2, max_rounds=3)
+
+    assert len(calls) == 3
+    assert result["round_count"] == 3
+    assert result["stop_reason"] == "max_rounds"
+    assert result["status"] == "SUSPECT"
+
+
+def test_convert_cli_forwards_quality_configuration(monkeypatch):
+    captured = {}
+
+    def fake_convert_pdf(*_args, **kwargs):
+        captured.update(kwargs)
+        return {"route": "A", "md_path": "x.md",
+                "selfcheck": {"total": 0, "in_md": 0, "missing": []},
+                "failed_pages": [], "quality_repair": {"mode": "off"}}
+
+    monkeypatch.setattr(cv, "convert_pdf", fake_convert_pdf)
+    monkeypatch.setattr("sys.argv", [
+        "convert.py", "--src", "x.pdf", "--quality-repair", "propose",
+        "--quality-agent", "codex:gpt-5.6-sol:high",
+        "--quality-agent", "gemini:Gemini-3.1-Pro:high",
+        "--quality-discovery", "signals", "--quality-learn", "package",
+    ])
+    cv.main()
+    assert captured["quality_repair"] == "propose"
+    assert captured["quality_agents"] == ["codex:gpt-5.6-sol:high",
+                                           "gemini:Gemini-3.1-Pro:high"]
+    assert captured["quality_learn"] == "package"
 
 
 def test_formula_repair_agents_calls_agent_chain_with_propose_mode(tmp_path, monkeypatch):
@@ -1715,3 +2402,60 @@ def test_formula_repair_agents_end_to_end_writes_pending_corrections(tmp_path, m
     assert all(c["status"] == "pending" for c in payload["corrections"])
     md_after = open(layout.md_path, encoding="utf-8").read()
     assert md_after == "# book\n"          # propose 模式绝不改 md
+
+
+def test_run_agents_stage_uses_explicit_agent_models_in_user_order(tmp_path, monkeypatch):
+    layout = resolve_layout("book", str(tmp_path / "out"))
+    constructed = []
+    captured = {}
+
+    def fake_cli_adapter(provider, *, model, effort):
+        constructed.append((provider, model, effort))
+        return FakeAdapter(provider, model=model, effort=effort)
+
+    def fake_run_agents(layout, *, adapters, **kwargs):
+        captured["adapters"] = adapters
+        captured["kwargs"] = kwargs
+        from scripts.pipelines.textbooks.formula_agents.orchestrator import RunReport
+        return RunReport(stem=layout.stem, mode=kwargs["mode"])
+
+    monkeypatch.setattr(cv, "CliAdapter", fake_cli_adapter)
+    monkeypatch.setattr(
+        cv, "default_adapters",
+        lambda: pytest.fail("explicit Agent chain must not use frozen defaults"))
+    monkeypatch.setattr(cv, "run_agents", fake_run_agents)
+
+    result = cv._run_agents_stage(
+        layout, pdf_path="", dpi=150, agent_mode="apply",
+        agent_specs=[
+            RepairAgentSpec("codex", "gpt-5.6-sol", "high"),
+            RepairAgentSpec("gemini", "gemini-pro", "medium"),
+        ],
+        workers=2,
+    )
+
+    assert result["status"] == "ok"
+    assert constructed == [
+        ("codex", "gpt-5.6-sol", "high"),
+        ("gemini", "gemini-pro", "medium"),
+    ]
+    assert [adapter.name for adapter in captured["adapters"]] == [
+        "codex", "gemini"]
+    assert captured["kwargs"]["per_provider"] == 2
+    assert captured["kwargs"]["max_workers"] == 2
+
+
+def test_run_agents_stage_explicit_empty_chain_never_uses_frozen_defaults(
+        tmp_path, monkeypatch):
+    layout = resolve_layout("book", str(tmp_path / "out"))
+    monkeypatch.setattr(
+        cv, "default_adapters",
+        lambda: pytest.fail("explicit empty chain must not use frozen defaults"))
+    monkeypatch.setattr(
+        cv, "run_agents",
+        lambda *args, **kwargs: pytest.fail("empty chain must not call Agent"))
+
+    result = cv._run_agents_stage(
+        layout, pdf_path="", dpi=150, agent_mode="apply", agent_specs=[])
+
+    assert result["status"] == "degraded_deterministic"

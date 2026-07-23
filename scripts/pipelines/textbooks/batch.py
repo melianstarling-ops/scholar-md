@@ -11,6 +11,7 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import os
 import sys
@@ -21,6 +22,16 @@ from scripts.pipelines.textbooks import katex_triage
 from scripts.pipelines.textbooks.katex_scan import scan_katex_work_pages
 from scripts.pipelines.textbooks.paths import resolve_layout
 from scripts.pipelines.textbooks.power import keep_system_awake
+from scripts.pipelines.textbooks.repair_policy import (
+    CompletionStatus,
+    FORMULA_REPAIR_MODES,
+    QUALITY_REPAIR_MODES,
+    RepairPolicy,
+    add_repair_policy_arguments,
+    quality_final_is_conclusive,
+    repair_policy_from_namespace,
+    source_audit_blocks_completion,
+)
 from scripts.pipelines.textbooks.selfcheck import build_source_audit_field
 from scripts.pipelines.textbooks.watchdog import run_until_done
 
@@ -48,24 +59,18 @@ DEFAULT_SUSPECT_PRINT_LIMIT = 5
 # audit 报告 schema 版本——与 convert.py/source_audit.py 的 schema_version 同步维护
 # (独立常量,不跨模块 import convert.py 制造不必要耦合;风格同 selfcheck.py 里类似的
 # "只读参考,独立维护"惯例)。
-AUDIT_SCHEMA_VERSION = 2
+AUDIT_SCHEMA_VERSION = 6
 
 # 与 convert.py 的 BORN_DIGITAL_MODES 同步维护(独立常量,同上惯例)。
 BORN_DIGITAL_MODES = ("defer", "ocr", "hybrid")
 
 # 与 convert.py 的 FORMULA_REPAIR_MODES 同步维护(独立常量,同上惯例)。
 #
-# batch 默认值取舍(Task B,与 convert.py 默认 "deterministic" 刻意不同——见
-# task-B-report 里的说明):batch 收尾早在本任务之前就已有自己一套 katex_scan +
-# katex_triage 自动化(见下方 run() 里的 katex_scan_enabled 分支),默认打开、
-# 已跑通、已有回归测试覆盖。若这里默认也改成 "deterministic" 并透传给每本书的
-# convert.py 子进程,batch 现有收尾步骤与 convert 内建步骤会对同一本书各自独立
-# 跑一遍 katex_scan/katex_triage——不是崩溃风险,但是浪费(双跑)。默认 "off":
-# 不透传给子进程,batch 收尾沿用它自己已有的自动化,零行为变化、零测试改动。
-# 用户显式选 --formula-repair {deterministic,agents,agents-apply} 时才透传给
-# 子进程,并同时关闭 batch 自己的收尾分支(见 run() 内 dedup 逻辑,keyed on
-# != "off",agents-apply 天然享受同样的去重),避免双跑。
-FORMULA_REPAIR_MODES = ("deterministic", "agents", "agents-apply", "off")
+# 三入口默认统一为 agents-apply。batch 将该值透传给 convert.py，并在
+# formula_repair != "off" 时关闭自己早期遗留的 katex_scan/katex_triage 收尾，
+# 保证同一本书只跑一遍公式后处理。只有显式选择 off 时才走 batch 遗留收尾。
+QUALITY_DISCOVERY_MODES = ("off", "signals")
+QUALITY_LEARN_MODES = ("off", "package")
 
 # selfcheck.json 里紧凑 source_audit 字段做分级要用到的最小键集合——用来判断该字段
 # 是否结构完好,而非"字段存在就信"(Review Important 1:字段存在但类型/结构损坏时,
@@ -125,11 +130,126 @@ def _already_done(out_root: Path, work_root: Path | None, pdf_path: Path, dpi: i
     return not todo
 
 
+def _repair_stages_complete(
+        layout, *, formula_repair: str, quality_repair: str) -> bool:
+    """Whether --resume may skip post-processing as well as OCR checkpoints."""
+    if formula_repair != "off":
+        if not os.path.exists(layout.formula_repair_path):
+            return False
+        try:
+            with open(layout.formula_repair_path, encoding="utf-8") as handle:
+                formula = json.load(handle)
+        except Exception:                           # noqa: BLE001 corrupt sidecar => rerun
+            return False
+        if not isinstance(formula, dict) or formula.get("status") == "error":
+            return False
+        candidates = int(
+            (formula.get("formula_candidates") or {}).get("count") or 0)
+        if formula.get("mode") == "deterministic" and candidates:
+            return False
+        agents = formula.get("agents")
+        if formula_repair in {"agents", "agents-apply"}:
+            if not isinstance(agents, dict) or agents.get("status") != "ok":
+                return False
+            if (agents.get("pending_ids") or agents.get("circuit_broken")
+                    or agents.get("rolled_back")
+                    or int(agents.get("rejected") or 0) > 0):
+                return False
+            if (formula_repair == "agents-apply" and candidates
+                    and agents.get("run_mode") != "apply"):
+                return False
+
+    if quality_repair == "off":
+        return True
+    source_audit = _fresh_source_audit_for_resume(layout)
+    if source_audit is None:
+        return False
+    quality = _read_quality_repair_result(layout)
+    if quality is None or quality.get("status") == "error":
+        return False
+    expected_hash = quality.get("after_sha256")
+    if not isinstance(expected_hash, str) or not os.path.isfile(layout.md_path):
+        return False
+    actual_hash = hashlib.sha256(Path(layout.md_path).read_bytes()).hexdigest()
+    if actual_hash != expected_hash:
+        return False
+    if quality_repair == "apply":
+        return (
+            quality_final_is_conclusive(quality)
+            and not source_audit_blocks_completion(source_audit, quality)
+        )
+    return True
+
+
+def _content_fingerprint(path: str) -> dict | None:
+    try:
+        payload = Path(path).read_bytes()
+    except OSError:
+        return None
+    return {
+        "size_bytes": len(payload),
+        "sha256": hashlib.sha256(payload).hexdigest(),
+    }
+
+
+def _fresh_source_audit_for_resume(layout) -> dict | None:
+    """Return the current source audit, or ``None`` when any input is stale."""
+
+    try:
+        with open(layout.source_audit_path, encoding="utf-8") as handle:
+            report = json.load(handle)
+    except (OSError, ValueError):
+        return None
+    if (not isinstance(report, dict)
+            or report.get("schema_version") != AUDIT_SCHEMA_VERSION
+            or report.get("stem") != layout.stem):
+        return None
+
+    manifest = cp.load_manifest(layout.work_dir)
+    if not isinstance(manifest, dict):
+        return None
+    pdf_path = manifest.get("pdf_path")
+    dpi = manifest.get("dpi")
+    if (not isinstance(pdf_path, str) or not pdf_path
+            or not isinstance(dpi, int) or isinstance(dpi, bool) or dpi <= 0):
+        return None
+    try:
+        current_pdf = cp.pdf_fingerprint(pdf_path)
+    except (OSError, RuntimeError, ValueError):
+        return None
+    recorded_pdf = report.get("pdf_fingerprint")
+    if not isinstance(recorded_pdf, dict):
+        return None
+    if any(recorded_pdf.get(key) != current_pdf[key]
+           for key in ("size_bytes", "page_count")):
+        return None
+    if "sha256" in recorded_pdf:
+        current_pdf_content = _content_fingerprint(pdf_path)
+        if (current_pdf_content is None
+                or recorded_pdf.get("sha256")
+                != current_pdf_content["sha256"]):
+            return None
+
+    current_ocr = cp.ocr_results_fingerprint(
+        layout.work_dir, current_pdf["page_count"], dpi)
+    if report.get("ocr_fingerprint") != current_ocr:
+        return None
+    if report.get("corrections_fingerprint") != _content_fingerprint(
+            layout.corrections_path):
+        return None
+    return report
+
+
 def _job_argv(pdf: Path, out_root: Path, work_root: Path | None, dpi: int,
               no_selfcheck_json: bool, allow_sleep: bool = False,
               force_ocr: bool = False, work_hours: float = 6,
               rest_minutes: float = 40, born_digital_mode: str = "hybrid",
-              formula_repair: str = "off") -> list[str]:
+              formula_repair: str = "deterministic", quality_repair: str = "apply",
+              quality_agents: list[str] | None = None,
+              quality_discovery: str = "signals", quality_learn: str = "off",
+              quality_agent_timeout: int = 300,
+              formula_agents: list[str] | None = None,
+              repair_policy: RepairPolicy | None = None) -> list[str]:
     argv = ["--src", str(pdf), "--out", str(out_root), "--dpi", str(dpi)]
     if work_root:
         argv.extend(["--work-dir", str(work_root)])
@@ -142,7 +262,29 @@ def _job_argv(pdf: Path, out_root: Path, work_root: Path | None, dpi: int,
     if allow_sleep:
         argv.append("--allow-sleep")
     argv.extend(["--born-digital-mode", born_digital_mode])
-    argv.extend(["--formula-repair", formula_repair])
+    if repair_policy is None:
+        argv.extend(["--formula-repair", formula_repair])
+        argv.extend(["--quality-repair", quality_repair])
+        for agent in quality_agents or []:
+            argv.extend(["--quality-agent", agent])
+        for agent in formula_agents or []:
+            argv.extend(["--repair-agent", agent])
+    else:
+        argv.extend(["--repair", repair_policy.mode,
+                     "--repair-workers", str(repair_policy.workers),
+                     "--repair-max-rounds", str(repair_policy.max_rounds)])
+        for spec in repair_policy.formula_agents:
+            argv.extend(["--repair-agent", spec.to_cli()])
+        if repair_policy.legacy_formula_explicit:
+            argv.extend(["--formula-repair", repair_policy.formula_mode])
+        if repair_policy.legacy_quality_explicit:
+            argv.extend(["--quality-repair", repair_policy.quality_mode])
+        if repair_policy.legacy_quality_agents_explicit:
+            for spec in repair_policy.quality_agents:
+                argv.extend(["--quality-agent", spec.to_cli()])
+    argv.extend(["--quality-discovery", quality_discovery,
+                 "--quality-learn", quality_learn,
+                 "--quality-agent-timeout", str(quality_agent_timeout)])
     return argv
 
 
@@ -211,7 +353,7 @@ def _read_summary(out_root: Path, work_root: Path | None, pdf: Path, *,
     if deferred_marker.exists():
         return {"stem": pdf.stem, "status": "B", "route": "B",
                 "failed_pages": 0, "selfcheck": None, "source_audit_grade": None,
-                "formula_repair_flag": None}
+                "formula_repair_flag": None, "quality_repair_flag": None}
     layout = resolve_layout(pdf.stem, str(out_root),
                             str(work_root) if work_root else None)
     manifest = cp.load_manifest(layout.work_dir)
@@ -227,13 +369,16 @@ def _read_summary(out_root: Path, work_root: Path | None, pdf: Path, *,
         source_audit_field = _disk_audit_fallback(layout, pdf, dpi)
     grade = _grade_source_audit(source_audit_field, total_pages,
                                 severe_issue_codes=severe_issue_codes)
+    quality_result = _read_quality_repair_result(layout)
     status = "SUSPECT" if failed_pages else "OK"
-    if grade and grade["status"] == "SUSPECT":
+    if (source_audit_blocks_completion(source_audit_field, quality_result)
+            and (source_audit_field or {}).get("status") != "UNSCORABLE"):
         status = "SUSPECT"
     return {"stem": pdf.stem, "status": status, "route": route,
             "failed_pages": len(failed_pages), "selfcheck": selfcheck,
             "source_audit_grade": grade,
-            "formula_repair_flag": _read_formula_repair_flag(layout)}
+            "formula_repair_flag": _read_formula_repair_flag(layout),
+            "quality_repair_flag": _read_quality_repair_flag(layout)}
 
 
 def _read_formula_repair_flag(layout) -> str | None:
@@ -258,6 +403,44 @@ def _read_formula_repair_flag(layout) -> str | None:
         return "circuit_broken"
     if agents.get("rolled_back"):
         return "rolled_back"
+    return None
+
+
+def _read_quality_repair_result(layout) -> dict | None:
+    path = os.path.join(layout.quality_repair_dir, "latest.json")
+    if not os.path.exists(path):
+        return None
+    try:
+        with open(path, encoding="utf-8") as handle:
+            data = json.load(handle)
+    except Exception:                              # noqa: BLE001 批量汇总不逃逸
+        return {"mode": "unknown", "status": "error"}
+    return data if isinstance(data, dict) else {"mode": "unknown", "status": "error"}
+
+
+def _read_quality_repair_flag(layout) -> str | None:
+    """读取显式 quality-repair run 的紧凑异常标志；未运行/旧书返回 None。"""
+    data = _read_quality_repair_result(layout)
+    if data is None:
+        return None
+    if data.get("mode") == "unknown" and data.get("status") == "error":
+        return "report_error"
+    if data.get("mode") == "off":
+        return None
+    if data.get("status") == "error":
+        return "run_error"
+    if data.get("rolled_back"):
+        return "rolled_back"
+    if int(data.get("conflicts") or 0) > 0:
+        return "conflicts"
+    counts = data.get("severity_counts") or {}
+    if int(counts.get("P0") or 0) > 0:
+        return "P0_findings"
+    if int(counts.get("P1") or 0) > 0:
+        return "P1_findings"
+    reason = str(data.get("reason") or "")
+    if reason and reason != "empty patch plan":
+        return "apply_blocked"
     return None
 
 
@@ -290,11 +473,24 @@ def run(src_paths: list[str], out: str | None = None, dpi: int = cp.DEFAULT_DPI,
         severe_issue_codes: frozenset = DEFAULT_SEVERE_ISSUE_CODES,
         suspect_print_limit: int = DEFAULT_SUSPECT_PRINT_LIMIT,
         born_digital_mode: str = "hybrid",
-        formula_repair: str = "off") -> tuple[int, list[dict]]:
+        formula_repair: str = "deterministic", quality_repair: str = "apply",
+        quality_agents: list[str] | None = None,
+        quality_discovery: str = "signals", quality_learn: str = "off",
+        quality_agent_timeout: int = 300,
+        formula_agents: list[str] | None = None,
+        repair_policy: RepairPolicy | None = None) -> tuple[int, list[dict]]:
     if work_hours <= 0 or rest_minutes <= 0:
         raise ValueError("work_hours 与 rest_minutes 必须大于 0")
     if formula_repair not in FORMULA_REPAIR_MODES:
         raise ValueError(f"formula_repair 须为 {FORMULA_REPAIR_MODES},收到 {formula_repair!r}")
+    if quality_repair not in QUALITY_REPAIR_MODES:
+        raise ValueError(f"quality_repair 须为 {QUALITY_REPAIR_MODES},收到 {quality_repair!r}")
+    if quality_discovery not in QUALITY_DISCOVERY_MODES:
+        raise ValueError(f"quality_discovery 须为 {QUALITY_DISCOVERY_MODES},收到 {quality_discovery!r}")
+    if quality_learn not in QUALITY_LEARN_MODES:
+        raise ValueError(f"quality_learn 须为 {QUALITY_LEARN_MODES},收到 {quality_learn!r}")
+    if quality_agent_timeout <= 0:
+        raise ValueError("quality_agent_timeout 必须大于 0")
     # Task B dedup(见 FORMULA_REPAIR_MODES 上方注释):formula_repair != "off" 时
     # 每本书的 convert.py 子进程会自己跑 katex_scan+katex_triage,batch 收尾这里
     # 对应步骤必须让路,不管调用方传的 katex_scan_enabled 是什么——避免双跑。
@@ -313,6 +509,13 @@ def run(src_paths: list[str], out: str | None = None, dpi: int = cp.DEFAULT_DPI,
         if resume:
             try:
                 skip = _already_done(out_root, work_root, pdf, dpi)
+                if skip:
+                    layout = resolve_layout(
+                        pdf.stem, str(out_root),
+                        str(work_root) if work_root else None)
+                    skip = _repair_stages_complete(
+                        layout, formula_repair=formula_repair,
+                        quality_repair=quality_repair)
             except Exception as e:
                 print(f"  [WARN] {pdf.stem}: --resume 指纹校验失败"
                       f"({type(e).__name__}: {e}),按未完成处理")
@@ -320,21 +523,27 @@ def run(src_paths: list[str], out: str | None = None, dpi: int = cp.DEFAULT_DPI,
             print(f"  [SKIP] {pdf.stem}")
             results.append({"stem": pdf.stem, "status": "SKIP", "route": None,
                              "failed_pages": 0, "selfcheck": None, "source_audit_grade": None,
-                             "formula_repair_flag": None})
+                             "formula_repair_flag": None, "quality_repair_flag": None})
             continue
         argv = _job_argv(pdf, out_root, work_root, dpi, no_selfcheck_json, allow_sleep,
                          force_ocr, work_hours, rest_minutes, born_digital_mode,
-                         formula_repair)
+                          formula_repair, quality_repair, quality_agents,
+                          quality_discovery, quality_learn, quality_agent_timeout,
+                          formula_agents, repair_policy)
         rc = run_until_done(argv, max_restarts=max_restarts, runner=runner)
-        if rc != 0:
+        if rc == CompletionStatus.FAILED:
             n_giveup += 1
             print(f"  [GIVEUP] {pdf.stem}")
             results.append({"stem": pdf.stem, "status": "GIVEUP", "route": None,
                              "failed_pages": 0, "selfcheck": None, "source_audit_grade": None,
-                             "formula_repair_flag": None})
+                             "formula_repair_flag": None, "quality_repair_flag": None,
+                             "completion_status": CompletionStatus.FAILED})
             continue
         summary = _read_summary(out_root, work_root, pdf,
                                 severe_issue_codes=severe_issue_codes, dpi=dpi)
+        if rc == CompletionStatus.SUSPECT:
+            summary["status"] = "SUSPECT"
+            summary["completion_status"] = CompletionStatus.SUSPECT
         if katex_scan_enabled and summary["status"] != "B":
             layout = resolve_layout(pdf.stem, str(out_root),
                                     str(work_root) if work_root else None)
@@ -363,8 +572,10 @@ def run(src_paths: list[str], out: str | None = None, dpi: int = cp.DEFAULT_DPI,
                                              limit=suspect_print_limit)
             fr_flag = summary.get("formula_repair_flag")
             fr_line = f" fr={fr_flag}" if fr_flag else ""
+            qr_flag = summary.get("quality_repair_flag")
+            qr_line = f" qr={qr_flag}" if qr_flag else ""
             print(f"  [{summary['status']}] {pdf.stem} — route={summary['route']} "
-                  f"failed_pages={summary['failed_pages']}{cov}{audit_line}{fr_line}")
+                  f"failed_pages={summary['failed_pages']}{cov}{audit_line}{fr_line}{qr_line}")
 
     def _is_unscorable(result: dict) -> bool:
         # 审计"读不出"(报告缺失/半截/过期)不该悄悄跟"审计判 OK"共享 OK 计数——
@@ -382,13 +593,26 @@ def run(src_paths: list[str], out: str | None = None, dpi: int = cp.DEFAULT_DPI,
         1 for r in results
         if r["status"] in ("OK", "B") and _has_formula_repair_flag(r) and not _is_unscorable(r)
     )
-    n_ok = sum(1 for r in results if r["status"] in ("OK", "B")) - n_unscorable - n_formula_repair_flag
+    n_quality_repair_flag = sum(
+        1 for r in results
+        if r["status"] in ("OK", "B") and r.get("quality_repair_flag")
+        and not _is_unscorable(r) and not _has_formula_repair_flag(r)
+    )
+    n_ok = (sum(1 for r in results if r["status"] in ("OK", "B"))
+            - n_unscorable - n_formula_repair_flag - n_quality_repair_flag)
     n_suspect = sum(1 for r in results if r["status"] == "SUSPECT")
     n_skip = sum(1 for r in results if r["status"] == "SKIP")
     print(f"\n{'=' * 56}\n批处理完成: {n_ok} OK/B / {n_suspect} SUSPECT / "
           f"{n_unscorable} UNSCORABLE / {n_giveup} GIVEUP / {n_skip} SKIP / "
-          f"{n_formula_repair_flag} FR_FLAG → {out_root}")
-    return (1 if n_giveup else 0), results
+          f"{n_formula_repair_flag} FR_FLAG / {n_quality_repair_flag} QR_FLAG → {out_root}")
+    if n_giveup:
+        completion_status = CompletionStatus.FAILED
+    elif (n_suspect or n_unscorable or n_formula_repair_flag
+          or n_quality_repair_flag):
+        completion_status = CompletionStatus.SUSPECT
+    else:
+        completion_status = CompletionStatus.OK
+    return int(completion_status), results
 
 
 def main() -> int:
@@ -416,15 +640,19 @@ def main() -> int:
     ap.add_argument("--born-digital-mode", choices=list(BORN_DIGITAL_MODES), default="hybrid",
                     help="路线 B(born-digital)采信模式:hybrid=块级混合采信(默认)/"
                          "defer=登记不转(回退开关)/ocr=完全走 OCR 忽略文本层(回退开关,转发给每本书的 convert.py)")
-    ap.add_argument("--formula-repair", choices=list(FORMULA_REPAIR_MODES), default="off",
-                    help="转发给每本书 convert.py 的公式修复环档位(默认 off,沿用 batch "
-                         "自身已有的 katex_scan+katex_triage 收尾自动化,不与 convert 内建"
-                         "步骤双跑):deterministic/agents/agents-apply 均会转发给子进程且"
-                         "自动关闭 batch 自己对应的收尾步骤;agents-apply 为全自动应用档"
-                         "(2026-07-18 裁决,安全由 orchestrator 内建熔断/回滚/快照承担)")
+    add_repair_policy_arguments(ap)
+    ap.add_argument("--quality-discovery", choices=list(QUALITY_DISCOVERY_MODES),
+                    default="signals")
+    ap.add_argument("--quality-learn", choices=list(QUALITY_LEARN_MODES), default="off")
+    ap.add_argument("--quality-agent-timeout", type=int, default=300)
     args = ap.parse_args()
     if args.work_hours <= 0 or args.rest_minutes <= 0:
         ap.error("--work-hours 与 --rest-minutes 必须大于 0")
+    repair_policy = repair_policy_from_namespace(args)
+    formula_agents = (
+        None if repair_policy.use_legacy_formula_chain
+        else [spec.to_cli() for spec in repair_policy.formula_agents]
+    )
 
     src_paths = args.src if args.src else [str(DEFAULT_SOURCE_ROOT)]
     try:
@@ -447,7 +675,14 @@ def main() -> int:
                         work_hours=args.work_hours,
                         rest_minutes=args.rest_minutes,
                         born_digital_mode=args.born_digital_mode,
-                        formula_repair=args.formula_repair)
+                        formula_repair=repair_policy.runtime_formula_repair,
+                        quality_repair=repair_policy.runtime_quality_repair,
+                        quality_agents=list(repair_policy.runtime_quality_agents),
+                        quality_discovery=args.quality_discovery,
+                        quality_learn=args.quality_learn,
+                        quality_agent_timeout=args.quality_agent_timeout,
+                        formula_agents=formula_agents,
+                        repair_policy=repair_policy)
         return rc
     except ValueError as e:
         print(f"[ERROR] {e}", file=sys.stderr)

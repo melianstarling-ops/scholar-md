@@ -1,3 +1,4 @@
+import hashlib
 import json
 import os
 from pathlib import Path
@@ -124,6 +125,177 @@ def test_already_done_false_when_page_exception_pending(tmp_path):
     assert bp._already_done(out_root, None, pdf, 150) is False    # 瞬时失败页仍算未完成,允许重试
 
 
+def test_repair_stages_incomplete_when_latest_apply_is_suspect(tmp_path):
+    layout = resolve_layout("book", str(tmp_path / "out"))
+    os.makedirs(layout.quality_repair_dir, exist_ok=True)
+    with open(os.path.join(layout.quality_repair_dir, "latest.json"), "w",
+              encoding="utf-8") as handle:
+        json.dump({
+            "mode": "apply", "status": "SUSPECT", "findings": 1,
+            "unresolved_count": 1,
+        }, handle)
+
+    assert bp._repair_stages_complete(
+        layout, formula_repair="off", quality_repair="apply") is False
+
+
+def test_repair_stages_require_latest_hash_to_match_current_markdown(tmp_path):
+    pdf = _make_pdf(tmp_path, 1)
+    layout = resolve_layout("book", str(tmp_path / "out"))
+    Path(layout.md_path).parent.mkdir(parents=True)
+    Path(layout.md_path).write_text("current\n", encoding="utf-8")
+    _write_resume_source_audit(layout, pdf)
+    os.makedirs(layout.quality_repair_dir, exist_ok=True)
+    clean = {
+        "mode": "auto", "status": "OK", "findings": 0,
+        "conflicts": 0, "rolled_back": False, "reason": "",
+        "stop_reason": "resolved", "unresolved": [],
+        "unresolved_events": [], "unresolved_count": 0,
+        "unresolved_event_count": 0,
+        "after_sha256": hashlib.sha256(b"stale\n").hexdigest(),
+    }
+    latest = Path(layout.quality_repair_dir) / "latest.json"
+    latest.write_text(json.dumps(clean), encoding="utf-8")
+
+    assert bp._repair_stages_complete(
+        layout, formula_repair="off", quality_repair="apply") is False
+
+    clean["after_sha256"] = hashlib.sha256(
+        Path(layout.md_path).read_bytes()).hexdigest()
+    latest.write_text(json.dumps(clean), encoding="utf-8")
+    assert bp._repair_stages_complete(
+        layout, formula_repair="off", quality_repair="apply") is True
+
+
+def _write_resume_source_audit(
+        layout, pdf: Path, *, schema_version: int = bp.AUDIT_SCHEMA_VERSION,
+        corrections: bytes | None = None) -> None:
+    work = Path(layout.work_dir)
+    _mark_page_done(work, 1)
+    cp.save_manifest(
+        layout.work_dir,
+        cp.new_manifest(
+            str(pdf), cp.pdf_fingerprint(str(pdf)), cp.DEFAULT_DPI, "B"),
+    )
+    if corrections is not None:
+        Path(layout.corrections_path).write_bytes(corrections)
+    pdf_bytes = pdf.read_bytes()
+    report = {
+        "schema_version": schema_version,
+        "stem": layout.stem,
+        "route": "B",
+        "born_digital_mode": "hybrid",
+        "pdf_fingerprint": {
+            **cp.pdf_fingerprint(str(pdf)),
+            "sha256": hashlib.sha256(pdf_bytes).hexdigest(),
+        },
+        "ocr_fingerprint": cp.ocr_results_fingerprint(
+            layout.work_dir, 1, cp.DEFAULT_DPI),
+        "summary": {
+            "status": "OK", "pages": 1, "suspect_pages": [],
+            "issue_counts": {},
+        },
+        "pages": [],
+    }
+    if corrections is not None:
+        report["corrections_fingerprint"] = {
+            "size_bytes": len(corrections),
+            "sha256": hashlib.sha256(corrections).hexdigest(),
+        }
+    Path(layout.source_audit_path).parent.mkdir(parents=True, exist_ok=True)
+    Path(layout.source_audit_path).write_text(
+        json.dumps(report), encoding="utf-8")
+
+
+def _write_clean_quality_latest(layout) -> None:
+    Path(layout.md_path).parent.mkdir(parents=True, exist_ok=True)
+    Path(layout.md_path).write_text("current\n", encoding="utf-8")
+    os.makedirs(layout.quality_repair_dir, exist_ok=True)
+    payload = {
+        "mode": "auto", "status": "OK", "findings": 0,
+        "conflicts": 0, "rolled_back": False, "reason": "",
+        "stop_reason": "resolved", "unresolved": [],
+        "unresolved_events": [], "unresolved_count": 0,
+        "unresolved_event_count": 0,
+        "after_sha256": hashlib.sha256(
+            Path(layout.md_path).read_bytes()).hexdigest(),
+    }
+    (Path(layout.quality_repair_dir) / "latest.json").write_text(
+        json.dumps(payload), encoding="utf-8")
+
+
+def test_repair_stages_resume_rejects_old_source_audit_schema(tmp_path):
+    pdf = _make_pdf(tmp_path, 1)
+    layout = resolve_layout("book", str(tmp_path / "out"))
+    _write_resume_source_audit(layout, pdf, schema_version=3)
+    _write_clean_quality_latest(layout)
+
+    assert bp._repair_stages_complete(
+        layout, formula_repair="off", quality_repair="apply") is False
+
+
+def test_repair_stages_resume_rejects_stale_corrections_fingerprint(tmp_path):
+    pdf = _make_pdf(tmp_path, 1)
+    layout = resolve_layout("book", str(tmp_path / "out"))
+    _write_resume_source_audit(layout, pdf, corrections=b'{"corrections":[]}')
+    _write_clean_quality_latest(layout)
+    Path(layout.corrections_path).write_bytes(
+        b'{"corrections":[{"page":1}]}')
+
+    assert bp._repair_stages_complete(
+        layout, formula_repair="off", quality_repair="apply") is False
+
+
+def test_repair_stages_resume_accepts_fresh_schema6_source_audit(tmp_path):
+    pdf = _make_pdf(tmp_path, 1)
+    layout = resolve_layout("book", str(tmp_path / "out"))
+    _write_resume_source_audit(layout, pdf, corrections=b'{"corrections":[]}')
+    _write_clean_quality_latest(layout)
+
+    assert bp._repair_stages_complete(
+        layout, formula_repair="off", quality_repair="apply") is True
+
+
+def test_run_resume_reenters_postprocessing_when_ocr_done_but_quality_suspect(
+        tmp_path, monkeypatch):
+    src = tmp_path / "src"
+    src.mkdir()
+    pdf = _make_pdf(src, 1, name="book")
+    out_root = tmp_path / "out"
+    layout = resolve_layout("book", str(out_root))
+    _mark_page_done(Path(layout.work_dir), 1)
+    manifest = cp.new_manifest(
+        str(pdf), cp.pdf_fingerprint(str(pdf)), cp.DEFAULT_DPI, "A")
+    cp.save_manifest(layout.work_dir, manifest)
+    os.makedirs(layout.quality_repair_dir, exist_ok=True)
+    with open(os.path.join(layout.quality_repair_dir, "latest.json"), "w",
+              encoding="utf-8") as handle:
+        json.dump({
+            "mode": "apply", "status": "SUSPECT", "findings": 1,
+            "unresolved_count": 1,
+        }, handle)
+    calls = []
+
+    def fake_runner(argv):
+        calls.append(argv)
+        return 0
+
+    monkeypatch.setattr(bp, "_read_summary", lambda *_a, **_k: {
+        "stem": "book", "status": "OK", "route": "A",
+        "failed_pages": 0, "selfcheck": {},
+        "source_audit_grade": None, "formula_repair_flag": None,
+        "quality_repair_flag": None,
+    })
+
+    bp.run(
+        [str(pdf)], out=str(out_root), resume=True, runner=fake_runner,
+        formula_repair="off", quality_repair="apply")
+
+    assert len(calls) == 1
+    assert "--quality-repair" in calls[0]
+    assert calls[0][calls[0].index("--quality-repair") + 1] == "apply"
+
+
 def test_run_calls_watchdog_once_per_book(tmp_path):
     d = tmp_path / "src"
     d.mkdir()
@@ -134,7 +306,7 @@ def test_run_calls_watchdog_once_per_book(tmp_path):
         calls.append(argv)
         return 0
     rc, results = bp.run([str(d)], out=str(tmp_path / "out"), runner=fake_runner)
-    assert rc == 0
+    assert rc == 2  # 子进程声称成功但没有可评分审计产物
     assert len(calls) == 2
     assert [r["stem"] for r in results] == ["A", "B"]
 
@@ -167,7 +339,9 @@ def test_run_resume_skips_done_book_without_spawning(tmp_path):
     def fake_runner(argv):
         calls.append(argv)
         return 0
-    rc, results = bp.run([str(d)], out=str(out_root), resume=True, runner=fake_runner)
+    rc, results = bp.run(
+        [str(d)], out=str(out_root), resume=True, runner=fake_runner,
+        formula_repair="off", quality_repair="off")
     assert calls == []
     assert results[0]["status"] == "SKIP"
 
@@ -234,7 +408,7 @@ def test_run_resume_survives_already_done_exception(tmp_path, monkeypatch):
         calls.append(argv)
         return 0
     rc, results = bp.run([str(d)], out=str(tmp_path / "out"), resume=True, runner=fake_runner)
-    assert rc == 0
+    assert rc == 2  # fixture 未写 source audit，按 UNSCORABLE 传播
     assert len(calls) == 2   # both books still processed, not aborted
 
 
@@ -252,7 +426,7 @@ def test_run_limit_zero_processes_nothing(tmp_path):
     assert calls == []
 
 
-def test_run_suspect_book_keeps_rc_zero(tmp_path):
+def test_run_suspect_book_returns_suspect_rc(tmp_path):
     d = tmp_path / "src"
     d.mkdir()
     pdf = _make_pdf(d, 2, name="A")
@@ -268,7 +442,7 @@ def test_run_suspect_book_keeps_rc_zero(tmp_path):
         return 0
     rc, results = bp.run([str(d)], out=str(out_root), runner=fake_runner)
     assert results[0]["status"] == "SUSPECT"
-    assert rc == 0
+    assert rc == 2
 
 
 def test_already_done_uses_explicit_work_root(tmp_path):
@@ -313,6 +487,17 @@ def test_job_argv_passes_work_dir_to_convert_subprocess(tmp_path):
     assert argv[argv.index("--work-dir") + 1] == str(work_root)
 
 
+def test_job_argv_python_api_defaults_are_deterministic_plus_quality_apply(
+        tmp_path):
+    argv = bp._job_argv(
+        tmp_path / "A.pdf", tmp_path / "out", None, 150,
+        no_selfcheck_json=False)
+
+    assert argv[argv.index("--formula-repair") + 1] == "deterministic"
+    assert argv[argv.index("--quality-repair") + 1] == "apply"
+    assert "--repair-agent" not in argv
+
+
 def test_job_argv_passes_allow_sleep_to_convert_subprocess(tmp_path):
     pdf = tmp_path / "A.pdf"
     out_root = tmp_path / "out"
@@ -344,7 +529,7 @@ def test_job_argv_defaults_born_digital_mode_to_hybrid(tmp_path):
     assert argv[argv.index("--born-digital-mode") + 1] == "hybrid"
 
 
-def test_run_invokes_katex_scan_by_default(tmp_path, monkeypatch):
+def test_run_invokes_legacy_katex_scan_when_formula_repair_off(tmp_path, monkeypatch):
     d = tmp_path / "src"
     d.mkdir()
     pdf = _make_pdf(d, 1, name="A")
@@ -367,10 +552,16 @@ def test_run_invokes_katex_scan_by_default(tmp_path, monkeypatch):
 
     monkeypatch.setattr(bp, "scan_katex_work_pages", fake_scan)
 
-    rc, results = bp.run([str(d)], out=str(out_root), dpi=150, runner=fake_runner)
+    rc, results = bp.run(
+        [str(d)],
+        out=str(out_root),
+        dpi=150,
+        formula_repair="off",
+        runner=fake_runner,
+    )
 
     layout = resolve_layout("A", str(out_root))
-    assert rc == 0
+    assert rc == 2  # fixture 未写 source audit，按 UNSCORABLE 传播
     assert results[0]["status"] == "OK"
     assert called == [("A", layout.render_errors_path)]
 
@@ -398,7 +589,7 @@ def test_run_does_not_invoke_katex_scan_when_disabled(tmp_path, monkeypatch):
     rc, results = bp.run([str(d)], out=str(out_root), dpi=150, runner=fake_runner,
                          katex_scan_enabled=False)
 
-    assert rc == 0
+    assert rc == 2  # node 缺失不单独致错，但审计缺失仍是 SUSPECT
     assert results[0]["status"] == "OK"
     assert called == []
 
@@ -421,9 +612,15 @@ def test_run_keeps_book_ok_when_katex_scan_node_missing(tmp_path, monkeypatch, c
 
     monkeypatch.setattr(bp, "scan_katex_work_pages", lambda layout, out_path: None)
 
-    rc, results = bp.run([str(d)], out=str(out_root), dpi=150, runner=fake_runner)
+    rc, results = bp.run(
+        [str(d)],
+        out=str(out_root),
+        dpi=150,
+        formula_repair="off",
+        runner=fake_runner,
+    )
 
-    assert rc == 0
+    assert rc == 2  # fixture 未写 source audit，按 UNSCORABLE 传播
     assert results[0]["status"] == "OK"
     assert "[katex] node 缺失,跳过 A" in capsys.readouterr().out
 
@@ -460,8 +657,8 @@ def _write_selfcheck_with_audit(layout, source_audit: dict | None) -> None:
         json.dump(payload, f)
 
 
-def test_read_summary_audit_suspect_overrides_ok_status(tmp_path):
-    # 有产物(无 failed_pages)但 audit 判 SUSPECT → 文档状态仍须是 SUSPECT,不能计入 OK。
+def test_read_summary_mild_audit_history_does_not_override_current_ok(tmp_path):
+    # source audit 的 mild 历史信号保留报告，但不单独阻止当前 final 为 OK。
     pdf = _make_pdf(tmp_path, 3, name="book")
     out_root = tmp_path / "out"
     layout = resolve_layout(pdf.stem, str(out_root))
@@ -479,7 +676,7 @@ def test_read_summary_audit_suspect_overrides_ok_status(tmp_path):
 
     summary = bp._read_summary(out_root, None, pdf)
 
-    assert summary["status"] == "SUSPECT"
+    assert summary["status"] == "OK"
 
 
 def test_read_summary_grades_severe_and_mild_issue_counts(tmp_path):
@@ -627,9 +824,9 @@ def _write_real_audit_report(layout, pdf, dpi, status, suspect_pages=None, issue
         json.dump(report, f)
 
 
-def test_read_summary_falls_back_to_disk_audit_when_selfcheck_json_absent(tmp_path):
+def test_read_summary_falls_back_to_disk_mild_audit_without_blocking_final(tmp_path):
     # 模拟 --no-selfcheck-json:selfcheck.json 从不落盘,但 audit 报告仍由 convert
-    # 主链独立写盘——batch 必须直接读磁盘兜底,不能漏报 SUSPECT。
+    # 主链独立写盘——batch 仍直接读磁盘，mild 只报告、不阻止当前 final。
     pdf = _make_pdf(tmp_path, 2, name="book")
     out_root = tmp_path / "out"
     layout = resolve_layout(pdf.stem, str(out_root))
@@ -644,13 +841,13 @@ def test_read_summary_falls_back_to_disk_audit_when_selfcheck_json_absent(tmp_pa
 
     summary = bp._read_summary(out_root, None, pdf, dpi=150)
 
-    assert summary["status"] == "SUSPECT"
+    assert summary["status"] == "OK"
     assert summary["source_audit_grade"]["suspect_page_count"] == 1
     assert summary["source_audit_grade"]["mild_issue_count"] == 1
 
 
-def test_run_no_selfcheck_json_still_reports_audit_suspect(tmp_path, monkeypatch):
-    # 端到端:--no-selfcheck-json 批跑 + audit 落盘 SUSPECT → batch 状态仍是 SUSPECT。
+def test_run_no_selfcheck_json_keeps_mild_audit_as_nonblocking_history(
+        tmp_path, monkeypatch):
     d = tmp_path / "src"
     d.mkdir()
     pdf = _make_pdf(d, 2, name="book")
@@ -676,7 +873,8 @@ def test_run_no_selfcheck_json_still_reports_audit_suspect(tmp_path, monkeypatch
     rc, results = bp.run([str(d)], out=str(out_root), dpi=150, runner=fake_runner,
                         no_selfcheck_json=True)
 
-    assert results[0]["status"] == "SUSPECT"
+    assert results[0]["status"] == "OK"
+    assert rc == 0
 
 
 def test_read_summary_falls_back_when_selfcheck_source_audit_field_corrupt(tmp_path):
@@ -802,11 +1000,9 @@ def test_main_rejects_invalid_born_digital_mode(monkeypatch):
 # Task B(2026-07-17 所有者批准):--formula-repair 三入口透传之一——batch 比较
 # 特殊:batch 收尾本就已有自己一套 katex_scan+katex_triage 自动化(见上方
 # test_run_invokes_katex_scan_by_default 等),早于本任务、默认打开。batch 的
-# --formula-repair 默认取 "off"(与 convert.py/watchdog.py 默认 "deterministic"
-# 刻意不同,取舍见 batch.py 顶部 FORMULA_REPAIR_MODES 注释与 task-B-report):
-#   - 默认 "off":不透传给每本书的 convert.py 子进程,batch 沿用自己已有的收尾
-#     自动化,零行为变化。
-#   - 显式选 deterministic/agents:透传给子进程(该本书的 convert.py 会自己跑
+# --formula-repair 三入口默认统一为 "agents-apply"。batch 透传给 convert.py 后，
+# 自己的重复收尾自动让路，避免同一本书跑两遍。
+#   - 显式选 deterministic/agents/agents-apply:透传给子进程(该本书的 convert.py 会自己跑
 #     katex_scan+triage+candidates/agents),此时 batch 自己的收尾 katex 步骤
 #     必须让路(不管 --no-katex-scan 传的是什么),避免同一本书的 katex_scan/
 #     katex_triage 被跑两遍。
@@ -825,10 +1021,10 @@ def test_job_argv_passes_agents_apply_to_convert_subprocess(tmp_path):
     assert argv[argv.index("--formula-repair") + 1] == "agents-apply"
 
 
-def test_job_argv_defaults_formula_repair_to_off(tmp_path):
+def test_job_argv_defaults_formula_repair_to_deterministic(tmp_path):
     argv = bp._job_argv(tmp_path / "A.pdf", tmp_path / "out", None, 150,
                         no_selfcheck_json=False)
-    assert argv[argv.index("--formula-repair") + 1] == "off"
+    assert argv[argv.index("--formula-repair") + 1] == "deterministic"
 
 
 def test_run_rejects_invalid_formula_repair(tmp_path):
@@ -849,10 +1045,27 @@ def _fake_runner_writes_book(out_root, pdf):
     return fake_runner
 
 
-def test_run_default_formula_repair_off_forwards_off_and_keeps_own_katex_tail(
+def test_run_preserves_child_suspect_as_suspect_not_giveup(tmp_path):
+    d = tmp_path / "src"
+    d.mkdir()
+    pdf = _make_pdf(d, 1, name="A")
+    out_root = tmp_path / "out"
+
+    def suspect_runner(argv):
+        _fake_runner_writes_book(out_root, pdf)(argv)
+        return 2
+
+    rc, results = bp.run(
+        [str(d)], out=str(out_root), dpi=150, runner=suspect_runner,
+    )
+
+    assert rc == 2
+    assert results[0]["status"] == "SUSPECT"
+
+
+def test_run_default_formula_repair_deterministic_forwards_and_skips_own_katex_tail(
         tmp_path, monkeypatch):
-    # 默认(formula_repair="off")行为零变化:argv 里显式带 --formula-repair off,
-    # 且 batch 自己的 katex_scan 收尾照常跑(既有回归,重新断言一次防漂移)。
+    # Python API 默认 deterministic 转发给 convert，batch 自己不重复扫描。
     d = tmp_path / "src"
     d.mkdir()
     pdf = _make_pdf(d, 1, name="A")
@@ -865,8 +1078,8 @@ def test_run_default_formula_repair_off_forwards_off_and_keeps_own_katex_tail(
 
     rc, results = bp.run([str(d)], out=str(out_root), dpi=150, runner=fake_runner)
 
-    assert rc == 0
-    assert scan_calls == ["A"]
+    assert rc == 2  # fixture 未写 source audit，按 UNSCORABLE 传播
+    assert scan_calls == []
 
 
 def test_run_formula_repair_deterministic_forwards_and_skips_own_katex_tail(
@@ -891,7 +1104,7 @@ def test_run_formula_repair_deterministic_forwards_and_skips_own_katex_tail(
     rc, results = bp.run([str(d)], out=str(out_root), dpi=150, runner=fake_runner,
                          formula_repair="deterministic")
 
-    assert rc == 0
+    assert rc == 2  # fixture 未写 source audit，按 UNSCORABLE 传播
     argv = captured_argv["argv"]
     assert argv[argv.index("--formula-repair") + 1] == "deterministic"
     assert scan_calls == []            # batch 自己的收尾 katex 步骤已让路,未被调用
@@ -910,7 +1123,7 @@ def test_run_formula_repair_agents_also_skips_own_katex_tail(tmp_path, monkeypat
     rc, results = bp.run([str(d)], out=str(out_root), dpi=150, runner=fake_runner,
                          formula_repair="agents", katex_scan_enabled=True)
 
-    assert rc == 0
+    assert rc == 2  # fixture 未写 source audit，按 UNSCORABLE 传播
     assert scan_calls == []
 
 
@@ -933,7 +1146,7 @@ def test_run_formula_repair_agents_apply_forwards_and_skips_own_katex_tail(
     rc, results = bp.run([str(d)], out=str(out_root), dpi=150, runner=fake_runner,
                          formula_repair="agents-apply", katex_scan_enabled=True)
 
-    assert rc == 0
+    assert rc == 2  # fixture 未写 source audit，按 UNSCORABLE 传播
     argv = captured["argv"]
     assert argv[argv.index("--formula-repair") + 1] == "agents-apply"
     assert scan_calls == []
@@ -1028,7 +1241,7 @@ def test_run_prints_and_counts_formula_repair_flag(tmp_path, monkeypatch, capsys
 
     rc, results = bp.run([str(d)], out=str(out_root), dpi=150, runner=fake_runner)
 
-    assert rc == 0
+    assert rc == 2  # formula safety flag makes the batch SUSPECT
     assert results[0]["formula_repair_flag"] == "circuit_broken"
     out = capsys.readouterr().out
     assert "fr=circuit_broken" in out
@@ -1048,7 +1261,7 @@ def test_run_omits_fr_tag_when_flag_absent(tmp_path, monkeypatch, capsys):
 
     rc, results = bp.run([str(d)], out=str(out_root), dpi=150, runner=fake_runner)
 
-    assert rc == 0
+    assert rc == 2  # missing audit remains UNSCORABLE
     assert results[0]["formula_repair_flag"] is None
     out = capsys.readouterr().out
     assert "fr=" not in out
@@ -1091,7 +1304,7 @@ def test_main_forwards_agents_apply(monkeypatch):
     assert captured["kwargs"]["formula_repair"] == "agents-apply"
 
 
-def test_main_formula_repair_defaults_to_off(monkeypatch):
+def test_main_auto_defaults_to_deterministic_formula_and_quality_apply(monkeypatch):
     captured = {}
 
     def fake_run(src_paths, **kwargs):
@@ -1104,7 +1317,52 @@ def test_main_formula_repair_defaults_to_off(monkeypatch):
     rc = bp.main()
 
     assert rc == 0
+    assert captured["kwargs"]["formula_repair"] == "deterministic"
+    assert captured["kwargs"]["quality_repair"] == "apply"
+    assert captured["kwargs"]["quality_agents"] == []
+    assert captured["kwargs"]["repair_policy"].workers == 4
+    assert captured["kwargs"]["repair_policy"].max_rounds == 2
+
+
+def test_main_auto_with_explicit_agent_maps_existing_runtime_arguments(monkeypatch):
+    captured = {}
+
+    def fake_run(src_paths, **kwargs):
+        captured["kwargs"] = kwargs
+        return 0, []
+
+    monkeypatch.setattr(bp, "run", fake_run)
+    monkeypatch.setattr("sys.argv", [
+        "batch.py", "--src", "src",
+        "--repair-agent", "codex:gpt-5.6-sol:high",
+    ])
+
+    assert bp.main() == 0
+    assert captured["kwargs"]["formula_repair"] == "agents-apply"
+    assert captured["kwargs"]["formula_agents"] == [
+        "codex:gpt-5.6-sol:high"]
+    assert captured["kwargs"]["quality_repair"] == "apply"
+    assert captured["kwargs"]["quality_agents"] == [
+        "codex:gpt-5.6-sol:high"]
+    assert captured["kwargs"]["repair_policy"].formula_agents[0].provider == "codex"
+
+
+def test_main_repair_off_with_legacy_quality_override_is_stage_local(monkeypatch):
+    captured = {}
+
+    def fake_run(src_paths, **kwargs):
+        captured["kwargs"] = kwargs
+        return 0, []
+
+    monkeypatch.setattr(bp, "run", fake_run)
+    monkeypatch.setattr("sys.argv", [
+        "batch.py", "--src", "src", "--repair", "off",
+        "--quality-repair", "audit",
+    ])
+
+    assert bp.main() == 0
     assert captured["kwargs"]["formula_repair"] == "off"
+    assert captured["kwargs"]["quality_repair"] == "audit"
 
 
 def test_main_rejects_invalid_formula_repair(monkeypatch):
@@ -1114,3 +1372,51 @@ def test_main_rejects_invalid_formula_repair(monkeypatch):
     with pytest.raises(SystemExit) as exc:
         bp.main()
     assert exc.value.code != 0
+
+
+def test_job_argv_passes_quality_configuration_to_watchdog(tmp_path):
+    argv = bp._job_argv(
+        tmp_path / "A.pdf", tmp_path / "out", None, 150,
+        no_selfcheck_json=False, quality_repair="propose",
+        quality_agents=["codex:gpt-5.6-sol:high", "gemini:m:medium"],
+        quality_discovery="signals", quality_learn="package")
+    assert argv[argv.index("--quality-repair") + 1] == "propose"
+    assert argv.count("--quality-agent") == 2
+    assert argv[argv.index("--quality-learn") + 1] == "package"
+
+
+def test_main_forwards_quality_configuration(monkeypatch):
+    captured = {}
+
+    def fake_run(src_paths, **kwargs):
+        captured.update(kwargs)
+        return 0, []
+
+    monkeypatch.setattr(bp, "run", fake_run)
+    monkeypatch.setattr("sys.argv", [
+        "batch.py", "--src", "src", "--quality-repair", "audit",
+        "--quality-agent", "codex:gpt-5.6-sol:high",
+    ])
+    assert bp.main() == 0
+    assert captured["quality_repair"] == "audit"
+    assert captured["quality_agents"] == ["codex:gpt-5.6-sol:high"]
+
+
+def test_read_quality_repair_flag_surfaces_p1_and_conflicts(tmp_path):
+    layout = resolve_layout("Demo", str(tmp_path / "out"), str(tmp_path / "work"))
+    os.makedirs(layout.quality_repair_dir, exist_ok=True)
+    with open(os.path.join(layout.quality_repair_dir, "latest.json"), "w",
+              encoding="utf-8") as handle:
+        json.dump({"mode": "audit", "status": "SUSPECT",
+                   "severity_counts": {"P1": 2}, "conflicts": 0}, handle)
+    assert bp._read_quality_repair_flag(layout) == "P1_findings"
+    with open(os.path.join(layout.quality_repair_dir, "latest.json"), "w",
+              encoding="utf-8") as handle:
+        json.dump({"mode": "propose", "status": "SUSPECT",
+                   "severity_counts": {}, "conflicts": 3}, handle)
+    assert bp._read_quality_repair_flag(layout) == "conflicts"
+
+
+def test_read_quality_repair_flag_none_when_not_run(tmp_path):
+    layout = resolve_layout("Demo", str(tmp_path / "out"), str(tmp_path / "work"))
+    assert bp._read_quality_repair_flag(layout) is None

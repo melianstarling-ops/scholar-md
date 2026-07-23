@@ -156,6 +156,35 @@ def test_pages_todo(tmp_path):
     assert cp.pages_todo(work, 4) == [2, 4]
 
 
+def test_ocr_results_fingerprint_binds_page_content_and_manifest_failures(tmp_path):
+    work = str(tmp_path / "_work")
+    _write_res(work, 1, [{"block_content": "first"}])
+    _write_res(work, 2, [{"block_content": "second"}])
+    manifest = cp.new_manifest(
+        "book.pdf", {"page_count": 3, "size_bytes": 10}, 150, "B")
+    cp.save_manifest(work, manifest)
+
+    initial = cp.ocr_results_fingerprint(work, 3, 150)
+    assert initial["result_page_count"] == 2
+    assert initial["failed_page_count"] == 0
+    assert len(initial["result_set_sha256"]) == 64
+
+    # 同页文件仍存在、页数不变，仅内容变化也必须使审计缓存失效。
+    _write_res(work, 2, [{"block_content": "corrected"}])
+    content_changed = cp.ocr_results_fingerprint(work, 3, 150)
+    assert content_changed["result_page_count"] == 2
+    assert content_changed["result_set_sha256"] != initial["result_set_sha256"]
+
+    # page result 不变，仅当前失败状态变化也属于不同的审计输入。
+    manifest["failed_pages"] = [
+        {"page": 3, "error": "engine failed", "kind": "page-exception"}]
+    cp.save_manifest(work, manifest)
+    failure_changed = cp.ocr_results_fingerprint(work, 3, 150)
+    assert failure_changed["result_page_count"] == 2
+    assert failure_changed["failed_page_count"] == 1
+    assert failure_changed["result_set_sha256"] != content_changed["result_set_sha256"]
+
+
 def test_record_failure(tmp_path):
     m = cp.new_manifest("b.pdf", {"page_count": 3, "size_bytes": 1}, 150, "A")
     cp.record_failure(m, 5, "CUDA oom", "page-exception")

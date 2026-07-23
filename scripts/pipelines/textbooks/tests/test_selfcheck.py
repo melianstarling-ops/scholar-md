@@ -49,6 +49,18 @@ def test_suspicion_flags_bare_int_and_lim():
     assert r"\int" in ops and r"\lim" in ops
 
 
+def test_suspicion_ignores_stokes_vector_identity_integrals():
+    md = (
+        r"$EMF=-\int \frac{\partial \overrightarrow{B}}{\partial t}"
+        r"\cdot d\overrightarrow{a}"
+        r"=\int \overrightarrow{\nabla}\times\overrightarrow{E}"
+        r"\cdot d\overrightarrow{a}"
+        r"=\oint \overrightarrow{E}\cdot d\overrightarrow{l}$"
+    )
+
+    assert scan_formula_suspicions(md) == []
+
+
 def test_suspicion_ignores_definite_int_and_sum():
     assert scan_formula_suspicions(r"\int_a^b f\,dx + \sum_{i=1}^n a_i") == []
 

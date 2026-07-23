@@ -70,7 +70,7 @@ def _limited_samples(entry: dict, key: str, limit: int) -> tuple[list[str], bool
 
 def build_audit_payload(audit_page: dict | None,
                         samples_limit: int = DEFAULT_AUDIT_SAMPLES_LIMIT) -> dict | None:
-    """把一页 source_audit 报告(schema v2 page_report)加工成 debug 视图只读展示
+    """把一页 source_audit 报告(schema v6 page_report)加工成 debug 视图只读展示
     所需字段:页级 status/issues、块级 provenance(含 missing_samples/
     added_samples——真实来自 prose_audit.block_metrics[block_id],commit
     22d53eb 补齐;无对应 issue 的块该报告本就不产字段,payload 侧统一降级为
@@ -214,7 +214,7 @@ def build_page_payload(res: dict, page: int, stem: str,
     "correction" 字段,供 debug 视图渲染待审卡片/一键采纳驳回——不在这里过滤 status
     (那是 apply_corrections 的应用侧红线),这里只负责"展示有什么提案"。
 
-    audit 是该页的 source_audit 报告 page_report(schema v2,可选;None=该文档
+    audit 是该页的 source_audit 报告 page_report(schema v6,可选;None=该文档
     未跑 source audit 或独立重跑无报告可读)——只展示,不据此改写 blocks/md 任何
     一个字符,也不现场重新推演采信判定。"""
     blocks = res.get("parsing_res_list", [])

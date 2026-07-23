@@ -20,12 +20,18 @@ import os
 import re
 import unicodedata
 from collections import Counter
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass, is_dataclass
 
 import fitz
 
 from scripts.pipelines.textbooks import checkpoint as _checkpoint
+from scripts.pipelines.textbooks.corrections import apply_corrections
 from scripts.pipelines.textbooks.paths import DocLayout, resolve_layout
+
+
+# Keep this aligned with convert/batch/event_collectors.  The parent integration
+# bumps all copies together when an audit algorithm changes.
+SOURCE_AUDIT_SCHEMA_VERSION = 6
 
 # ---- PUA 判定:与 triage.py 的惯例一致,独立维护(只读参考,不导入其私有实现) ----
 _PUA_RANGES = ((0xE000, 0xF8FF), (0xF0000, 0xFFFFD), (0x100000, 0x10FFFD))
@@ -57,6 +63,9 @@ _WS_RE = re.compile(r"\s+")
 # 上标数字/正负号 → ASCII,用于在 NFKC 折叠前显式标记指数(10² → 10^2)。
 _SUPER_TRANSLATE = str.maketrans("⁰¹²³⁴⁵⁶⁷⁸⁹⁺⁻", "0123456789+-")
 _SUPER_RUN_RE = re.compile(r"(?<=[0-9])([⁺⁻]?[⁰¹²³⁴⁵⁶⁷⁸⁹]+)")
+_STANDALONE_SUPER_RUN_RE = re.compile(
+    r"(?<![0-9])([⁺⁻]?[⁰¹²³⁴⁵⁶⁷⁸⁹]+)"
+)
 
 # 数字 token:按优先级排列的互斥分支——range/科学计数法/指数记号必须排在
 # 普通数字前面,否则会被普通数字分支提前截断,丢失指数或范围语义。
@@ -397,6 +406,42 @@ def extract_numeric_tokens(text: str) -> list[str]:
             tokens.append(unit_m.group(0))
 
     return tokens
+
+
+def _extract_numeric_value_tokens(
+    text: str, *, title_identity: bool = False
+) -> list[str]:
+    """只提取数值本体，不附加启发式单位 token。
+
+    `extract_numeric_tokens` 的单位启发式供表格审计保留上下文，但正文源词的
+    绘制/分栏顺序会把节号与下一行 `B1`、端口号与下一列 `AIMD` 拼接起来，
+    从而把 B/AIMD/P 等普通标识符误当单位。高严重度 prose
+    `numeric_mismatch` 只应由数值保真驱动；单位/普通文本差异继续由
+    char/token/NED 检查覆盖。
+    """
+    if not text:
+        return []
+    # 数值审计此前直接吃 raw source/OCR，导致 PDF 的 non-breaking hyphen
+    # 与 OCR 的 ASCII hyphen 把同一标准号拆成不同 token。这里只折叠已有
+    # prose compare 契约中的连字符字形，不改点号、层级或数值本身。
+    numeric_text = unicodedata.normalize("NFC", text)
+    for ch in _HYPHEN_LIKE_FOR_COMPARE:
+        numeric_text = numeric_text.replace(ch, _CANONICAL_HYPHEN)
+
+    marked = _SUPER_RUN_RE.sub(
+        lambda m: "^" + m.group(1).translate(_SUPER_TRANSLATE), numeric_text
+    )
+    if title_identity:
+        # 图/表标题中的 `|field|²` 常被 PDF 文字层导出为基线 `|field|2`。
+        # 只在标题身份下把“不跟在数字后的”上标簇视为同一个编号 token；
+        # `10²` 仍由上面的指数路径保留为 `10^2`。
+        marked = _STANDALONE_SUPER_RUN_RE.sub(
+            lambda m: m.group(1).translate(_SUPER_TRANSLATE), marked
+        )
+    return [
+        match.group(0).replace("−", "-")
+        for match in _NUMERIC_TOKEN_RE.finditer(marked)
+    ]
 
 
 def ngram_repetition_score(text: str, n: int = 8) -> float:
@@ -913,6 +958,22 @@ FURNITURE_PROSE_LABELS = frozenset({"content", "reference_content"})
 # 是版式噪声,不是内容错误,页面唯一的 issue 类型是它时不判 SUSPECT。
 _PAGE_NON_SUSPECT_ISSUE_CODES = frozenset({"furniture_prose_noise"})
 
+# Agent 路由用的保守组合信号。单一 NED/新增比例容易被换行或阅读顺序影响；
+# 只有源文本可靠、字符多重集召回已低到近乎整段塌缩，并且 NED 或 OCR 新增
+# 比例也极高时才升级。严格使用 < / >，边界值不误入 severe。
+_SEVERE_PROSE_MAX_CHAR_RECALL = 0.20
+_SEVERE_PROSE_MIN_NED = 0.80
+_SEVERE_PROSE_MIN_ADDITION_RATIO = 0.80
+
+
+def _report_block_id(block: dict | object, source_index: int):
+    """Return page_res identity, falling back only when block_id is absent."""
+    if isinstance(block, dict):
+        block_id = block.get("block_id")
+        if block_id is not None:
+            return block_id
+    return source_index
+
 
 def audit_prose(
     source_page: dict,
@@ -961,7 +1022,11 @@ def audit_prose(
         unassigned_groups.setdefault(w.block_no, []).append(w)
 
     issues: list[dict] = []
-    block_metrics: dict[int, dict] = {}
+    # assignment/decision 始终使用 parsing_res_list 的 enumerate index；报告
+    # 对外使用 page_res 的真实 block_id。两者不得混用，否则非连续 ID 会让
+    # quality-repair collector 关联到错误块。
+    block_metrics: dict[object, dict] = {}
+    scored_source_indices: list[int] = []
 
     char_pairs: list[tuple[int, int]] = []
     token_pairs: list[tuple[int, int]] = []
@@ -975,6 +1040,7 @@ def audit_prose(
     source_unreliable_count = 0
 
     for i, block in enumerate(blocks):
+        report_block_id = _report_block_id(block, i)
         decision = decisions_by_id.get(i)
         if decision is None:
             continue
@@ -988,10 +1054,12 @@ def audit_prose(
 
         if decision.content_source == "source_text":
             adopted_count += 1
-            block_metrics[i] = {
+            block_metrics[report_block_id] = {
+                "source_index": i,
                 "content_source": "source_text",
                 "block_ned": decision.block_ned,
             }
+            scored_source_indices.append(i)
             if decision.block_ned is not None:
                 adopted_chars = sum(
                     1 for ch in (decision.adopted_text or "") if not ch.isspace()
@@ -1011,11 +1079,17 @@ def audit_prose(
             # 全页几何不可标定(assignment 的权威信号):归属本就不可信,不猜测,
             # 直接判 source_unreliable。
             source_unreliable_count += 1
-            block_metrics[i] = {"content_source": "ocr", "source_unreliable": True}
+            block_metrics[report_block_id] = {
+                "source_index": i,
+                "content_source": "ocr",
+                "source_unreliable": True,
+            }
+            scored_source_indices.append(i)
             issues.append(
                 {
                     "code": "source_unreliable",
-                    "block_id": i,
+                    "block_id": report_block_id,
+                    "source_index": i,
                     "detail": "页面几何不可标定,该块源归属不可信,不参与对账",
                 }
             )
@@ -1028,16 +1102,19 @@ def audit_prose(
             or bad_ratio > thresholds.maximum_bad_char_ratio
         ):
             source_unreliable_count += 1
-            block_metrics[i] = {
+            block_metrics[report_block_id] = {
+                "source_index": i,
                 "content_source": "ocr",
                 "source_unreliable": True,
                 "src_char_count": src_total,
                 "bad_char_ratio": bad_ratio,
             }
+            scored_source_indices.append(i)
             issues.append(
                 {
                     "code": "source_unreliable",
-                    "block_id": i,
+                    "block_id": report_block_id,
+                    "source_index": i,
                     "detail": (
                         f"源字符量={src_total},坏码占比={bad_ratio:.2f},"
                         "该块源不可信,不参与对账"
@@ -1058,16 +1135,19 @@ def audit_prose(
                 # 剥离数学记号后残余纯文字太少,不足以对账——按现有
                 # source_unreliable 路径处理(与"字符量不足"同语义)。
                 source_unreliable_count += 1
-                block_metrics[i] = {
+                block_metrics[report_block_id] = {
+                    "source_index": i,
                     "content_source": "ocr",
                     "source_unreliable": True,
                     "src_char_count": residual_source_chars,
                     "bad_char_ratio": bad_ratio,
                 }
+                scored_source_indices.append(i)
                 issues.append(
                     {
                         "code": "source_unreliable",
-                        "block_id": i,
+                        "block_id": report_block_id,
+                        "source_index": i,
                         "detail": (
                             f"内联公式回退块剥离数学记号后残余字符量={residual_source_chars},"
                             "不足以对账,该块源不可信,不参与对账"
@@ -1099,8 +1179,16 @@ def audit_prose(
             # 内联公式回退块:数字对账整体跳过(计划 Task 15b)——数学块的
             # 数值语义由公式链负责(KaTeX/formula agents),审计端两侧表示法
             # (LaTeX vs Unicode)不可比,不计算也不产生 numeric_mismatch。
-            source_numeric = extract_numeric_tokens(raw_source_text)
-            ocr_numeric = extract_numeric_tokens(ocr_content or "")
+            # 高严重度正文数字告警只比较数值本体。通用提取器还会附加
+            # 启发式单位，源词绘制顺序/换行不同会令 B1/AIMD/P 等普通
+            # 标识符单边进入 token 集，形成表示层误报。
+            title_identity = label in {"figure_title", "table_title"}
+            source_numeric = _extract_numeric_value_tokens(
+                raw_source_text, title_identity=title_identity
+            )
+            ocr_numeric = _extract_numeric_value_tokens(
+                ocr_content or "", title_identity=title_identity
+            )
             if source_numeric:
                 numeric_overlap = _multiset_overlap(source_numeric, ocr_numeric)
                 numeric_recall = _recall(numeric_overlap, len(source_numeric))
@@ -1116,7 +1204,8 @@ def audit_prose(
         if len(source_chars) > 0:
             ned_pairs.append((ned, len(source_chars)))
 
-        block_metrics[i] = {
+        block_metric = {
+            "source_index": i,
             "content_source": "ocr",
             "source_unreliable": False,
             "block_ned": ned,
@@ -1127,8 +1216,10 @@ def audit_prose(
             "src_char_count": len(source_chars),
             "ocr_char_count": len(ocr_chars),
         }
+        block_metrics[report_block_id] = block_metric
+        scored_source_indices.append(i)
         if is_math_fallback:
-            block_metrics[i]["numeric_audit_skipped_math"] = True
+            block_metric["numeric_audit_skipped_math"] = True
 
         # 定位样本(计划 §6.4):逐 token diff 取连续缺失/新增 run,只在对应
         # issue 真的触发时才附加(干净块不产样本字段——不产字段而非空列表,
@@ -1149,11 +1240,18 @@ def audit_prose(
             numeric_recall is not None
             and numeric_recall < thresholds.minimum_numeric_token_recall
         )
+        severe_degradation_fired = (
+            char_recall < _SEVERE_PROSE_MAX_CHAR_RECALL
+            and (
+                ned > _SEVERE_PROSE_MIN_NED
+                or addition_ratio > _SEVERE_PROSE_MIN_ADDITION_RATIO
+            )
+        )
 
         if (missing_prose_fired or prose_mismatch_fired) and missing_samples:
-            block_metrics[i]["missing_samples"] = missing_samples
+            block_metric["missing_samples"] = missing_samples
         if addition_fired and added_samples:
-            block_metrics[i]["added_samples"] = added_samples
+            block_metric["added_samples"] = added_samples
 
         if is_furniture:
             # 家具标签降噪(计划 Task 15b):目录/参考文献块的这四类 issue 天然
@@ -1169,11 +1267,14 @@ def audit_prose(
                 fired_names.append("ocr_addition")
             if numeric_mismatch_fired:
                 fired_names.append("numeric_mismatch")
+            if severe_degradation_fired:
+                fired_names.append("severe_prose_degradation")
             if fired_names:
                 issues.append(
                     {
                         "code": "furniture_prose_noise",
-                        "block_id": i,
+                        "block_id": report_block_id,
+                        "source_index": i,
                         "detail": (
                             f"家具标签({label})版式噪声,原本会触发的指标:"
                             f"{','.join(fired_names)}"
@@ -1186,7 +1287,8 @@ def audit_prose(
             issues.append(
                 {
                     "code": "missing_prose",
-                    "block_id": i,
+                    "block_id": report_block_id,
+                    "source_index": i,
                     "detail": (
                         f"字符召回={char_recall:.2f},token 召回={token_recall:.2f},"
                         "疑似 OCR 漏段"
@@ -1197,7 +1299,8 @@ def audit_prose(
             issues.append(
                 {
                     "code": "prose_mismatch",
-                    "block_id": i,
+                    "block_id": report_block_id,
+                    "source_index": i,
                     "detail": f"块级 NED={ned:.3f} 超过上限 {thresholds.maximum_block_ned}",
                 }
             )
@@ -1205,7 +1308,8 @@ def audit_prose(
             issues.append(
                 {
                     "code": "ocr_addition",
-                    "block_id": i,
+                    "block_id": report_block_id,
+                    "source_index": i,
                     "detail": f"OCR 新增比例={addition_ratio:.2f},疑似幻觉/多出内容",
                 }
             )
@@ -1213,8 +1317,21 @@ def audit_prose(
             issues.append(
                 {
                     "code": "numeric_mismatch",
-                    "block_id": i,
-                    "detail": f"数字 token 召回={numeric_recall:.2f},疑似数字/单位识别错误",
+                    "block_id": report_block_id,
+                    "source_index": i,
+                    "detail": f"数值 token 召回={numeric_recall:.2f},疑似数值识别错误",
+                }
+            )
+        if severe_degradation_fired:
+            issues.append(
+                {
+                    "code": "severe_prose_degradation",
+                    "block_id": report_block_id,
+                    "source_index": i,
+                    "detail": (
+                        f"字符召回={char_recall:.2f},块级 NED={ned:.3f},"
+                        f"OCR 新增比例={addition_ratio:.2f},疑似整段 OCR 塌缩"
+                    ),
                 }
             )
 
@@ -1226,6 +1343,7 @@ def audit_prose(
                 {
                     "code": "possible_missing_block",
                     "block_id": None,
+                    "source_index": None,
                     "detail": (
                         f"未归属源 words 聚簇(标记={bn},{len(group)} 个 words),"
                         "疑似 OCR 漏切块"
@@ -1241,6 +1359,7 @@ def audit_prose(
             {
                 "code": "ocr_degeneration",
                 "block_id": None,
+                "source_index": None,
                 "detail": f"全页正文 n-gram 重复度={repetition_score:.2f},疑似 VLM 重复环退化",
             }
         )
@@ -1268,7 +1387,9 @@ def audit_prose(
         "ngram_repetition_score": repetition_score,
     }
     if _single_column_proxy_confirmed(words):
-        seq_ratio = _block_sequence_ratio(words, assignments_by_block, block_metrics.keys())
+        seq_ratio = _block_sequence_ratio(
+            words, assignments_by_block, scored_source_indices
+        )
         if seq_ratio is not None:
             metrics["sequence_ratio"] = seq_ratio
             if seq_ratio < thresholds.minimum_single_column_sequence_ratio:
@@ -1276,6 +1397,7 @@ def audit_prose(
                     {
                         "code": "sequence_disorder",
                         "block_id": None,
+                        "source_index": None,
                         "detail": (
                             f"块级源序一致率={seq_ratio:.2f} 低于下限 "
                             f"{thresholds.minimum_single_column_sequence_ratio},疑似块顺序错乱"
@@ -1351,6 +1473,7 @@ def _is_formula_math_char(ch: str) -> bool:
 
 def _formula_block_audit(
     block_id: int,
+    source_index: int,
     label: str | None,
     words,
     *,
@@ -1372,6 +1495,7 @@ def _formula_block_audit(
     )
     return {
         "block_id": block_id,
+        "source_index": source_index,
         "label": label,
         "source_char_count": total,
         "pua_count": pua,
@@ -1388,6 +1512,7 @@ def _audit_one_page(
     doc: fitz.Document,
     work_dir: str,
     page_no: int,
+    corrections: list[dict],
     failed_by_page: dict,
     decisions_by_page: dict | None,
     thresholds: AuditThresholds,
@@ -1414,6 +1539,7 @@ def _audit_one_page(
             issue = {
                 "code": "page_failed",
                 "block_id": None,
+                "source_index": None,
                 "detail": (
                     f"引擎处理失败(kind={failure.get('kind')}):{failure.get('error')}"
                 ),
@@ -1422,6 +1548,7 @@ def _audit_one_page(
             issue = {
                 "code": "page_incomplete",
                 "block_id": None,
+                "source_index": None,
                 "detail": "过程根缺该页 res JSON,独立重跑无法审计该页",
             }
         page_report = {
@@ -1437,7 +1564,10 @@ def _audit_one_page(
         return page_report, "UNSCORABLE"
 
     ocr_result = _checkpoint.load_page_result(work_dir, page_no)
-    ocr_blocks = ocr_result.get("parsing_res_list") or []
+    raw_ocr_blocks = ocr_result.get("parsing_res_list") or []
+    # corrections 是只读叠加层：审计与 reconstruct 必须看同一份 accepted
+    # 内容，但 page_res JSON 始终保留 OCR 原始事实，绝不原地回写。
+    ocr_blocks = apply_corrections(raw_ocr_blocks, page_no, corrections)
 
     source_page = extract_source_page(fitz_page)
     health = source_health(source_page)
@@ -1484,6 +1614,7 @@ def _audit_one_page(
     issues: list[dict] = list(prose_result["issues"])
 
     for i, block in enumerate(ocr_blocks):
+        report_block_id = _report_block_id(block, i)
         label = block.get("block_label") if isinstance(block, dict) else None
         if label is None:
             label = block_labels.get(i)
@@ -1499,7 +1630,8 @@ def _audit_one_page(
             block_ned = decision.block_ned
         blocks_out.append(
             {
-                "block_id": i,
+                "block_id": report_block_id,
+                "source_index": i,
                 "label": label,
                 "content_source": content_source,
                 "reasons": reasons,
@@ -1510,7 +1642,7 @@ def _audit_one_page(
         words = assignments_by_block.get(i, [])
         if label in _FORMULA_LABELS:
             formula_entry = _formula_block_audit(
-                i, label, words,
+                report_block_id, i, label, words,
                 geometry_unscorable=geometry_unscorable,
                 thresholds=thresholds,
                 bad_font_count=bad_font_count,
@@ -1520,7 +1652,8 @@ def _audit_one_page(
                 issues.append(
                     {
                         "code": "source_unreliable_for_formula",
-                        "block_id": i,
+                        "block_id": report_block_id,
+                        "source_index": i,
                         "detail": "公式块源文本不可靠,仅记录,不作 LaTeX 对比结论",
                     }
                 )
@@ -1530,7 +1663,8 @@ def _audit_one_page(
             table = parse_table_html_fn(content)
             table_out.append(
                 {
-                    "block_id": i,
+                    "block_id": report_block_id,
+                    "source_index": i,
                     "status": table_result["status"],
                     "structure_issues": table_result["structure_issues"],
                     "content_issues": table_result["content_issues"],
@@ -1539,14 +1673,25 @@ def _audit_one_page(
                 }
             )
             for si in table_result["structure_issues"]:
-                issues.append({"code": si["code"], "block_id": i, "detail": si.get("detail", "")})
+                issues.append({
+                    "code": si["code"],
+                    "block_id": report_block_id,
+                    "source_index": i,
+                    "detail": si.get("detail", ""),
+                })
             for ci in table_result["content_issues"]:
-                issues.append({"code": ci["code"], "block_id": i, "detail": ci.get("detail", "")})
+                issues.append({
+                    "code": ci["code"],
+                    "block_id": report_block_id,
+                    "source_index": i,
+                    "detail": ci.get("detail", ""),
+                })
             if table_result["status"] == "table_unscorable":
                 issues.append(
                     {
                         "code": "table_unscorable",
-                        "block_id": i,
+                        "block_id": report_block_id,
+                        "source_index": i,
                         "detail": "表格源不可信/为空,不参与数值对账",
                     }
                 )
@@ -1575,6 +1720,135 @@ def _audit_one_page(
     return page_report, status
 
 
+def corrections_file_fingerprint(path: str | None) -> dict | None:
+    """返回 corrections 文件的强内容指纹；不存在时返回 None。
+
+    只比较 size/mtime 会漏掉同长度原子替换，因此 freshness 绑定原始文件字节的
+    SHA-256。无文件时保持旧报告形状与旧版 resume 行为。
+    """
+    if not path:
+        return None
+    try:
+        with open(path, "rb") as f:
+            payload = f.read()
+    except FileNotFoundError:
+        return None
+    return {
+        "size_bytes": len(payload),
+        "sha256": hashlib.sha256(payload).hexdigest(),
+    }
+
+
+def _load_corrections_snapshot(path: str) -> tuple[list[dict], dict | None]:
+    """一次读取同时得到要应用的 corrections 与其指纹，避免 TOCTOU 漂移。"""
+    try:
+        with open(path, "rb") as f:
+            payload = f.read()
+    except FileNotFoundError:
+        return [], None
+    data = json.loads(payload.decode("utf-8"))
+    corrections = data.get("corrections", [])
+    if not isinstance(corrections, list):
+        corrections = []
+    return corrections, {
+        "size_bytes": len(payload),
+        "sha256": hashlib.sha256(payload).hexdigest(),
+    }
+
+
+def _stable_audit_value(value):
+    """Convert audit inputs to a deterministic, JSON-serializable value."""
+    if is_dataclass(value):
+        return _stable_audit_value(asdict(value))
+    if isinstance(value, dict):
+        return {
+            str(key): _stable_audit_value(item)
+            for key, item in sorted(value.items(), key=lambda pair: str(pair[0]))
+        }
+    if isinstance(value, (list, tuple)):
+        return [_stable_audit_value(item) for item in value]
+    if isinstance(value, (str, int, float, bool)) or value is None:
+        return value
+    if hasattr(value, "__dict__"):
+        return _stable_audit_value(vars(value))
+    return repr(value)
+
+
+def _page_result_fingerprint(work_dir: str, page_no: int) -> dict:
+    """Strongly bind one page to the exact OCR result bytes (including absence)."""
+    path = _checkpoint.page_res_path(work_dir, page_no)
+    try:
+        with open(path, "rb") as handle:
+            payload = handle.read()
+    except FileNotFoundError:
+        return {"present": False}
+    return {
+        "present": True,
+        "size_bytes": len(payload),
+        "sha256": hashlib.sha256(payload).hexdigest(),
+    }
+
+
+def _page_audit_input_fingerprint(
+    *,
+    pdf_fingerprint: dict,
+    page_no: int,
+    work_dir: str,
+    dpi,
+    corrections: list[dict],
+    failed_by_page: dict,
+    decisions_by_page: dict[int, list] | None,
+    thresholds: AuditThresholds,
+    adoption_thresholds,
+    born_digital_mode: str,
+    threshold_profile: str,
+) -> dict:
+    """Fingerprint every input that can change one page's audit result.
+
+    Corrections are intentionally filtered to accepted records on this page.
+    A correction on page N must not invalidate N-1 otherwise a sidecar update
+    degenerates into the former whole-book rescan.
+    """
+    accepted = [
+        correction for correction in corrections
+        if correction.get("page") == page_no
+        and correction.get("status") == "accepted"
+    ]
+    if decisions_by_page is None:
+        adoption_input = {
+            "source": "dry_run",
+            "thresholds": _stable_audit_value(adoption_thresholds),
+        }
+    else:
+        adoption_input = {
+            "source": "recorded",
+            # Missing page and an explicitly empty page are semantically the
+            # same in _audit_one_page (both produce no_decision), so normalize
+            # both to [] and avoid a pointless invalidation.
+            "decisions": _stable_audit_value(decisions_by_page.get(page_no, [])),
+        }
+    payload = {
+        "algorithm_schema": SOURCE_AUDIT_SCHEMA_VERSION,
+        "pdf_fingerprint": pdf_fingerprint,
+        "page": page_no,
+        "page_result": _page_result_fingerprint(work_dir, page_no),
+        "accepted_corrections": _stable_audit_value(accepted),
+        "manifest_failure": _stable_audit_value(failed_by_page.get(page_no)),
+        "adoption": adoption_input,
+        "dpi": dpi,
+        "born_digital_mode": born_digital_mode,
+        "threshold_profile": threshold_profile,
+        "audit_thresholds": _stable_audit_value(thresholds),
+    }
+    encoded = json.dumps(
+        payload, ensure_ascii=False, sort_keys=True, separators=(",", ":"),
+    ).encode("utf-8")
+    return {
+        "algorithm_schema": SOURCE_AUDIT_SCHEMA_VERSION,
+        "sha256": hashlib.sha256(encoded).hexdigest(),
+    }
+
+
 def audit_document(
     pdf_path: str,
     layout: DocLayout,
@@ -1582,6 +1856,8 @@ def audit_document(
     decisions_by_page: dict[int, list] | None,
     born_digital_mode: str | None = None,
     threshold_profile: str = THRESHOLD_PROFILE_UNCALIBRATED,
+    corrections_path: str | None = None,
+    prior_report: dict | None = None,
 ) -> dict:
     """文档级审计聚合(计划 §7.1,Task 8)。只读 PDF + 已落盘 OCR res JSON,
     绝不调用 OCR 引擎、绝不改写 Markdown/任何产物——独立重跑安全。
@@ -1616,6 +1892,8 @@ def audit_document(
 
     dry_run = decisions_by_page is None
     adoption_thresholds = _dry_run_adoption_thresholds()
+    corrections, corrections_fingerprint = _load_corrections_snapshot(
+        corrections_path or layout.corrections_path)
 
     manifest = _checkpoint.load_manifest(layout.work_dir) or {}
     dpi = manifest.get("dpi", _checkpoint.DEFAULT_DPI)
@@ -1623,11 +1901,32 @@ def audit_document(
         f["page"]: f for f in (manifest.get("failed_pages") or [])
     }
 
+    pdf_fingerprint = {
+        "size_bytes": len(pdf_bytes),
+        "sha256": hashlib.sha256(pdf_bytes).hexdigest(),
+    }
+
     doc = fitz.open(pdf_path)
     try:
         page_count = doc.page_count
+        pdf_fingerprint["page_count"] = page_count
+        normalized_mode = (
+            born_digital_mode if born_digital_mode is not None else "unknown"
+        )
+        prior_pages = {}
+        if (
+            isinstance(prior_report, dict)
+            and prior_report.get("schema_version") == SOURCE_AUDIT_SCHEMA_VERSION
+        ):
+            prior_pages = {
+                page.get("page"): page
+                for page in (prior_report.get("pages") or [])
+                if isinstance(page, dict) and isinstance(page.get("page"), int)
+            }
 
         pages_out: list[dict] = []
+        reused_pages = 0
+        recomputed_pages = 0
         prose_blocks_total = 0
         adopted_total = 0
         fallback_reason_counter: Counter = Counter()
@@ -1636,19 +1935,44 @@ def audit_document(
         scorable_count = 0
 
         for page_no in range(1, page_count + 1):
-            page_report, status = _audit_one_page(
-                doc=doc,
-                work_dir=layout.work_dir,
+            input_fingerprint = _page_audit_input_fingerprint(
+                pdf_fingerprint=pdf_fingerprint,
                 page_no=page_no,
+                work_dir=layout.work_dir,
+                dpi=dpi,
+                corrections=corrections,
                 failed_by_page=failed_by_page,
                 decisions_by_page=decisions_by_page,
                 thresholds=thresholds,
                 adoption_thresholds=adoption_thresholds,
-                adopt_prose_blocks_fn=_adopt_prose_blocks,
-                audit_table_fn=_audit_table,
-                parse_table_html_fn=_parse_table_html,
-                header_fingerprint_fn=_header_fingerprint,
+                born_digital_mode=normalized_mode,
+                threshold_profile=threshold_profile,
             )
+            prior_page = prior_pages.get(page_no)
+            if (
+                isinstance(prior_page, dict)
+                and prior_page.get("input_fingerprint") == input_fingerprint
+            ):
+                page_report = dict(prior_page)
+                status = page_report.get("status", "UNSCORABLE")
+                reused_pages += 1
+            else:
+                page_report, status = _audit_one_page(
+                    doc=doc,
+                    work_dir=layout.work_dir,
+                    page_no=page_no,
+                    corrections=corrections,
+                    failed_by_page=failed_by_page,
+                    decisions_by_page=decisions_by_page,
+                    thresholds=thresholds,
+                    adoption_thresholds=adoption_thresholds,
+                    adopt_prose_blocks_fn=_adopt_prose_blocks,
+                    audit_table_fn=_audit_table,
+                    parse_table_html_fn=_parse_table_html,
+                    header_fingerprint_fn=_header_fingerprint,
+                )
+                page_report["input_fingerprint"] = input_fingerprint
+                recomputed_pages += 1
             pages_out.append(page_report)
 
             if status != "UNSCORABLE":
@@ -1684,19 +2008,14 @@ def audit_document(
     else:
         doc_status = "OK"
 
-    pdf_fingerprint = {
-        "size_bytes": len(pdf_bytes),
-        "sha256": hashlib.sha256(pdf_bytes).hexdigest(),
-        "page_count": page_count,
-    }
-
-    return {
-        "schema_version": 2,
+    report = {
+        "schema_version": SOURCE_AUDIT_SCHEMA_VERSION,
         "stem": layout.stem,
         "route": "B",
-        "born_digital_mode": born_digital_mode if born_digital_mode is not None else "unknown",
+        "born_digital_mode": normalized_mode,
         "pdf_fingerprint": pdf_fingerprint,
-        "ocr_fingerprint": {"dpi": dpi, "page_count": page_count},
+        "ocr_fingerprint": _checkpoint.ocr_results_fingerprint(
+            layout.work_dir, page_count, dpi),
         "threshold_profile": threshold_profile,
         "adoption_source": "dry_run" if dry_run else "recorded",
         "summary": {
@@ -1711,9 +2030,16 @@ def audit_document(
                 "fallback_reasons": dict(fallback_reason_counter),
             },
             "issue_counts": dict(issue_counter),
+            "audit_reuse": {
+                "reused_pages": reused_pages,
+                "recomputed_pages": recomputed_pages,
+            },
         },
         "pages": pages_out,
     }
+    if corrections_fingerprint is not None:
+        report["corrections_fingerprint"] = corrections_fingerprint
+    return report
 
 
 def write_audit_report(report: dict, path: str) -> None:
@@ -1757,10 +2083,19 @@ def main(argv: list[str] | None = None) -> int:
     args = ap.parse_args(argv)
 
     layout = resolve_layout(args.stem, args.out, args.work_dir)
+    prior_report = None
+    try:
+        with open(layout.source_audit_path, encoding="utf-8") as handle:
+            loaded = json.load(handle)
+        if isinstance(loaded, dict):
+            prior_report = loaded
+    except (FileNotFoundError, OSError, ValueError):
+        pass
     report = audit_document(
         args.src, layout, ROUTE_B_V1_THRESHOLDS,
         decisions_by_page=None, born_digital_mode=None,
         threshold_profile=THRESHOLD_PROFILE_V1,
+        prior_report=prior_report,
     )
     write_audit_report(report, layout.source_audit_path)
 

@@ -12,6 +12,7 @@ import time
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field, replace
 
+from scripts.pipelines.textbooks import derived_cache
 from scripts.pipelines.textbooks.formula_agents import gates
 from scripts.pipelines.textbooks.formula_agents.corrections_map import (
     build_corrections_payload, write_corrections,
@@ -24,6 +25,7 @@ from scripts.pipelines.textbooks.formula_agents.protocol import (
     AgentResult, ProtocolError, validate_agent_payload,
 )
 from scripts.pipelines.textbooks.formula_candidates import collect_formula_candidates
+from scripts.pipelines.textbooks.vision_repair import content_fingerprint
 
 _UNCERTAIN = "uncertain"
 _CORRECT = "correct"
@@ -218,6 +220,10 @@ class RunReport:
     circuit_broken: bool = False
     rolled_back: bool = False
     reason: str | None = None
+    # ``defer_publish`` callers use this in-memory payload as one input to a
+    # larger document transaction.  It is deliberately absent from disk until
+    # the unified publisher commits Markdown, corrections and page caches.
+    corrections_payload: dict | None = None
 
 
 def _as_candidate_list(raw) -> list[dict]:
@@ -231,9 +237,11 @@ def _as_candidate_list(raw) -> list[dict]:
 
 def run_agents(layout, *, adapters, pdf_path: str, dpi: int = 300,
                batch_size: int = 10, per_provider: int = 3,
+               max_workers: int | None = None,
                confidence_threshold: float = 0.8, circuit_ratio: float = 0.6,
                mode: str = "apply", collect_fn=None, scan_fn=None,
-               reassemble_fn=None, today: str | None = None) -> RunReport:
+               reassemble_fn=None, today: str | None = None,
+               defer_publish: bool = False) -> RunReport:
     """公式 Agent 终检全流程。
 
     不变量:所有失败路径的最坏结果都是"这条没改",绝不是"这条被改坏了"。
@@ -270,16 +278,21 @@ def run_agents(layout, *, adapters, pdf_path: str, dpi: int = 300,
     # 落盘、已验证的 corrections.json,导致下次 reassemble_md 把已应用的修正
     # 全部还原成 OCR。这里直接早返回:不碰 corrections.json,不 reassemble,
     # 也不重新评估闸门/熔断(那些已经在产出 corrections.json 的那次运行里判过了)。
-    if not todo:
+    if not todo and not defer_publish:
         report.reason = "所有批次已在先前运行完成,沿用既有 corrections.json,md 不改动"
         report.applied = 0
         return report
 
+    if max_workers is not None and max_workers <= 0:
+        raise ValueError("max_workers must be positive")
     batches = chunk_candidates(todo, batch_size)
     state = DispatchState.for_adapters(adapters, per_provider=per_provider)
 
     outcomes: list[BatchOutcome] = []
-    with ThreadPoolExecutor(max_workers=max(1, len(batches))) as pool:
+    pool_workers = max(1, len(batches))
+    if max_workers is not None:
+        pool_workers = min(pool_workers, max_workers)
+    with ThreadPoolExecutor(max_workers=pool_workers) as pool:
         futures = [pool.submit(dispatch_with_fallback, b, adapters, state=state,
                                confidence_threshold=confidence_threshold)
                    for b in batches]
@@ -315,7 +328,12 @@ def run_agents(layout, *, adapters, pdf_path: str, dpi: int = 300,
 
     # 全部 verdict 落证据台账(不进 md)
     for r in results:
-        append_ledger(verdicts_path, r.__dict__)
+        candidate = by_id.get(r.candidate_id) or {}
+        append_ledger(verdicts_path, {
+            **r.__dict__,
+            "content_fingerprint": content_fingerprint(
+                str(candidate.get("engine_latex") or "")),
+        })
 
     # --- 闸 3 → 闸 2 → 闸 1 ---
     survivors: list[AgentResult] = []
@@ -350,17 +368,29 @@ def run_agents(layout, *, adapters, pdf_path: str, dpi: int = 300,
 
     # --- propose: 只落 pending,md 一字不动 ---
     if mode != "apply":
-        write_corrections(layout.corrections_path, build_corrections_payload(
-            survivors, by_id, stem=layout.stem, today=today, status="pending"))
+        payload = build_corrections_payload(
+            survivors, by_id, stem=layout.stem, today=today, status="pending")
+        report.corrections_payload = payload
+        if not defer_publish:
+            write_corrections(layout.corrections_path, payload)
         return report
 
     # --- 无可应用条目(如全 provider 失败/全部 pending/全被前四闸拒收):
     #     不动 md、不重建、不做回归检查 —— 没有要写的东西就不该碰 md,
     #     这正是"最坏结果是没改"这条不变量本身,不是可选优化。---
     if not mutating:
-        write_corrections(layout.corrections_path, build_corrections_payload(
-            survivors, by_id, stem=layout.stem, today=today, status="accepted"))
+        payload = build_corrections_payload(
+            survivors, by_id, stem=layout.stem, today=today, status="accepted")
+        report.corrections_payload = payload
+        if not defer_publish:
+            write_corrections(layout.corrections_path, payload)
         report.applied = 0
+        return report
+
+    if defer_publish:
+        report.corrections_payload = build_corrections_payload(
+            survivors, by_id, stem=layout.stem, today=today, status="accepted")
+        report.applied = len(mutating)
         return report
 
     # --- apply: baseline → 快照 → 写 accepted → 重建 → 闸 5 ---
@@ -370,6 +400,7 @@ def run_agents(layout, *, adapters, pdf_path: str, dpi: int = 300,
 
     snap = gates.snapshot_md(layout.md_path)
     corr_snap = gates.snapshot_corrections(layout.corrections_path)
+    cache_snap = derived_cache.snapshot_cache_directory(layout.work_dir)
 
     write_corrections(layout.corrections_path, build_corrections_payload(
         survivors, by_id, stem=layout.stem, today=today, status="accepted"))
@@ -382,6 +413,7 @@ def run_agents(layout, *, adapters, pdf_path: str, dpi: int = 300,
         if snap:
             gates.rollback_md(layout.md_path, snap)
         gates.rollback_corrections(layout.corrections_path, corr_snap)
+        derived_cache.restore_cache_directory(layout.work_dir, cache_snap)
         report.rolled_back = True
         report.reason = regression
         report.applied = 0

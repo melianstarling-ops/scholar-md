@@ -37,6 +37,56 @@ def test_counts_restarts_not_first_run():
     assert len(calls) == 4
 
 
+def test_suspect_exit_stops_without_restart():
+    calls = []
+
+    def runner(argv):
+        calls.append(argv)
+        return 2
+
+    rc = wd.run_until_done(["--src", "x.pdf"], max_restarts=5, runner=runner)
+
+    assert rc == 2
+    assert len(calls) == 1
+
+
+def test_failed_restart_can_end_as_suspect_without_another_restart():
+    seq = [1, 2, 0]
+
+    def runner(argv):
+        return seq.pop(0)
+
+    rc = wd.run_until_done(["--src", "x.pdf"], max_restarts=5, runner=runner)
+
+    assert rc == 2
+    assert seq == [0]
+
+
+def test_unknown_nonzero_exit_restarts_then_can_succeed():
+    seq = [7, -9, 0]
+
+    def runner(argv):
+        return seq.pop(0)
+
+    rc = wd.run_until_done(["--src", "x.pdf"], max_restarts=5, runner=runner)
+
+    assert rc == 0
+    assert seq == []
+
+
+def test_unknown_nonzero_exit_exhaustion_maps_to_failed():
+    calls = []
+
+    def runner(argv):
+        calls.append(argv)
+        return 17
+
+    rc = wd.run_until_done(["--src", "x.pdf"], max_restarts=2, runner=runner)
+
+    assert rc == 1
+    assert len(calls) == 3
+
+
 def test_main_forwards_no_selfcheck_json_flag(monkeypatch):
     captured = {}
     def fake_run_until_done(argv, max_restarts):
@@ -197,7 +247,7 @@ def test_main_forwards_agents_apply_to_convert(monkeypatch):
     assert argv[argv.index("--formula-repair") + 1] == "agents-apply"
 
 
-def test_main_formula_repair_defaults_to_deterministic(monkeypatch):
+def test_main_auto_forwards_unified_policy_to_convert(monkeypatch):
     captured = {}
     def fake_run_until_done(argv, max_restarts):
         captured["argv"] = argv
@@ -207,7 +257,58 @@ def test_main_formula_repair_defaults_to_deterministic(monkeypatch):
     with pytest.raises(SystemExit):
         wd.main()
     argv = captured["argv"]
+    assert argv[argv.index("--repair") + 1] == "auto"
+    assert argv[argv.index("--repair-workers") + 1] == "4"
+    assert argv[argv.index("--repair-max-rounds") + 1] == "2"
+    assert "--formula-repair" not in argv
+    assert "--quality-repair" not in argv
+    assert "--quality-agent" not in argv
+
+
+def test_main_auto_with_explicit_agent_forwards_unified_agent(monkeypatch):
+    captured = {}
+
+    def fake_run_until_done(argv, max_restarts):
+        captured["argv"] = argv
+        return 0
+
+    monkeypatch.setattr(wd, "run_until_done", fake_run_until_done)
+    monkeypatch.setattr("sys.argv", [
+        "watchdog.py", "--src", "x.pdf",
+        "--repair-agent", "codex:gpt-5.6-sol:high",
+    ])
+
+    with pytest.raises(SystemExit) as exc:
+        wd.main()
+    assert exc.value.code == 0
+    argv = captured["argv"]
+    assert argv[argv.index("--repair") + 1] == "auto"
+    assert argv[argv.index("--repair-agent") + 1] == "codex:gpt-5.6-sol:high"
+    assert "--formula-repair" not in argv
+    assert "--quality-repair" not in argv
+    assert "--quality-agent" not in argv
+
+
+def test_main_repair_off_with_legacy_formula_override_is_stage_local(monkeypatch):
+    captured = {}
+
+    def fake_run_until_done(argv, max_restarts):
+        captured["argv"] = argv
+        return 0
+
+    monkeypatch.setattr(wd, "run_until_done", fake_run_until_done)
+    monkeypatch.setattr("sys.argv", [
+        "watchdog.py", "--src", "x.pdf", "--repair", "off",
+        "--formula-repair", "deterministic",
+    ])
+
+    with pytest.raises(SystemExit) as exc:
+        wd.main()
+    assert exc.value.code == 0
+    argv = captured["argv"]
+    assert argv[argv.index("--repair") + 1] == "off"
     assert argv[argv.index("--formula-repair") + 1] == "deterministic"
+    assert "--quality-repair" not in argv
 
 
 def test_main_rejects_invalid_formula_repair(monkeypatch):
@@ -216,3 +317,25 @@ def test_main_rejects_invalid_formula_repair(monkeypatch):
     with pytest.raises(SystemExit) as exc:
         wd.main()
     assert exc.value.code != 0
+
+
+def test_main_forwards_quality_configuration_to_convert(monkeypatch):
+    captured = {}
+
+    def fake_run_until_done(argv, max_restarts):
+        captured["argv"] = argv
+        return 0
+
+    monkeypatch.setattr(wd, "run_until_done", fake_run_until_done)
+    monkeypatch.setattr("sys.argv", [
+        "watchdog.py", "--src", "x.pdf", "--quality-repair", "propose",
+        "--quality-agent", "codex:gpt-5.6-sol:high",
+        "--quality-agent", "gemini:m:medium", "--quality-learn", "package",
+    ])
+    with pytest.raises(SystemExit) as exc:
+        wd.main()
+    assert exc.value.code == 0
+    argv = captured["argv"]
+    assert argv[argv.index("--quality-repair") + 1] == "propose"
+    assert argv.count("--quality-agent") == 2
+    assert argv[argv.index("--quality-learn") + 1] == "package"

@@ -198,6 +198,22 @@ def test_sanitize_latex_preserves_displaystyle():
     assert sanitize_latex(r"\displaystyle\int x") == r"\displaystyle\int x"
 
 
+def test_sanitize_latex_restores_integral_limits_misread_as_matrix():
+    source = (r"P=A\left|\begin{matrix}l\\ \displaystyle\int "
+              r"S_{\mathrm{hotspot}}(z)E_{\tan}(z)dz\\ 0\end{matrix}\right|^{2}")
+    expected = (r"P=A\left|\int_{0}^{l} S_{\mathrm{hotspot}}(z)"
+                r"E_{\tan}(z)dz\right|^{2}")
+    assert sanitize_latex(source) == expected
+
+
+def test_sanitize_latex_does_not_rewrite_normal_matrix_or_bounded_integral():
+    normal = r"\left|\begin{matrix}a\\ b\\ c\end{matrix}\right|"
+    bounded = (r"\left|\begin{matrix}l\\ \int_{0}^{l} f(z)dz\\ "
+               r"0\end{matrix}\right|")
+    assert sanitize_latex(normal) == normal
+    assert sanitize_latex(bounded) == bounded
+
+
 def test_sanitize_latex_collapses_adjacent_double_subscript():
     # 同一节点连续两个下标 _{A}_{B} 是 KaTeX 硬报错(double subscript);兜底:单行合并
     assert sanitize_latex(r"x_{A}_{B}") == r"x_{A\ B}"
@@ -678,6 +694,44 @@ def test_passthrough_empty_content_silently_skipped():
     ]
     md, warnings = reconstruct_markdown(blocks)
     assert md.strip() == "body"
+    assert warnings == []
+
+
+def test_vision_footnote_is_preserved_unless_ordered_text_already_contains_it():
+    unique = [
+        {"block_label": "text", "block_content": "body", "block_order": 1,
+         "block_bbox": [0, 100, 10, 110]},
+        {"block_label": "vision_footnote", "block_content": "X distance; Y phase",
+         "block_order": None, "block_bbox": [0, 200, 10, 210]},
+    ]
+    md, warnings = reconstruct_markdown(unique)
+    assert "X distance; Y phase" in md
+    assert warnings == []
+
+    duplicate = [
+        {"block_label": "text", "block_content": "Key X distance; Y phase",
+         "block_order": 1, "block_bbox": [0, 100, 10, 110]},
+        {"block_label": "vision_footnote", "block_content": "X distance; Y phase",
+         "block_order": None, "block_bbox": [0, 200, 10, 210]},
+    ]
+    md, warnings = reconstruct_markdown(duplicate)
+    assert md.count("X distance; Y phase") == 1
+
+
+def test_duplicate_vision_footnote_is_emitted_once_per_page():
+    blocks = [
+        {"block_label": "text", "block_content": "Figure body",
+         "block_order": 0, "block_bbox": [0, 0, 100, 10]},
+        {"block_label": "vision_footnote", "block_content": "Key\n1 fit",
+         "block_order": None, "block_bbox": [0, 20, 100, 30]},
+        {"block_label": "vision_footnote", "block_content": "Key  1 fit",
+         "block_order": None, "block_bbox": [0, 40, 100, 50]},
+    ]
+
+    md, warnings = reconstruct_markdown(blocks, stem="Demo", page=1)
+
+    assert md.count("Key") == 1
+    assert warnings == []
     assert warnings == []
 
 

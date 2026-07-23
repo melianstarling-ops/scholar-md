@@ -53,7 +53,7 @@ def _load_render_errors(layout: DocLayout) -> dict[int, list]:
 
 
 def _load_source_audit(layout: DocLayout) -> dict | None:
-    """读取 <stem>_source_audit.json(schema v2)。缺失/损坏(非法 JSON、顶层
+    """读取 <stem>_source_audit.json(schema v6)。缺失/损坏(非法 JSON、顶层
     不是 dict)一律返回 None——debug view 据此显式渲染"无审计数据",绝不崩、
     也不现场重算审计(那是 source_audit.py 独立 CLI 的职责,本函数只读产物)。"""
     path = layout.source_audit_path

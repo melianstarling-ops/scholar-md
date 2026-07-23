@@ -121,15 +121,16 @@ def _image_flags(provider: str, entries: list[dict]) -> list[str]:
 
 
 def build_invocation(provider: str, entries: list[dict],
-                     prompt: str) -> tuple[list[str], str | None]:
+                     prompt: str, *, model: str | None = None,
+                     effort: str | None = None) -> tuple[list[str], str | None]:
     """组装某 provider 的完整 argv 与 stdin 输入。
 
     返回 (argv, stdin_input)。agy(gemini)的 prompt 走 argv 末尾参数,
     stdin_input 为 None;其余 provider stdin_input == prompt。
     真机实测校准(2026-07-15):四家均 exit 0 + 干净 JSON + 正确读图。
     """
-    model = _MODELS[provider]["model"]
-    effort = _MODELS[provider]["effort"]
+    model = model or _MODELS[provider]["model"]
+    effort = effort or _MODELS[provider]["effort"]
     repo = os.getcwd()
     image_flags = _image_flags(provider, entries)
 
@@ -175,19 +176,22 @@ def build_invocation(provider: str, entries: list[dict],
 class CliAdapter:
     """真实外部 CLI adapter。唯一 shell-out 处。"""
 
-    def __init__(self, name: str):
+    def __init__(self, name: str, *, model: str | None = None,
+                 effort: str | None = None):
         self.name = name
-        self.model = _MODELS[name]["model"]
-        self.effort = _MODELS[name]["effort"]
+        self.model = model or _MODELS[name]["model"]
+        self.effort = effort or _MODELS[name]["effort"]
 
     def probe(self) -> bool:
-        argv, _stdin = build_invocation(self.name, [], "")
+        argv, _stdin = build_invocation(
+            self.name, [], "", model=self.model, effort=self.effort)
         exe = argv[0]
         return bool(shutil.which(exe)) or exe.endswith(".cjs") or "node" in exe
 
     def __call__(self, entries: list[dict], *, timeout: int = 300) -> RawResponse:
         prompt = build_prompt(entries)
-        argv, stdin_input = build_invocation(self.name, entries, prompt)
+        argv, stdin_input = build_invocation(
+            self.name, entries, prompt, model=self.model, effort=self.effort)
         try:
             proc = subprocess.run(argv, input=stdin_input, capture_output=True,
                                   text=True, encoding="utf-8", errors="replace",
@@ -216,6 +220,25 @@ def _unwrap_stdout(provider: str, stdout: str) -> str:
     if isinstance(env, dict) and "result" in env:
         return str(env.get("result") or "")
     return stdout
+
+
+def run_prompt(provider: str, prompt: str, *, model: str, effort: str,
+               image_paths: list[str] | tuple[str, ...] = (),
+               timeout: int = 300) -> RawResponse:
+    """通用只读 prompt transport；不注入公式 prompt，也不选择隐式模型。"""
+    entries = [{"crop_path": path} for path in image_paths]
+    argv, stdin_input = build_invocation(
+        provider, entries, prompt, model=model, effort=effort)
+    try:
+        proc = subprocess.run(argv, input=stdin_input, capture_output=True,
+                              text=True, encoding="utf-8", errors="replace",
+                              timeout=timeout)
+    except subprocess.TimeoutExpired as exc:
+        return RawResponse("", f"timeout after {timeout}s: {exc}", 124)
+    except OSError as exc:
+        return RawResponse("", f"launch failed: {exc}", 127)
+    return RawResponse(_unwrap_stdout(provider, proc.stdout or ""),
+                       proc.stderr or "", proc.returncode)
 
 
 def default_adapters() -> list[CliAdapter]:

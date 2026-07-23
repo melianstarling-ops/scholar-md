@@ -1,9 +1,11 @@
 import json
 import os
+import hashlib
 
 import fitz
 
 from scripts.pipelines.textbooks import checkpoint as cp
+from scripts.pipelines.textbooks import source_audit as source_audit_module
 from scripts.pipelines.textbooks.paths import resolve_layout
 from scripts.pipelines.textbooks.prose_adoption import AdoptionDecision
 from scripts.pipelines.textbooks.source_audit import (
@@ -846,6 +848,249 @@ def test_audit_prose_numeric_change_flags_numeric_mismatch():
     assert result["block_metrics"][0]["numeric_token_recall"] == 0.0
 
 
+def test_audit_prose_numeric_recall_ignores_unit_heuristic_noise_from_reordering():
+    # ISO10974_CN p13 的真实形状：源词序把节号 3.3 紧邻 B1+rms，
+    # extract_numeric_tokens 会启发式地把 B 当成“单位”；OCR 换行后同一个
+    # B1 不再产生单位 token。数值 3.3/1/5 实际全都存在，不应发高严重度
+    # numeric_mismatch。
+    source_text = (
+        "definition 3.3 B1+rms static field value 1,5 Tin otherwise stated"
+    )
+    words = [
+        _sw(token, (0, 0, 1, 1), line_no=0, word_no=i)
+        for i, token in enumerate(source_text.split())
+    ]
+    ocr_text = (
+        "definition static field value 1,5 Tin otherwise stated\n"
+        "3.3\nB1+rms"
+    )
+    blocks = [_block("text", [0, 0, 100, 100], content=ocr_text)]
+    decisions = [_decision(0, "ocr", reasons=["adoption_disagreement"])]
+    thresholds = _audit_thresholds(
+        minimum_reliable_chars=5,
+        maximum_block_ned=1.0,
+        minimum_char_recall=0.0,
+        minimum_token_recall=0.0,
+        maximum_addition_ratio=1.0,
+        minimum_numeric_token_recall=0.9,
+    )
+
+    result = audit_prose(
+        _audit_page(words), blocks, decisions, _assignment({0: words}), thresholds)
+
+    assert "numeric_mismatch" not in _issue_codes(result)
+    assert result["block_metrics"][0]["numeric_token_recall"] == 1.0
+
+
+def test_audit_prose_numeric_recall_ignores_uppercase_prose_as_fake_units():
+    # ISO10974_CN p103 的真实形状：源侧“端口1 AIMD端口2”会把 AIMD
+    # 启发式误当成单位，OCR 侧 `3P91` 又会把 P 误当单位。端口数值
+    # 1/2/3 本身均保留，numeric_mismatch 不应由这些普通大写词驱动。
+    source_text = "J AIMD端口1 AIMD端口2 AIMD端口3"
+    words = [
+        _sw(token, (0, 0, 1, 1), line_no=0, word_no=i)
+        for i, token in enumerate(source_text.split())
+    ]
+    ocr_text = "1 switch e.g.3P91\nAIMD端口1\nAIMD端口2\nAIMD端口3"
+    blocks = [_block("text", [0, 0, 100, 100], content=ocr_text)]
+    decisions = [_decision(0, "ocr", reasons=["adoption_disagreement"])]
+    thresholds = _audit_thresholds(
+        minimum_reliable_chars=5,
+        maximum_block_ned=1.0,
+        minimum_char_recall=0.0,
+        minimum_token_recall=0.0,
+        maximum_addition_ratio=1.0,
+        minimum_numeric_token_recall=0.9,
+    )
+
+    result = audit_prose(
+        _audit_page(words), blocks, decisions, _assignment({0: words}), thresholds)
+
+    assert "numeric_mismatch" not in _issue_codes(result)
+    assert result["block_metrics"][0]["numeric_token_recall"] == 1.0
+
+
+def test_audit_prose_numeric_recall_still_flags_hierarchical_decimal_loss():
+    # ISO10974_CN p44：IEC 条款号 201.7.9.3.101 被 OCR 成
+    # 2017.9.3.101，是真实的小数点/层级分隔符丢失，必须继续告警。
+    source_text = "reference clause 201.7.9.3.101 requires gradient heating evaluation"
+    words = [
+        _sw(token, (0, 0, 1, 1), line_no=0, word_no=i)
+        for i, token in enumerate(source_text.split())
+    ]
+    ocr_text = "reference clause 2017.9.3.101 requires gradient heating evaluation"
+    blocks = [_block("text", [0, 0, 100, 100], content=ocr_text)]
+    decisions = [_decision(0, "ocr", reasons=["adoption_disagreement"])]
+    thresholds = _audit_thresholds(
+        minimum_reliable_chars=5,
+        maximum_block_ned=1.0,
+        minimum_char_recall=0.0,
+        minimum_token_recall=0.0,
+        maximum_addition_ratio=1.0,
+        minimum_numeric_token_recall=0.9,
+    )
+
+    result = audit_prose(
+        _audit_page(words), blocks, decisions, _assignment({0: words}), thresholds)
+
+    assert "numeric_mismatch" in _issue_codes(result)
+    assert result["block_metrics"][0]["numeric_token_recall"] < 0.9
+
+
+def test_audit_prose_standard_number_hyphen_glyph_is_numeric_equivalent():
+    source_text = (
+        "SOURCE IEC 60601‑2‑33:2010 AMD1:2013 AMD2:2015, 201.3.212"
+    )
+    words = [
+        _sw(token, (0, 0, 1, 1), line_no=0, word_no=i)
+        for i, token in enumerate(source_text.split())
+    ]
+    ocr_text = "SOURCE IEC 60601-2-33:2010 AMD1:2013 AMD2:2015, 201.3.212"
+    blocks = [_block("text", [0, 0, 100, 100], content=ocr_text)]
+    decisions = [_decision(0, "ocr", reasons=["adoption_disagreement"])]
+    result = audit_prose(
+        _audit_page(words),
+        blocks,
+        decisions,
+        _assignment({0: words}),
+        _audit_thresholds(
+            minimum_reliable_chars=5,
+            maximum_block_ned=1.0,
+            minimum_char_recall=0.0,
+            minimum_token_recall=0.0,
+            maximum_addition_ratio=1.0,
+            minimum_numeric_token_recall=0.9,
+        ),
+    )
+    assert "numeric_mismatch" not in _issue_codes(result)
+    assert result["block_metrics"][0]["numeric_token_recall"] == 1.0
+
+
+def test_audit_prose_figure_title_baseline_and_superscript_identity_match():
+    source_text = (
+        "Table I.3 — SAIMD-1 |total electric field|2, "
+        "6 min and 15 min at 2 mm and 5 mm"
+    )
+    words = [
+        _sw(token, (0, 0, 1, 1), line_no=0, word_no=i)
+        for i, token in enumerate(source_text.split())
+    ]
+    ocr_text = (
+        "Table I.3 — SAIMD-1 |total electric field|², "
+        "6 min and 15 min at 2 mm and 5 mm"
+    )
+    blocks = [_block("figure_title", [0, 0, 100, 100], content=ocr_text)]
+    decisions = [_decision(0, "ocr", reasons=["adoption_disagreement"])]
+    result = audit_prose(
+        _audit_page(words),
+        blocks,
+        decisions,
+        _assignment({0: words}),
+        _audit_thresholds(
+            minimum_reliable_chars=5,
+            maximum_block_ned=1.0,
+            minimum_char_recall=0.0,
+            minimum_token_recall=0.0,
+            maximum_addition_ratio=1.0,
+            minimum_numeric_token_recall=0.9,
+        ),
+    )
+    assert "numeric_mismatch" not in _issue_codes(result)
+    assert result["block_metrics"][0]["numeric_token_recall"] == 1.0
+
+
+def test_audit_prose_exports_real_block_id_and_internal_source_index():
+    words = [
+        _sw("The", (0, 0, 1, 1), word_no=0),
+        _sw("measured", (0, 0, 1, 1), word_no=1),
+        _sw("value", (0, 0, 1, 1), word_no=2),
+        _sw("is", (0, 0, 1, 1), word_no=3),
+        _sw("0.042", (0, 0, 1, 1), word_no=4),
+        _sw("exactly", (0, 0, 1, 1), word_no=5),
+    ]
+    block = _block(
+        "text", [0, 0, 100, 100],
+        content="The measured value is 0.42 exactly",
+    )
+    block["block_id"] = 73
+    result = audit_prose(
+        _audit_page(words),
+        [block],
+        [_decision(0, "ocr", reasons=["adoption_disagreement"])],
+        _assignment({0: words}),
+        _audit_thresholds(
+            minimum_reliable_chars=5,
+            maximum_block_ned=1.0,
+            minimum_char_recall=0.0,
+            minimum_token_recall=0.0,
+            maximum_addition_ratio=1.0,
+            minimum_numeric_token_recall=0.9,
+        ),
+    )
+
+    issue = next(
+        item for item in result["issues"] if item["code"] == "numeric_mismatch"
+    )
+    assert issue["block_id"] == 73
+    assert issue["source_index"] == 0
+    assert 73 in result["block_metrics"]
+    assert 0 not in result["block_metrics"]
+    assert result["block_metrics"][73]["source_index"] == 0
+
+
+def test_audit_prose_severe_collapse_emits_agent_routable_signal():
+    tokens = (
+        "Measurement through the implanted lead electrode requires a differential "
+        "amplifier and complete charge calculation before evaluation"
+    ).split()
+    words = [
+        _sw(token, (0, 0, 1, 1), line_no=0, word_no=i)
+        for i, token in enumerate(tokens)
+    ]
+    block = _block("text", [0, 0, 100, 100], content="Measurement x")
+    result = audit_prose(
+        _audit_page(words),
+        [block],
+        [_decision(0, "ocr", reasons=["adoption_disagreement"])],
+        _assignment({0: words}),
+        _audit_thresholds(minimum_reliable_chars=5),
+    )
+
+    assert "severe_prose_degradation" in _issue_codes(result)
+    severe = next(
+        item for item in result["issues"]
+        if item["code"] == "severe_prose_degradation"
+    )
+    assert severe["block_id"] == 0
+    assert severe["source_index"] == 0
+    assert result["block_metrics"][0]["char_recall"] < 0.20
+
+
+def test_audit_prose_reordering_and_newlines_do_not_emit_severe_signal():
+    tokens = [
+        "Zephyr", "quietly", "traversed", "distant", "valleys",
+        "beneath", "glowing", "amber", "skies", "today",
+    ]
+    words = [
+        _sw(token, (0, 0, 1, 1), line_no=0, word_no=i)
+        for i, token in enumerate(tokens)
+    ]
+    block = _block(
+        "text", [0, 0, 100, 100],
+        content="\n".join(reversed(tokens)),
+    )
+    result = audit_prose(
+        _audit_page(words),
+        [block],
+        [_decision(0, "ocr", reasons=["adoption_disagreement"])],
+        _assignment({0: words}),
+        _audit_thresholds(minimum_reliable_chars=5),
+    )
+
+    assert result["block_metrics"][0]["char_recall"] == 1.0
+    assert "severe_prose_degradation" not in _issue_codes(result)
+
+
 # ---- 5. 主指标为逐块 NED:多重集召回 100% 但语序打乱 → prose_mismatch ------
 
 
@@ -892,6 +1137,7 @@ def test_audit_prose_adopted_block_only_records_ned_no_issue():
     assert result["issues"] == []
     assert result["status"] == "OK"
     assert result["block_metrics"][0] == {
+        "source_index": 0,
         "content_source": "source_text",
         "block_ned": 0.15,
     }
@@ -1434,7 +1680,7 @@ def test_audit_prose_ordinary_block_metrics_unchanged_by_refactor():
     bm = result["block_metrics"][0]
     # 字段集合锁定:不多出 numeric_audit_skipped_math,不缺任何既有字段。
     assert set(bm.keys()) == {
-        "content_source", "source_unreliable", "block_ned", "char_recall",
+        "source_index", "content_source", "source_unreliable", "block_ned", "char_recall",
         "token_recall", "numeric_token_recall", "addition_ratio",
         "src_char_count", "ocr_char_count",
     }
@@ -1688,6 +1934,195 @@ def _doc_layout(tmp_path, stem="Book"):
     return resolve_layout(stem, str(tmp_path / "out"), str(tmp_path / "work"))
 
 
+def _make_incremental_audit_fixture(tmp_path):
+    layout = _doc_layout(tmp_path)
+    pdf_path = str(tmp_path / "incremental.pdf")
+    _make_pdf(
+        pdf_path,
+        [
+            [("page one source", (72, 72))],
+            [("page two source", (72, 72))],
+        ],
+    )
+    _write_manifest(layout.work_dir, page_count=2)
+    for page, content in ((1, "page one source"), (2, "page two source")):
+        _write_page_res(
+            layout.work_dir,
+            page,
+            [{
+                "block_id": 0,
+                "block_label": "text",
+                "block_content": content,
+                "block_bbox": [0, 0, 600, 800],
+            }],
+        )
+    return layout, pdf_path
+
+
+def test_audit_document_reuses_unchanged_pages_and_reaudits_one_changed_res(
+    tmp_path,
+):
+    layout, pdf_path = _make_incremental_audit_fixture(tmp_path)
+    first = audit_document(
+        pdf_path,
+        layout,
+        ROUTE_B_V1_UNCALIBRATED_THRESHOLDS,
+        decisions_by_page=None,
+    )
+    assert first["summary"]["audit_reuse"] == {
+        "reused_pages": 0,
+        "recomputed_pages": 2,
+    }
+
+    unchanged = audit_document(
+        pdf_path,
+        layout,
+        ROUTE_B_V1_UNCALIBRATED_THRESHOLDS,
+        decisions_by_page=None,
+        prior_report=first,
+    )
+    assert unchanged["summary"]["audit_reuse"] == {
+        "reused_pages": 2,
+        "recomputed_pages": 0,
+    }
+
+    _write_page_res(
+        layout.work_dir,
+        2,
+        [{
+            "block_id": 0,
+            "block_label": "text",
+            "block_content": "page two changed",
+            "block_bbox": [0, 0, 600, 800],
+        }],
+    )
+    one_changed = audit_document(
+        pdf_path,
+        layout,
+        ROUTE_B_V1_UNCALIBRATED_THRESHOLDS,
+        decisions_by_page=None,
+        prior_report=unchanged,
+    )
+    assert one_changed["summary"]["audit_reuse"] == {
+        "reused_pages": 1,
+        "recomputed_pages": 1,
+    }
+    assert (
+        one_changed["pages"][0]["input_fingerprint"]
+        == unchanged["pages"][0]["input_fingerprint"]
+    )
+
+
+def test_audit_document_reaudits_only_page_with_new_accepted_correction(tmp_path):
+    layout, pdf_path = _make_incremental_audit_fixture(tmp_path)
+    first = audit_document(
+        pdf_path,
+        layout,
+        ROUTE_B_V1_UNCALIBRATED_THRESHOLDS,
+        decisions_by_page=None,
+    )
+    corrections_path = str(tmp_path / "staged_corrections.json")
+    with open(corrections_path, "w", encoding="utf-8") as handle:
+        json.dump(
+            {
+                "corrections": [{
+                    "page": 1,
+                    "block_id": 0,
+                    "status": "accepted",
+                    "content_fingerprint": "does-not-match",
+                    "corrected_latex": "replacement",
+                }],
+            },
+            handle,
+        )
+    changed = audit_document(
+        pdf_path,
+        layout,
+        ROUTE_B_V1_UNCALIBRATED_THRESHOLDS,
+        decisions_by_page=None,
+        corrections_path=corrections_path,
+        prior_report=first,
+    )
+    assert changed["summary"]["audit_reuse"] == {
+        "reused_pages": 1,
+        "recomputed_pages": 1,
+    }
+    assert (
+        changed["pages"][1]["input_fingerprint"]
+        == first["pages"][1]["input_fingerprint"]
+    )
+
+
+def test_audit_document_global_inputs_invalidate_all_pages(tmp_path, monkeypatch):
+    layout, pdf_path = _make_incremental_audit_fixture(tmp_path)
+    first = audit_document(
+        pdf_path,
+        layout,
+        ROUTE_B_V1_UNCALIBRATED_THRESHOLDS,
+        decisions_by_page=None,
+        born_digital_mode="ocr",
+        threshold_profile="profile-a",
+    )
+
+    profile_changed = audit_document(
+        pdf_path,
+        layout,
+        ROUTE_B_V1_UNCALIBRATED_THRESHOLDS,
+        decisions_by_page=None,
+        born_digital_mode="ocr",
+        threshold_profile="profile-b",
+        prior_report=first,
+    )
+    assert profile_changed["summary"]["audit_reuse"]["recomputed_pages"] == 2
+
+    mode_changed = audit_document(
+        pdf_path,
+        layout,
+        ROUTE_B_V1_UNCALIBRATED_THRESHOLDS,
+        decisions_by_page=None,
+        born_digital_mode="hybrid",
+        threshold_profile="profile-b",
+        prior_report=profile_changed,
+    )
+    assert mode_changed["summary"]["audit_reuse"]["recomputed_pages"] == 2
+
+    replacement_pdf = str(tmp_path / "replacement.pdf")
+    _make_pdf(
+        replacement_pdf,
+        [
+            [("page one source changed", (72, 72))],
+            [("page two source", (72, 72))],
+        ],
+    )
+    os.replace(replacement_pdf, pdf_path)
+    pdf_changed = audit_document(
+        pdf_path,
+        layout,
+        ROUTE_B_V1_UNCALIBRATED_THRESHOLDS,
+        decisions_by_page=None,
+        born_digital_mode="hybrid",
+        threshold_profile="profile-b",
+        prior_report=mode_changed,
+    )
+    assert pdf_changed["summary"]["audit_reuse"]["recomputed_pages"] == 2
+
+    monkeypatch.setattr(
+        source_audit_module,
+        "SOURCE_AUDIT_SCHEMA_VERSION",
+        source_audit_module.SOURCE_AUDIT_SCHEMA_VERSION + 1,
+    )
+    schema_changed = audit_document(
+        pdf_path,
+        layout,
+        ROUTE_B_V1_UNCALIBRATED_THRESHOLDS,
+        decisions_by_page=None,
+        born_digital_mode="hybrid",
+        threshold_profile="profile-b",
+        prior_report=pdf_changed,
+    )
+    assert schema_changed["summary"]["audit_reuse"]["recomputed_pages"] == 2
+
+
 # ---- 1. 多页聚合:一页采信、一页回退 → summary 与页级结果一致 ----------------
 
 
@@ -1930,11 +2365,11 @@ def test_audit_document_records_formula_and_table_block_audits(tmp_path):
     _write_page_res(
         layout.work_dir, 1,
         [
-            {"block_label": "text", "block_content": "hello world",
+            {"block_id": 41, "block_label": "text", "block_content": "hello world",
              "block_bbox": [0, 0, 600, 200]},
-            {"block_label": "display_formula", "block_content": "$x^2$",
+            {"block_id": 305, "block_label": "display_formula", "block_content": "$x^2$",
              "block_bbox": [0, 200, 600, 400]},
-            {"block_label": "table",
+            {"block_id": 900, "block_label": "table",
              "block_content": "<table><tr><th>A</th></tr><tr><td>1</td></tr></table>",
              "block_bbox": [0, 400, 600, 600]},
         ],
@@ -1946,13 +2381,17 @@ def test_audit_document_records_formula_and_table_block_audits(tmp_path):
 
     page = report["pages"][0]
     assert len(page["blocks"]) == 3
+    assert [(block["block_id"], block["source_index"]) for block in page["blocks"]] == [
+        (41, 0), (305, 1), (900, 2),
+    ]
     assert page["blocks"][0]["content_source"] == "source_text"  # prose 采信
     assert page["blocks"][1]["reasons"] == ["label_not_adoptable"]  # 公式永不采信
     assert page["blocks"][2]["reasons"] == ["label_not_adoptable"]  # 表格永不采信
 
     assert len(page["formula_audit"]) == 1
     formula = page["formula_audit"][0]
-    assert formula["block_id"] == 1
+    assert formula["block_id"] == 305
+    assert formula["source_index"] == 1
     assert formula["pua_count"] == 0
     assert formula["control_char_count"] == 0
     assert formula["source_char_count"] > 0
@@ -1961,10 +2400,72 @@ def test_audit_document_records_formula_and_table_block_audits(tmp_path):
 
     assert len(page["table_audit"]) == 1
     table = page["table_audit"][0]
-    assert table["block_id"] == 2
+    assert table["block_id"] == 900
+    assert table["source_index"] == 2
     assert isinstance(table["header_fingerprint"], str)
     assert len(table["header_fingerprint"]) == 64  # sha256 hex
     assert "n_rows" in table["metrics"]
+
+
+# ---- 5b. accepted corrections 是审计输入叠加层,不改 raw res ---------------
+
+
+def test_audit_document_applies_accepted_correction_in_memory_without_mutating_res(
+        tmp_path, monkeypatch):
+    from scripts.pipelines.textbooks import table_audit
+    from scripts.pipelines.textbooks.vision_repair import content_fingerprint
+
+    layout = _doc_layout(tmp_path)
+    pdf_path = str(tmp_path / "book.pdf")
+    _make_pdf(pdf_path, [[("A 42", (72, 72))]])
+    _write_manifest(layout.work_dir, page_count=1)
+    raw_html = "<table><tr><th>A</th></tr><tr><td>420</td></tr></table>"
+    corrected_html = "<table><tr><th>A</th></tr><tr><td>42</td></tr></table>"
+    _write_page_res(
+        layout.work_dir, 1,
+        [{"block_id": 0, "block_label": "table", "block_content": raw_html,
+          "block_bbox": [0, 0, 600, 800]}],
+    )
+    os.makedirs(layout.doc_work_dir, exist_ok=True)
+    with open(layout.corrections_path, "w", encoding="utf-8") as f:
+        json.dump({
+            "stem": layout.stem,
+            "corrections": [{
+                "page": 1,
+                "block_id": 0,
+                "status": "accepted",
+                "content_fingerprint": content_fingerprint(raw_html),
+                "corrected_latex": corrected_html,
+            }],
+        }, f, ensure_ascii=False)
+
+    seen: list[str] = []
+
+    def capture_table(block, _words):
+        seen.append(block["block_content"])
+        return {
+            "status": "OK",
+            "structure_issues": [],
+            "content_issues": [],
+            "metrics": {"n_rows": 2, "n_cols": 1},
+        }
+
+    monkeypatch.setattr(table_audit, "audit_table", capture_table)
+    report = audit_document(
+        pdf_path, layout, ROUTE_B_V1_UNCALIBRATED_THRESHOLDS,
+        decisions_by_page=None,
+    )
+
+    assert seen == [corrected_html]
+    with open(cp.page_res_path(layout.work_dir, 1), encoding="utf-8") as f:
+        persisted = json.load(f)
+    assert persisted["parsing_res_list"][0]["block_content"] == raw_html
+
+    correction_bytes = open(layout.corrections_path, "rb").read()
+    assert report["corrections_fingerprint"] == {
+        "size_bytes": len(correction_bytes),
+        "sha256": hashlib.sha256(correction_bytes).hexdigest(),
+    }
 
 
 # ---- 6. write_audit_report 原子写:替换已存在文件、内容可 round-trip -------
@@ -2143,20 +2644,26 @@ def test_audit_document_summary_has_no_page_detail_duplication(tmp_path):
     )
     assert set(report["summary"].keys()) == {
         "status", "pages", "scorable_pages", "suspect_pages",
-        "adoption", "issue_counts",
+        "adoption", "issue_counts", "audit_reuse",
     }
     # 顶层 report["pages"] 是逐页明细列表;summary["pages"] 只是计数(int),
     # 两者同名不同义——summary 里绝不应嵌入页级明细。
     assert isinstance(report["pages"], list)
     assert isinstance(report["summary"]["pages"], int)
-    assert report["schema_version"] == 2
+    assert report["schema_version"] == 6
     assert report["route"] == "B"
     assert report["threshold_profile"] == THRESHOLD_PROFILE_UNCALIBRATED
     assert report["pdf_fingerprint"]["page_count"] == 1
     assert isinstance(report["pdf_fingerprint"]["sha256"], str)
     assert len(report["pdf_fingerprint"]["sha256"]) == 64
     assert report["pdf_fingerprint"]["size_bytes"] == os.path.getsize(pdf_path)
-    assert report["ocr_fingerprint"] == {"dpi": 150, "page_count": 1}
+    assert report["ocr_fingerprint"]["dpi"] == 150
+    assert report["ocr_fingerprint"]["page_count"] == 1
+    assert report["ocr_fingerprint"]["result_page_count"] == 1
+    assert report["ocr_fingerprint"]["failed_page_count"] == 0
+    assert len(report["ocr_fingerprint"]["result_set_sha256"]) == 64
+    # 无 corrections 文件时保持旧报告形状,也允许旧版报告继续 freshness 复用。
+    assert "corrections_fingerprint" not in report
 
 
 # ---- 9. CLI:必需参数缺失报错;给全参数产出报告文件 --------------------------
@@ -2192,12 +2699,25 @@ def test_cli_full_args_produces_report_file(tmp_path):
     assert os.path.exists(layout.source_audit_path)
     with open(layout.source_audit_path, encoding="utf-8") as f:
         report = json.load(f)
-    assert report["schema_version"] == 2
+    assert report["schema_version"] == 6
     assert report["stem"] == "Book"
     assert report["adoption_source"] == "dry_run"
     # CLI 不知道自己跑在哪种路由下(那是 Task 9 编排的状态),born_digital_mode
     # 必须诚实写 unknown,不得编造。
     assert report["born_digital_mode"] == "unknown"
+    rc2 = source_audit_main([
+        "--src", pdf_path,
+        "--out", str(out_dir),
+        "--work-dir", str(work_dir_root),
+        "--stem", "Book",
+    ])
+    assert rc2 == 0
+    with open(layout.source_audit_path, encoding="utf-8") as f:
+        resumed = json.load(f)
+    assert resumed["summary"]["audit_reuse"] == {
+        "reused_pages": 1,
+        "recomputed_pages": 0,
+    }
 
 
 def test_cli_rejects_dry_run_adoption_flag_it_no_longer_has(tmp_path):

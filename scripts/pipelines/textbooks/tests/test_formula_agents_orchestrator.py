@@ -2,6 +2,7 @@ import json
 import os
 import threading
 
+from scripts.pipelines.textbooks import derived_cache as dc
 from scripts.pipelines.textbooks.formula_agents.orchestrator import (
     DispatchState, chunk_candidates, dispatch_with_fallback, run_agents,
 )
@@ -337,6 +338,20 @@ def _run(layout, adapters, **kw):
     return report, rebuilt
 
 
+def test_run_agents_global_worker_cap_limits_parallel_batches(tmp_path):
+    layout = _layout(tmp_path)
+    candidates = _cands(6)
+    adapter = FakeAdapter(
+        "kimi", [_ok([candidate]) for candidate in candidates], delay=0.03)
+
+    _run(
+        layout, [adapter], collect_fn=lambda _: candidates,
+        batch_size=1, per_provider=6, max_workers=2)
+
+    assert adapter.calls == 6
+    assert adapter.peak_concurrency <= 2
+
+
 def test_apply_mode_writes_accepted_corrections_and_rebuilds(tmp_path):
     layout = _layout(tmp_path)
     ads = [FakeAdapter("kimi", [_ok(_cands(2), confidence=0.95)])]
@@ -346,6 +361,29 @@ def test_apply_mode_writes_accepted_corrections_and_rebuilds(tmp_path):
     assert report.mode == "apply" and report.applied == 2
     assert rebuilt["n"] == 1
     assert all(c["status"] == "accepted" for c in _corrections(layout))
+
+
+def test_deferred_publish_resume_rebuilds_payload_from_terminal_ledger(
+        tmp_path):
+    layout = _layout(tmp_path)
+    candidates = _cands(2)
+    first_adapter = FakeAdapter(
+        "kimi", [_ok(candidates, confidence=0.95)])
+
+    first, _ = _run(
+        layout, [first_adapter], collect_fn=lambda _: candidates,
+        defer_publish=True)
+    assert first.corrections_payload
+    assert not os.path.exists(layout.corrections_path)
+
+    second_adapter = FakeAdapter("kimi", [])
+    second, _ = _run(
+        layout, [second_adapter], collect_fn=lambda _: candidates,
+        defer_publish=True)
+
+    assert second_adapter.calls == 0
+    assert second.corrections_payload == first.corrections_payload
+    assert not os.path.exists(layout.corrections_path)
 
 
 def test_dry_run_never_calls_any_adapter(tmp_path):
@@ -433,6 +471,37 @@ def test_regression_rollback_also_reverts_corrections_when_file_was_absent(tmp_p
 
     assert report.rolled_back
     assert not os.path.exists(layout.corrections_path)   # 刚写的坏修正已随回滚清除
+
+
+def test_regression_rollback_restores_derived_cache_transaction(tmp_path):
+    layout = _layout(tmp_path)
+    cache_root = dc.derived_dir(layout.work_dir)
+    cache_root.mkdir(parents=True)
+    page_one = dc.page_cache_path(layout.work_dir, 1)
+    index = dc.document_index_path(layout.work_dir)
+    page_one.write_bytes(b"old-page")
+    index.write_bytes(b"old-index")
+    ads = [FakeAdapter("kimi", [_ok(_cands(2), confidence=0.95)])]
+    calls = {"n": 0}
+
+    def scan(md_path, out_path, **kw):
+        calls["n"] += 1
+        return {"errors": [{"error": "boom"}]} if calls["n"] >= 3 else {"errors": []}
+
+    def reassemble(lay, _pdf, _dpi):
+        with open(lay.md_path, "w", encoding="utf-8") as handle:
+            handle.write("重建后的 md\n")
+        page_one.write_bytes(b"new-page")
+        dc.page_cache_path(lay.work_dir, 2).write_bytes(b"new-page-2")
+        index.write_bytes(b"new-index")
+        return lay.md_path
+
+    report, _ = _run(layout, ads, scan_fn=scan, reassemble_fn=reassemble)
+
+    assert report.rolled_back
+    assert page_one.read_bytes() == b"old-page"
+    assert index.read_bytes() == b"old-index"
+    assert not dc.page_cache_path(layout.work_dir, 2).exists()
 
 
 def test_regression_rollback_restores_prior_corrections(tmp_path):

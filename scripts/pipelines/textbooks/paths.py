@@ -73,6 +73,10 @@ class DocLayout:
     def formula_repair_path(self) -> str:
         return os.path.join(self.doc_work_dir, f"{self.stem}_formula_repair.json")
 
+    @property
+    def quality_repair_dir(self) -> str:
+        return os.path.join(self.doc_work_dir, f"{self.stem}_quality_repair")
+
 
 def resolve_layout(stem: str, deliverables_root: str,
                    work_root: str | None = None) -> DocLayout:

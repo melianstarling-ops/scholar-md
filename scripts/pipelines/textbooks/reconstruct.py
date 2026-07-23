@@ -45,7 +45,7 @@ _KATEX_CMD_MAP = [
 ]
 _ENSUREMATH_RE = re.compile(r"\\ensuremath\s*\{")
 
-_PASSTHROUGH_UNORDERED_LABELS = {"footnote", "figure_title"}
+_PASSTHROUGH_UNORDERED_LABELS = {"footnote", "figure_title", "vision_footnote"}
 _KNOWN_NOISE_LABELS = {"header", "number", "header_image"}
 _LATEX_ENTITY_REPL = {
     "&#x27;": "'",
@@ -709,6 +709,32 @@ def _repair_math_in_text(s: str) -> str:
     return "".join(out)
 
 
+_INTEGRAL_LIMIT_MATRIX_RE = re.compile(
+    r"\\left\|\\begin\{matrix\}\s*"
+    r"(?P<upper>[A-Za-z0-9{}_^\\]+)\s*\\\\\s*"
+    r"\\displaystyle\s*\\int"
+    r"(?!\s*(?:\\limits|\\nolimits)?\s*[_^])\s*"
+    r"(?P<body>.+?)\s*\\\\\s*"
+    r"(?P<lower>[A-Za-z0-9{}_^\\]+)\s*"
+    r"\\end\{matrix\}\\right\|",
+    re.DOTALL,
+)
+
+
+def _repair_integral_limits_misread_as_matrix(s: str) -> str:
+    r"""把三行伪矩阵 ``上限 \\ \int integrand \\ 下限`` 还原为积分上下限。
+
+    只有中行以无上下标 ``\int`` 开头、上下行均是短数学 token 时才命中；
+    普通向量/矩阵及已有积分限保持不变。
+    """
+    def replace(match: re.Match) -> str:
+        return (r"\left|\int_{" + match.group("lower") + r"}^{"
+                + match.group("upper") + "} " + match.group("body").strip()
+                + r"\right|")
+
+    return _INTEGRAL_LIMIT_MATRIX_RE.sub(replace, s)
+
+
 def sanitize_latex(s: str) -> str:
     r"""引擎方言清洗:删冗余命令 + 合并非法相邻双脚本 + 链式 atop→substack + \cdotd 拆合。"""
     s = _decode_latex_entities(s)
@@ -717,6 +743,7 @@ def sanitize_latex(s: str) -> str:
     s = _repair_pseudo_bmatrix(s)
     s = _unwrap_malformed_integral_frac_runs(s)
     s = _repair_orphan_aprime_integral_limits(s)
+    s = _repair_integral_limits_misread_as_matrix(s)
     s = _fix_spacing_command_scripts(s)
     for pat, repl in _KATEX_SUB:
         s = pat.sub(repl, s)
@@ -1003,6 +1030,11 @@ def _render_unordered(blocks: list[dict], stem: str | None,
     输入 blocks 里的原始下标,用于稳定排序/页尾组顺序破 tie。"""
     extras: list[dict] = []
     warnings: list[dict] = []
+    ordered_text = re.sub(
+        r"\s+", " ", "\n".join(
+            str(block.get("block_content") or "")
+            for block in blocks if block.get("block_order") is not None)).strip()
+    emitted_vision_footnotes: set[str] = set()
     for seq, b in enumerate(blocks):
         if b.get("block_order") is not None:
             continue
@@ -1039,6 +1071,12 @@ def _render_unordered(blocks: list[dict], stem: str | None,
         elif label in _PASSTHROUGH_UNORDERED_LABELS:
             if not content:
                 continue
+            normalized = re.sub(r"\s+", " ", content).strip()
+            if label == "vision_footnote":
+                if normalized and (normalized in ordered_text
+                                   or normalized in emitted_vision_footnotes):
+                    continue
+                emitted_vision_footnotes.add(normalized)
             extras.append({"y0": y0, "seq": seq, "bids": [block_id],
                            "md": _sanitize_markdown_math_spans(restore_emphasis_dots(content))})
         elif label in _KNOWN_NOISE_LABELS:
