@@ -384,8 +384,8 @@ def _atomic_write_json(path: Path, value: Mapping[str, Any]) -> None:
             encoding="utf-8",
             newline="\n",
             dir=path.parent,
-            prefix=f"{path.name}.",
-            suffix=".tmp",
+            prefix=".tmp-",
+            suffix=".json",
             delete=False,
         ) as handle:
             temporary = handle.name

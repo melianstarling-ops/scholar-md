@@ -525,8 +525,7 @@ def _atomic_write_json(path: Path, payload: dict) -> None:
     try:
         with tempfile.NamedTemporaryFile(
             mode="w", encoding="utf-8", newline="\n",
-            dir=path.parent, prefix=f".{path.name}.",
-            suffix=".auto-repair.tmp", delete=False,
+            dir=path.parent, prefix=".tmp-", suffix=".json", delete=False,
         ) as handle:
             temporary = handle.name
             json.dump(payload, handle, ensure_ascii=False, indent=2)
@@ -675,20 +674,32 @@ def run_unified_auto_repair(
     else:
         before_md = str(baseline_result["md"])
     existing_corrections = load_corrections(layout.doc_work_dir)
-    formula_layout = layout
     if baseline_result is not None:
-        formula_layout = DocLayout(
-            stem=layout.stem,
-            deliverables_root=str(run_dir / "_formula_candidate_root"),
-            work_root=layout.work_root,
+        # The production work path already contains the full document stem.
+        # Nesting another full-stem deliverable below the per-run report path
+        # exceeds the traditional Windows MAX_PATH limit for ordinary books.
+        # Formula evidence remains in the real work root; only its unpublished
+        # Markdown input needs this short-lived, shallow delivery root.
+        with tempfile.TemporaryDirectory(
+                prefix="scholar_md_formula_",
+                ignore_cleanup_errors=True) as formula_root:
+            formula_layout = DocLayout(
+                stem=layout.stem,
+                deliverables_root=formula_root,
+                work_root=layout.work_root,
+            )
+            _write_candidate(Path(formula_layout.md_path), before_md)
+            formula = _run_formula_repair(
+                formula_layout, pdf_path, formula_mode, dpi,
+                agent_specs=formula_agent_specs, workers=workers,
+                defer_publish=True,
+            )
+    else:
+        formula = _run_formula_repair(
+            layout, pdf_path, formula_mode, dpi,
+            agent_specs=formula_agent_specs, workers=workers,
+            defer_publish=True,
         )
-        _write_candidate(Path(formula_layout.md_path), before_md)
-
-    formula = _run_formula_repair(
-        formula_layout, pdf_path, formula_mode, dpi,
-        agent_specs=formula_agent_specs, workers=workers,
-        defer_publish=True,
-    )
     agents = formula.get("agents") or {}
     payload = agents.get("corrections_payload")
     corrections_payload, proposed_corrections = _merge_corrections(

@@ -970,6 +970,14 @@ def test_sanitize_latex_unicode_warning_cleanup_is_idempotent():
     assert sanitize_latex(once) == once
 
 
+def test_sanitize_latex_repairs_dbi_tamil_i_confusable_from_emc_p447():
+    src = "NLimit=NModule~Limit+LOSSPath+GA~(dBி)~-SNR~(dB)"
+    expected = "NLimit=NModule~Limit+LOSSPath+GA~(dBi)~-SNR~(dB)"
+    assert sanitize_latex(src) == expected
+    assert sanitize_latex(expected) == expected
+    assert sanitize_latex("x_{ி}") == "x_{ி}"
+
+
 def test_wrap_cjk_in_text_wraps_circled_digit_and_geometric_shape():
     # ①-⓿(带圈数字)与 ■-◿(几何图形,含○)是 KaTeX unknownSymbol 警告的常见来源
     assert wrap_cjk_in_text("x^{①}") == r"x^{\text{①}}"

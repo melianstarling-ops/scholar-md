@@ -108,7 +108,7 @@ def _run(args: argparse.Namespace) -> int:
         datetime.now().strftime("%Y%m%dT%H%M%S")
         + f"-{uuid.uuid4().hex[:8]}"
     )
-    run_dir = Path(layout.doc_work_dir) / f"{args.stem}_quality_repair" / run_id
+    run_dir = Path(layout.quality_repair_dir) / run_id
     context = DetectorContext.from_paths(
         stem=args.stem, md_path=layout.md_path,
         work_dir=layout.work_dir, run_dir=run_dir,

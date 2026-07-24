@@ -75,7 +75,9 @@ class DocLayout:
 
     @property
     def quality_repair_dir(self) -> str:
-        return os.path.join(self.doc_work_dir, f"{self.stem}_quality_repair")
+        # ``doc_work_dir`` already names the document.  Repeating a long stem
+        # here pushes nested auto-repair snapshots past Windows MAX_PATH.
+        return os.path.join(self.doc_work_dir, "_quality_repair")
 
 
 def resolve_layout(stem: str, deliverables_root: str,

@@ -324,6 +324,29 @@ def test_novel_discovery_does_not_call_visual_dominant_page_text_collapse(tmp_pa
     assert detect_novel_signals(ctx) == []
 
 
+def test_novel_discovery_does_not_flag_sparse_front_matter_title_page(tmp_path):
+    ctx = _context(tmp_path)
+    normal = [{"block_id": 1, "block_label": "text", "block_order": 1,
+               "block_content": "normal prose " * 80}]
+    _write_result(ctx.work_dir, 2, normal)
+    _write_result(ctx.work_dir, 3, [
+        {"block_id": 0, "block_label": "paragraph_title", "block_order": 1,
+         "block_content": "万水 ANSYS 技术丛书"},
+        {"block_id": 1, "block_label": "doc_title", "block_order": 2,
+         "block_content": "电磁兼容原理分析与设计技术"},
+        {"block_id": 2, "block_label": "text", "block_order": 3,
+         "block_content": "林汉年 编著"},
+        {"block_id": 3, "block_label": "footer_image", "block_order": None,
+         "block_content": ""},
+    ])
+    _write_result(ctx.work_dir, 4, normal)
+
+    assert not [
+        finding for finding in detect_novel_signals(ctx)
+        if finding.kind == "novel_page_text_collapse"
+    ]
+
+
 def test_novel_discovery_flags_replacement_character_and_repeated_long_block(tmp_path):
     ctx = _context(tmp_path)
     repeated = "this OCR paragraph is unexpectedly repeated in a loop"

@@ -38,6 +38,8 @@ def test_process_side_paths():
         "/scratch", "Book", "Book_repair", "formula_candidates.jsonl")
     assert lay.formula_candidates_summary_path == os.path.join(
         "/scratch", "Book", "Book_repair", "formula_candidates_summary.json")
+    assert lay.quality_repair_dir == os.path.join(
+        "/scratch", "Book", "_quality_repair")
 
 
 def test_debug_html_is_process_side_not_deliverable():

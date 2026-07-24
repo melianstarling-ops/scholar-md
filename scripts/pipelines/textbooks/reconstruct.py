@@ -543,6 +543,16 @@ _KATEX_UNICODE_REPLACEMENTS = {
 }
 
 
+def _repair_unit_confusables(latex: str) -> str:
+    r"""Repair high-confidence OCR confusables inside standard unit tokens.
+
+    PaddleOCR-VL read the Latin ``i`` in ``dBi`` as the Tamil vowel sign
+    U+0BBF on EMC p447.  Restrict the substitution to that complete unit token;
+    a bare Tamil character elsewhere is not enough evidence for rewriting.
+    """
+    return latex.replace("dBி", "dBi")
+
+
 def _replace_katex_unicode(latex: str) -> str:
     r"""把 KaTeX 无字形但有确定语义等价物的 Unicode 改成受支持命令。"""
     for char, replacement in _KATEX_UNICODE_REPLACEMENTS.items():
@@ -760,6 +770,7 @@ def sanitize_latex(s: str) -> str:
     s = _downgrade_split_invisible_delimiters(s)
     s = _close_known_moment_row(s)
     s = _drop_unmatched_closing_braces(s)
+    s = _repair_unit_confusables(s)
     s = _replace_katex_unicode(s)
     s = _wrap_text_mode_commands(s)
     s = _repair_math_in_text(s)

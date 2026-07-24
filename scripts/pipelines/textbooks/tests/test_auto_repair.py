@@ -143,6 +143,91 @@ def test_quality_failure_keeps_formula_md_corrections_and_cache_unpublished(
     assert cache_marker.read_bytes() == b"old-cache"
 
 
+def test_baseline_formula_candidate_uses_short_temporary_delivery_root(
+        tmp_path, monkeypatch):
+    stem = "EMC_Principle_Analysis_and_Design_Lin_Hannian"
+    layout = resolve_layout(
+        stem, str(tmp_path / "out"), str(tmp_path / "work"))
+    Path(layout.work_dir).mkdir(parents=True)
+    Path(layout.corrections_path).write_text(
+        json.dumps({"stem": stem, "corrections": []}),
+        encoding="utf-8",
+    )
+    captured = {}
+
+    import scripts.pipelines.textbooks.convert as convert
+
+    def formula(candidate_layout, *_args, **_kwargs):
+        candidate = Path(candidate_layout.md_path)
+        captured["root"] = Path(candidate_layout.deliverables_root)
+        captured["candidate"] = candidate
+        assert candidate.read_text(encoding="utf-8") == "all pages\n"
+        return {
+            "mode": "agents-apply",
+            "formula_candidates": {"status": "ok", "count": 0},
+            "agents": {
+                "status": "ok",
+                "pending_ids": [],
+                "rejected": 0,
+                "circuit_broken": False,
+                "rolled_back": False,
+                "corrections_payload": {
+                    "stem": stem,
+                    "corrections": [],
+                },
+            },
+        }
+
+    monkeypatch.setattr(convert, "_run_formula_repair", formula)
+    monkeypatch.setattr(
+        ar,
+        "_quality_candidate",
+        lambda **_kwargs: ("all pages\n", [], "injected stop"),
+    )
+
+    result = ar.run_unified_auto_repair(
+        layout,
+        "source.pdf",
+        dpi=150,
+        formula_mode="agents-apply",
+        formula_agent_specs=[],
+        quality_agents=[],
+        discovery="signals",
+        learn="off",
+        timeout=30,
+        workers=1,
+        max_rounds=1,
+        baseline_result={
+            "md": "all pages\n",
+            "_page_cache_records": [{"page": 1}],
+        },
+    )
+
+    assert result["status"] == "SUSPECT"
+    assert "_formula_candidate_root" not in str(captured["root"])
+    assert captured["candidate"].name == f"{stem}.md"
+    assert not captured["root"].exists()
+
+
+def test_atomic_json_writers_use_short_temp_names_near_windows_limit(
+        tmp_path):
+    parent = tmp_path
+    filename = "staged_source_audit.json"
+    while len(str(parent / filename)) < 235:
+        parent /= "path-segment-123"
+    parent.mkdir(parents=True)
+
+    auto_target = parent / filename
+    cache_target = parent / "page_0001.json"
+    ar._atomic_write_json(auto_target, {"writer": "auto"})
+    ar.dc._atomic_write_json(cache_target, {"writer": "cache"})
+
+    assert json.loads(auto_target.read_text(encoding="utf-8")) == {
+        "writer": "auto"}
+    assert json.loads(cache_target.read_text(encoding="utf-8")) == {
+        "writer": "cache"}
+
+
 def test_formula_and_quality_same_page_conflict_never_publishes(
         tmp_path, monkeypatch):
     layout = _layout(tmp_path)

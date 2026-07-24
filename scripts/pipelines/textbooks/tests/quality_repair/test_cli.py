@@ -64,7 +64,7 @@ def test_cli_conflicting_document_lock_returns_one_without_artifacts(
     assert "document locked" in captured.err
     assert "convert-running" in captured.err
     assert hashlib.sha256(md.read_bytes()).hexdigest() == before
-    assert not (doc_work / "Demo_quality_repair").exists()
+    assert not (doc_work / "_quality_repair").exists()
 
 
 def test_cli_audit_uses_explicit_paths_and_never_requires_agent(tmp_path):
@@ -86,8 +86,8 @@ def test_cli_audit_uses_explicit_paths_and_never_requires_agent(tmp_path):
                "--max-rounds", "5"])
 
     assert rc == 0
-    assert (work_root / "Demo" / "Demo_quality_repair" / "fixed" / "summary.json").is_file()
-    assert not (work_root / "Demo" / "Demo_quality_repair"
+    assert (work_root / "Demo" / "_quality_repair" / "fixed" / "summary.json").is_file()
+    assert not (work_root / "Demo" / "_quality_repair"
                 / "fixed" / "round-01").exists()
 
 
@@ -138,7 +138,7 @@ def test_cli_propose_writes_patch_plan_without_changing_markdown(tmp_path):
                "--run-id", "proposal"])
 
     assert rc == 2
-    run = work_root / "Demo" / "Demo_quality_repair" / "proposal"
+    run = work_root / "Demo" / "_quality_repair" / "proposal"
     assert (run / "patch_plan.json").is_file()
     assert hashlib.sha256(md.read_bytes()).hexdigest() == before
 
